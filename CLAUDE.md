@@ -68,6 +68,16 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 8 MB PSRAM). Drop `--fast-epd` for real refresh timing. A raw 16 MB device dump runs as-is
 (`--flash images/device/flash-….bin`).
 
+## MCP server (preferred for agents)
+
+`.mcp.json` registers `tools/x4emu_mcp.py` (start Claude Code inside this directory, or
+`claude mcp add x4emu -- .venv/bin/python tools/x4emu_mcp.py`). Tools mirror the CLI: `emu_run`,
+`emu_wait_text`, `emu_wait_quiet`, `emu_tap`/`emu_press`/`emu_hold`/`emu_chord`/`emu_home`,
+`emu_screenshot` (image inline, optional diff), `emu_state`, `emu_console`, `emu_trace_tail`,
+`emu_battery`, `emu_light`, `emu_qmp`; `build_firmware`, `build_flash_image`, `build_sd_image`;
+`device_status`, `device_console`, `device_fetch_screenshots`, and the guarded
+`device_flash_crosspoint` / `device_restore_stock` (plan only unless `confirm=true`).
+
 ## CLI reference (`tools/x4emu --name NAME …`, default name dev0)
 
 | Command | Effect |

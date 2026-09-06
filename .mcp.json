@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "x4emu": {
+      "command": "/Users/mini/x4pro-emu/.venv/bin/python",
+      "args": ["/Users/mini/x4pro-emu/tools/x4emu_mcp.py"]
+    }
+  }
+}
