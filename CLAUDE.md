@@ -75,9 +75,10 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 | `stop` / `reset` / `status` | quit; system_reset; pid + run state (+ "deep sleep" when paused by the sleep model) |
 | `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2/i2c0 counters, buttons, touch, gt911, battery, rtc, ledc channels, sleep |
 | `log [--follow] [--since N] [--file uart0.log]` / `wait-text TEXT [--timeout S]` | console access; never blocks past the timeout |
-| `screenshot OUT.png [--diff OTHER.png]` | QMP screendump of the panel console (`device=epd`); `--diff` prints % pixels differing and exits 1 when they differ |
+| `screenshot OUT.png [--diff OTHER.png]` | QMP screendump of the panel console (`device=epd`); `--diff` prints % pixels differing and exits 1 when they differ; a 480x800 device BMP is un-rotated automatically |
 | `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |
 | `press left\|right\|power [--ms 120] [--wait S] [--quiet S]` / `hold BTN --ms 3000` | active-low buttons; `--wait` reports the refresh that follows, `--quiet` first waits for an idle panel; a power press while sleeping is extended to 1.5 s |
+| `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
 | `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms]` / `home [--ms]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad |
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
 | `mem read ADDR LEN` / `gdb` / `qmp JSON` | human-monitor `xp`; launches `xtensa-esp-elf-gdb` on :1234 (run with `--gdb`); raw QMP |

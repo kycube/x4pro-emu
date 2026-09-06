@@ -229,10 +229,14 @@ def cmd_screenshot(a):
     if a.diff:
         from PIL import Image, ImageChops
         im1 = Image.open(out).convert('L'); im2 = Image.open(a.diff).convert('L')
+        if im2.size == (im1.size[1], im1.size[0]):
+            # CrossPoint's on-device BMP is the frame rotated 90 deg counter-clockwise (portrait);
+            # rotate it back to the panel's landscape frame
+            im2 = im2.rotate(90, expand=True)
         if im2.size != im1.size:
             im2 = im2.resize(im1.size)
         diff = ImageChops.difference(im1, im2).point(lambda v: 255 if v > 64 else 0)
-        n = sum(1 for v in diff.getdata() if v)
+        n = sum(1 for v in list(diff.getdata()) if v)
         print(f'{100.0*n/(im1.size[0]*im1.size[1]):.3f}% of pixels differ ({n})')
         return 1 if n else 0
 
@@ -296,6 +300,20 @@ def cmd_press(a):
 def to_gt911(x, y):
     """Landscape panel pixel -> GT911 raw frame (inverse of pollGt911: swapXY, flipY)."""
     return (PANEL_H - 1 - y), x
+
+def cmd_chord(a):
+    """Press several buttons at once (e.g. power right = CrossPoint's screenshot chord)."""
+    q = connect(a.name)
+    if getattr(a, 'quiet', 0):
+        wait_quiet(q, a.quiet, 30)
+    n0 = refresh_count(q)
+    for b in a.buttons:
+        q.qom_set(INPUT, f'btn-{b}', True)
+    time.sleep(a.ms / 1000.0)
+    for b in a.buttons:
+        q.qom_set(INPUT, f'btn-{b}', False)
+    print(f'chord {"+".join(a.buttons)} for {a.ms} ms')
+    after_input(q, n0, a)
 
 def cmd_tap(a):
     q = connect(a.name)
@@ -394,6 +412,8 @@ def main():
         p = sp.add_parser(nm); p.add_argument('button', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=dflt)
         p.add_argument('--wait', type=float, default=0, help='wait up to S seconds for a refresh to start after the input')
         p.add_argument('--quiet', type=float, default=0, help='first wait until the panel has been idle for S seconds'); p.set_defaults(fn=cmd_press)
+    p = sp.add_parser('chord'); p.add_argument('buttons', nargs='+', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=300)
+    p.add_argument('--wait', type=float, default=0); p.add_argument('--quiet', type=float, default=0); p.set_defaults(fn=cmd_chord)
     p = sp.add_parser('tap'); p.add_argument('x', type=int); p.add_argument('y', type=int); p.add_argument('--ms', type=int, default=120)
     p.add_argument('--wait', type=float, default=0); p.add_argument('--quiet', type=float, default=0); p.set_defaults(fn=cmd_tap)
     p = sp.add_parser('wait-quiet'); p.add_argument('--seconds', type=float, default=2); p.add_argument('--timeout', type=float, default=60); p.set_defaults(fn=cmd_wait_quiet)

@@ -367,3 +367,13 @@ The device's sleep-entry lines were not captured: the USB Serial/JTAG drops the 
 sleeps, and the last lines before it never reach the host. To see them use `-DENABLE_SERIAL_LOG`
 on UART0 or read them in the emulator (`Power button held 405ms, sleeping` → Sleep activity →
 `Entering deep sleep`).
+
+## 2026-09-06 — Oracle check: CrossPoint's own screenshot vs the panel model
+
+- `x4emu chord power right` fires CrossPoint's screenshot chord in the emulator; the firmware
+  writes `/screenshots/screenshot-<ms>.bmp` (1-bit, 480x800, its frame rotated) to the SD image.
+  Un-rotated (`PIL rotate(90)`; the source comment's "counter-clockwise" is the other way round
+  in PIL's convention), it matches the QMP screenshot of the panel with **0 pixels different**:
+  the UC8279 plane-to-glass mapping (gate offset 120, bit order, row order) shows exactly what the
+  firmware drew. `tests/test_screenshot_chord.py` keeps it that way; `x4emu screenshot --diff`
+  accepts a device BMP directly.
