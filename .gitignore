@@ -1,0 +1,11 @@
+images/
+.x4emu/
+.venv/
+__pycache__/
+*.pyc
+build/
+models/build/
+.pytest_cache/
+*.log
+!docs/device/*.log
+qemu/

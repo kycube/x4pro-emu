@@ -1,0 +1,109 @@
+[   0.112] <hard reset via RTS>
+[   0.318] ESP-ROM:esp32s3-20210327
+[   0.318] Build:Mar 27 2021
+[   0.318] rst:0x15 (USB_UART_CHIP_RESET),boot:0xb (SPI_FAST_FLASH_BOOT)
+[   0.318] Saved PC:0x40380876
+[   0.318] SPIWP:0xee
+[   0.318] mode:DIO, clock div:1
+[   0.318] load:0x3fce2820,len:0x53c
+[   0.319] load:0x403c8700,len:0xc2c
+[   0.319] load:0x403cb700,len:0x2b2c
+[   0.319] entry 0x403c8870
+[   0.935] I (890) octal_psram: vendor id    : 0x0d (AP)
+[   0.936] I (891) octal_psram: dev id       : 0x02 (generation 3)
+[   0.936] I (891) octal_psram: density      : 0x03 (64 Mbit)
+[   0.936] I (893) octal_psram: good-die     : 0x01 (Pass)
+[   0.936] I (897) octal_psram: Latency      : 0x01 (Fixed)
+[   0.936] I (901) octal_psram: VCC          : 0x01 (3V)
+[   0.936] I (905) octal_psram: SRF          : 0x01 (Fast Refresh)
+[   0.936] I (910) octal_psram: BurstType    : 0x01 (Hybrid Wrap)
+[   0.936] I (915) octal_psram: BurstLen     : 0x01 (32 Byte)
+[   0.936] I (920) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)
+[   0.936] I (925) octal_psram: DriveStrength: 0x00 (1/1)
+[   0.936] I (929) MSPI Timing: Enter psram timing tuning
+[   1.137] I (934) esp_psram: Found 8MB PSRAM device
+[   1.137] I (937) esp_psram: Speed: 80MHz
+[   1.137] I (940) cpu_start: Multicore app
+[   1.137] I (1131) cpu_start: GPIO 44 and 43 are used as console UART I/O pins
+[   1.137] I (1132) cpu_start: Pro cpu start user code
+[   1.137] I (1132) cpu_start: cpu freq: 240000000 Hz
+[   1.347] I (1134) app_init: Application information:
+[   1.347] I (1138) app_init: Project name:     xteink_app
+[   1.347] I (1142) app_init: App version:      7.2.4
+[   1.347] I (1146) app_init: Compile time:     Aug 14 2026 19:25:05
+[   1.347] I (1151) app_init: ELF file SHA256:  5e6f90d4ab9035c1...
+[   1.347] I (1156) app_init: ESP-IDF:          v6.0.1
+[   1.347] I (1160) efuse_init: Min chip rev:     v0.0
+[   1.347] I (1164) efuse_init: Max chip rev:     v0.99 
+[   1.347] I (1168) efuse_init: Chip rev:         v0.2
+[   1.347] I (1172) heap_init: Initializing. RAM available for dynamic allocation:
+[   1.347] I (1178) heap_init: At 3FCBED30 len 0002A9E0 (170 KiB): RAM
+[   1.347] I (1183) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+[   1.347] I (1189) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+[   1.347] I (1194) heap_init: At 600FE060 len 00001F78 (7 KiB): RTCRAM
+[   1.347] I (1199) esp_psram: Adding pool of 8047K of PSRAM memory to heap allocator
+[   1.347] I (1206) spi_flash: detected chip: generic
+[   1.347] I (1210) spi_flash: flash io: qio
+[   1.347] I (1224) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[   1.347] I (1225) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[   1.347] I (1226) esp_core_dump_flash: Init core dump to flash
+[   1.347] I (1231) esp_core_dump_flash: Found partition 'coredump' @ fe4000 114688 bytes
+[   1.347] I (1247) main_task: Started on CPU0
+[   1.347] I (1250) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+[   1.347] I (1258) main_task: Calling app_main()
+[   1.347] I (1273) boot-preflight: source=6 validation=2 gate=0 configured=1000ms effective=600ms hold=0ms decision=0 reason=9 auth=3
+[   1.347] I (1277) Memory: init: internal_total=270459 soft=162275(60%) hard=202844(75%) reserved=67615
+[   1.347] I (1281) MemArena: arenaInit ok id=0 bytes=16384
+[   1.559] I (1421) Memory: acquireStaticTaskStack: slot=PowerMonitor owner=pwr_monitor stack=4096 B
+[   1.559] I (1467) Memory: registerCache: region 4 sink GlyphCache prio=50 (slot=1/4)
+[   1.770] W (1714) SD_HOST: input line delay not supported, fallback to 0 delay
+[   1.770] I (1734) Memory: acquireStaticTaskStack: slot=Critical owner=xteink_critical stack=8192 B
+[   1.979] I (1803) Memory: acquireStaticTaskStack: slot=Nvs owner=xteink_nvs stack=4096 B
+[   1.979] I (1910) main_task: Returned from app_main()
+[  13.619] I (13423) Memory: acquireStaticTaskStack: slot=TransientLarge owner=radio_wifi stack=16384 B
+[  13.619] I (13424) pp: pp rom version: e7ae62f
+[  13.619] I (13425) net80211: net80211 rom version: e7ae62f
+[  13.619] I (13429) wifi:wifi driver task: 3fce7608, prio:23, stack:6656, core=0
+[  13.619] I (13437) wifi:wifi firmware version: b37c951
+[  13.619] I (13438) wifi:wifi certification version: v7.0
+[  13.619] I (13442) wifi:config NVS flash: enabled
+[  13.619] I (13446) wifi:config nano formatting: disabled
+[  13.619] I (13450) wifi:Init data frame dynamic rx buffer num: 32
+[  13.619] I (13455) wifi:Init static rx mgmt buffer num: 5
+[  13.619] I (13460) wifi:Init management short buffer num: 32
+[  13.619] I (13464) wifi:Init static tx buffer num: 6
+[  13.619] I (13469) wifi:Init tx cache buffer num: 32
+[  13.619] I (13472) wifi:Init static tx FG buffer num: 2
+[  13.619] I (13476) wifi:Init static rx buffer size: 1600
+[  13.619] I (13481) wifi:Init static rx buffer num: 6
+[  13.619] I (13484) wifi:Init dynamic rx buffer num: 32
+[  13.619] I (13489) wifi_init: rx ba win: 12
+[  13.619] I (13492) wifi_init: accept mbox: 6
+[  13.619] I (13495) wifi_init: tcpip mbox: 32
+[  13.619] I (13498) wifi_init: udp mbox: 6
+[  13.619] I (13501) wifi_init: tcp mbox: 25
+[  13.619] I (13504) wifi_init: tcp tx win: 32768
+[  13.619] I (13507) wifi_init: tcp rx win: 32768
+[  13.619] I (13511) wifi_init: tcp mss: 1440
+[  13.619] I (13514) wifi_init: WiFi/LWIP prefer SPIRAM
+[  13.619] I (13518) wifi_init: WiFi IRAM OP enabled
+[  13.619] I (13522) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10
+[  13.619] I (13566) wifi:mode : sta (98:c3:77:be:ea:30)
+[  13.619] I (13567) wifi:enable tsf
+[  13.619] I (13569) Memory: staticStackHwm slot=TransientLarge owner=radio_wifi via=explicit capacity=16384 used=2549 free_min=13835 used_pct=15 slot_peak=2549 peak_owner=radio_wifi
+[  16.111] W (15988) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2
+[  18.605] I (18464) wifi:new:<11,0>, old:<1,0>, ap:<255,255>, sta:<11,0>, prof:1, snd_ch_cfg:0x0
+[  18.605] I (18465) wifi:state: init -> auth (0xb0)
+[  18.605] I (18471) wifi:state: auth -> assoc (0x0)
+[  18.605] I (18477) wifi:state: assoc -> run (0x10)
+[  18.605] I (18498) wifi:connected with <SSID redacted>, aid = 10, channel 11, BW20, bssid = <BSSID redacted>
+[  18.605] I (18498) wifi:security: WPA2-PSK, phy: bgn, rssi: -42, cipher(pairwise:0x3, group:0x3), pmf:0
+[  18.605] I (18504) wifi:pm start, type: 1
+[  18.605] 
+[  18.605] I (18507) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us
+[  18.605] I (18515) wifi:set rx beacon pti, rx_bcn_pti: 14, bcn_timeout: 25000, mt_pti: 14, mt_time: 10000
+[  18.605] I (18553) wifi:<ba-add>idx:0 (ifx:0, <BSSID redacted>), tid:0, ssn:0, winSize:64
+[  18.605] I (18597) wifi:dp: 2, bi: 102400, li: 4, scale listen interval from 307200 us to 409600 us
+[  18.605] I (18598) wifi:AP's beacon interval = 102400 us, DTIM period = 2
+[  19.642] I (19608) esp_netif_handlers: sta ip: <ip redacted>, mask: 255.255.252.0, gw: <ip redacted>
+[  19.643] I (19611) mdns_mem: mDNS task will be created from internal RAM
