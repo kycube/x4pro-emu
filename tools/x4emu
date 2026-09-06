@@ -43,7 +43,7 @@ class QMP:
         line, self.buf = self.buf.split(b'\n', 1)
         return json.loads(line)
 
-    def cmd(self, name, **args):
+    def cmd(self, name, /, **args):   # positional-only: QMP arguments may themselves be called "name"
         msg = {'execute': name}
         if args:
             msg['arguments'] = args

@@ -1,7 +1,7 @@
 From 32f012f1053a7def066fbc3b52c07bb8bf8a6b82 Mon Sep 17 00:00:00 2001
 From: x4pro-emu <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 15:26:38 -0500
-Subject: [PATCH 4/5] xteink-x4pro: I2C0 + GT911/PCF8563/CW2017, LEDC,
+Subject: [PATCH 4/9] xteink-x4pro: I2C0 + GT911/PCF8563/CW2017, LEDC,
  deep-sleep overlay, touch/battery QOM
 
 - hw/i2c/esp32s3_i2c.c: S3 I2C master (FIFO mode, COMD list) on an I2CBus, trace-i2c.

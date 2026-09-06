@@ -1,7 +1,7 @@
 From 590e8136b1fab3fe5602377dec4c80567e82550b Mon Sep 17 00:00:00 2001
 From: x4pro-emu <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 14:51:53 -0500
-Subject: [PATCH 2/5] xteink-x4pro: GPIO block, SPI2 master, e-paper panel
+Subject: [PATCH 2/9] xteink-x4pro: GPIO block, SPI2 master, e-paper panel
  device, board state
 
 - hw/gpio/esp32s3_gpio_full.c: full GPIO register block with per-pin idle levels,

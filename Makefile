@@ -4,7 +4,7 @@ QEMU    := qemu/build/qemu-system-xtensa
 NPROC   := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 QEMU_REF ?= febae182e132e4055529be423a818225ebddaa3a
 
-.PHONY: setup build test qemu firmware models clean-run run help
+.PHONY: setup build test qemu firmware models clean-run run help rom-symbols
 
 help:
 	@echo "make setup   - venv, clone qemu (esp-develop @ $(QEMU_REF)) + apply patches, clone firmware"
@@ -63,3 +63,12 @@ run: firmware
 
 clean-run:
 	rm -rf .x4emu
+
+# ROM symbol table for reading stock-firmware PCs (images/ is gitignored): esp-rom-elfs 20241011.
+ROM_NM := images/rom/esp32s3_rev0_rom.nm
+rom-symbols: $(ROM_NM)
+$(ROM_NM):
+	mkdir -p images/rom && cd images/rom && \
+	  curl -sSL -o esp-rom-elfs-20241011.tar.gz https://github.com/espressif/esp-rom-elfs/releases/download/20241011/esp-rom-elfs-20241011.tar.gz && \
+	  tar -xzf esp-rom-elfs-20241011.tar.gz esp32s3_rev0_rom.elf && \
+	  $$(ls $$HOME/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-nm) -n esp32s3_rev0_rom.elf > esp32s3_rev0_rom.nm

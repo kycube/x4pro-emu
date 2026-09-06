@@ -1,0 +1,63 @@
+From 0bd39a18b6e2da334f167e9ba073c03eb764e16b Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 18:22:48 -0500
+Subject: [PATCH 9/9] esp32s3.spi: count dummy cycles at the read mode's line
+ width
+
+USR_DUMMY_CYCLELEN holds cycles minus one, and in QIO/DIO modes the address
+and dummy phases are clocked on four/two lines. The model converted the raw
+field to bytes as if single-line, so ESP-IDF's 0xEB quad read (24-bit address,
+6 dummy cycles, FREAD_QIO) sent one dummy byte where the m25p80 ISSI model
+expects three: every quad read came back two bytes short, shifted by two in
+the guest buffer. NVS then judged its pages corrupt on every boot, erased and
+re-provisioned them, and rejected each entry it had just written (CRC
+mismatch on read-back). Octal PSRAM transactions keep their 3 dummy bytes.
+
+With this the stock Xteink X4 Pro firmware (IDF 6.0.1) keeps its NVS intact,
+skips its first-boot screens and boots to its home screen.
+---
+ hw/ssi/esp32s3_spi.c | 28 ++++++++++++++++------------
+ 1 file changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/hw/ssi/esp32s3_spi.c b/hw/ssi/esp32s3_spi.c
+index 90250e7..87ce863 100644
+--- a/hw/ssi/esp32s3_spi.c
++++ b/hw/ssi/esp32s3_spi.c
+@@ -212,18 +212,22 @@ static inline void esp32s3_spi_get_addr(ESP32S3SpiState *s, uint32_t* addr, uint
+ 
+ static inline void esp32s3_spi_get_dummy(ESP32S3SpiState *s, uint32_t* len)
+ {
+-    const uint32_t dummy_count = FIELD_EX32(s->mem_user1, SPI_MEM_USER1, USR_DUMMY_CYCLELEN);
+-
+-    /* Dummy cycles are interpreted as bytes by the emulated SPI Flash. As such, we shall convert
+-     * our dummy cycles count in bytes, rounding it up. For example:
+-     * 0 cycles = 0 byte
+-     * 1 cycle = 1 byte
+-     * ...
+-     * 8 cycles = 1 byte
+-     * 9 cycles = 2 bytes
+-     * etc..
+-     */
+-    *len = (dummy_count + 7) / 8;
++    /* USR_DUMMY_CYCLELEN holds the number of dummy cycles minus one. */
++    const uint32_t dummy_cycles = FIELD_EX32(s->mem_user1, SPI_MEM_USER1, USR_DUMMY_CYCLELEN) + 1;
++
++    /* Dummy cycles are interpreted as bytes by the emulated SPI Flash, which counts the bits
++     * clocked on all the lines in use: in QIO mode (FREAD_QIO) the address and dummy phases
++     * use four lines, in DIO mode (FREAD_DIO) two, otherwise one (the QUAD/DUAL output modes
++     * only widen the data phase). Convert cycles to bytes accordingly, rounding up: for the
++     * 6-cycle QIO dummy phase of ESP-IDF's 0xEB read that is 24 bits = 3 bytes, which is what
++     * the m25p80 model expects; a single-line 8-cycle phase stays 1 byte. */
++    uint32_t width = 1;
++    if (FIELD_EX32(s->mem_ctrl, SPI_MEM_CTRL, FREAD_QIO)) {
++        width = 4;
++    } else if (FIELD_EX32(s->mem_ctrl, SPI_MEM_CTRL, FREAD_DIO)) {
++        width = 2;
++    }
++    *len = (dummy_cycles * width + 7) / 8;
+ }
+ 
+ static void esp32s3_spi_begin_transaction(ESP32S3SpiState *s)
+-- 
+2.50.1 (Apple Git-155)
+

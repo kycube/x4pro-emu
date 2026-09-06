@@ -8,8 +8,8 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 ## 1. Where things stand (2026-09-06)
 
 - Repo: `/Users/mini/x4pro-emu` (symlink at `/Users/mini/xteink x4/x4pro-emu`; paths with spaces
-  break QEMU/ESP-IDF). 12 commits. `make test` = core unit tests + fixture replay + 12 pytest
-  end-to-end cases, all green. `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182
+  break QEMU/ESP-IDF). `make test` = core unit tests + fixture replay + pytest end-to-end cases
+  (12 CrossPoint + 1 stock), all green. `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182
   with branch `x4pro`; **the source of truth for our QEMU changes is `qemu-patches/`** (export with
   `cd qemu && git format-patch -o ../qemu-patches febae182..x4pro` after every QEMU commit).
 - Machine `xteink-x4pro` = Espressif's `esp32s3` machine + overlays (higher MemoryRegion priority,
@@ -21,9 +21,10 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 - CrossPoint 1.6.0: boots to Home, touch, reader, battery, sleep/wake, all verified against the real
   device: probe answer, 38-command panel stream, BUSY timings, wake log, and the home screenshot
   (0 pixels different). Oracles live in `docs/device/`, `models/fixtures/`, `tests/golden/`.
-- Stock `xteink_app` 7.2.4 (ESP-IDF **6.0.1**): boots to `app_main`, passes its boot-preflight after a
-  power-button wake, initialises tasks/SD host, reads GT911 ID+config, RTC, polls CW2017, probes the
-  panel, then idles forever. See §3.
+- Stock `xteink_app` 7.2.4 (ESP-IDF **6.0.1**): with `user_config/net_en=0` it boots to its **home
+  screen** ("Bookshelf", clock, battery), paints through IDF's `spi_master` + GDMA, lights the warm
+  frontlight channel, takes touch (INT-driven GT911) and keeps polling the gauge. With WiFi enabled
+  the radio task spins from 14 s on and starves the UI. See §3.
 - Device: ESP32-S3 rev v0.2, 8 MB octal PSRAM, **UC8279** panel (LUT_VER 0x68), 15.7 GB card.
   app0 = CrossPoint (EpdBus-trace build), app1 = stock 7.2.4 copy, bootloader/table/otadata untouched,
   verified double backup in `images/device/flash-2026-09-06-{a,b}.bin`. The owner is at the desk and
@@ -47,97 +48,66 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 
 ## 3. Goal A — stock firmware, fully working
 
-### 3.1 What the stock app does in the emulator today
+### 3.1 What the stock app does in the emulator today (2026-09-06, after patches 0006..0009)
 
-`x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img --trace-i2c f --trace-epd g`
-(`images/stock.bin` = the raw 16 MB dump; regenerate with
-`tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin`):
+`tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin`,
+`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0`, then
+`x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img --trace-epd f --trace-i2c g`:
 
-1. ROM → IDF 6.0.1 bootloader → octal PSRAM → `cpu_start: Multicore app` → (cache-occupy shim) →
-   `app_main`.
-2. `boot-preflight: source=1 … hold=0ms decision=2 reason=3` → **rejects a plain power-on** and deep
-   sleeps (`wake_on=next_press`). The stock wants the power button held ~600 ms to boot.
-   `x4emu press power` (auto-extended 1.5 s hold) wakes it: `rst:0x5 (DSLEEP)`,
-   `boot-preflight: source=2 … hold=602ms decision=0 reason=11`, and it proceeds. (Real device on a
-   USB reset: `source=6 … decision=0 reason=9 auth=3`.)
-3. Memory init, tasks (`PowerMonitor`, `xteink_critical`, `xteink_nvs`), `SD_HOST` init, GT911
-   0x8140/0x8144/0x8047… reads, RTC time read, CW2017 VCELL/SOC polled every few seconds, panel RST
-   pulsed three times, VER read through SPI2 half-duplex (answered `00 0F 68 00 00`), then
-   `main_task: Returned from app_main()` and **both CPUs idle**. No panel init, no WiFi (device
-   starts WiFi at 13 s). Registers it touched that nothing models (from qemu.log):
+1. ROM → IDF 6.0.1 bootloader → octal PSRAM → `app_main`. `boot-preflight` rejects a plain power-on
+   (`decision=2 reason=3`) and deep-sleeps; `x4emu press power` (1.5 s hold) wakes it
+   (`source=2 hold=602ms decision=0 reason=11`). The real device on a USB reset: `source=6 … auth=3`.
+2. NVS loads intact (0 page programs at boot), the card mounts (CMD0…ACMD41, CMD13+CMD17 reads),
+   GT911 ID/config read, RTC read, CW2017 polled every 3 s.
+3. Panel: three RST pulses, VER read (`00 0F 68 00 00`) through SPI2, then the UC8279 init and the
+   home paint through `spi_master` with GDMA (sequence in `docs/hardware.md`). Home at ~5 s after the
+   wake; `refresh_count` 3; warm frontlight on GPIO9 at ~25 %.
+4. Touch: a tap on the menu icon (`x4emu tap 88 38`) repaints; the stock reads the GT911 on its
+   INT line (`state.gpio_irqs`, `gt911.frames`).
+5. With `net_en=1`: at 14 s `wifi_init` logs appear exactly as on the device, then the `wifi` task
+   (prio 23, core 0) spins in ROM `rom_pkdet_vol_start+0x2e` (called from `rom_get_sar2_vol`) polling
+   `0x6000E050` bits 26:24 for the value 7 — the analog-master I2C block (RTCCNTL+0x6050 in ROM
+   naming; SAR2 samples at `0x6000E080..9C`), which the SoC's silent catch-all answers with 0. Core 0
+   starves: no more gauge polls, no repaint. That is the only known blocker left in the stock.
 
-   | Address | Register | Count |
-   |---|---|---|
-   | 0x60008904 | `SENS_SAR_PERI_CLK_GATE_CONF_REG` | 36 r/w |
-   | 0x6000880C | `SENS_SAR_MEAS1_CTRL2_REG` (bit 17 MEAS1_START_SAR, bit 16 MEAS1_DONE_SAR, bits 0..15 MEAS1_DATA_SAR) | 8 r/w |
-   | 0x60008810 | `SENS_SAR_MEAS1_MUX_REG` | 4 r/w |
-   | 0x60040000 / 04 | `APB_SARADC_CTRL_REG` / `CTRL2_REG` | 14 / 8 |
-   | 0x60040018 / 28 | `APB_SARADC_SAR1_PATT_TAB1_REG` / `SAR2_PATT_TAB1_REG` | 6 / 6 |
-   | 0x60040070 | `APB_SARADC_APB_ADC_CLKM_CONF_REG` | 16 |
-   | 0x60008490 / BC / C4 | `RTC_IO_TOUCH_PAD3_REG` (GPIO3) / `TOUCH_PAD14_REG` (GPIO14) / `XTAL_32N_PAD_REG` | 8 / 5 / 4 |
-
-   Headers: `docs/device/idf-headers/{sens_reg.h,apb_saradc_reg.h,rtc_io_reg.h}` (fetch the
-   `release/v6.0` versions of anything else you need; the stock is IDF 6.0.1, CrossPoint is 5.5.5).
+`tests/test_stock.py` boots a scratch copy of the dump with `net_en=0` and checks all of 1–4
+against `tests/golden/stock-home.png` (status bar masked).
 
 ### 3.2 Attack plan (in order)
 
-1. **SAR ADC model** (`hw/misc/esp32s3_saradc.c`, overlay at SENS 0x60008800/0x400 and
-   APB_SARADC 0x60040000/0x1000 — remove them from the iolog list in `xteink_x4pro.c`). Minimum:
-   oneshot via SENS: when `MEAS1_START_SAR` is written, set `MEAS1_DONE_SAR` and put a value in
-   `MEAS1_DATA_SAR` (12-bit; expose a QOM property `adc-mv` or per-channel values on the board
-   object); ADC2 (`MEAS2_*`) the same; `APB_SARADC_INT_RAW.ADC1_DONE` if the continuous path is
-   used. The X4 Pro profile says `batteryAdc` is unassigned, so this is probably the stock's
-   vestigial ladder or a VBUS sense; return mid-scale and see what changes. Re-run §3.1; if the app
-   still idles, go to step 2.
-2. **Find the blocked task with gdb**: `x4emu --name stock run … --gdb` then `x4emu --name stock gdb`
-   (xtensa-esp-elf-gdb 17.1 from `~/.platformio/packages/tool-xtensa-esp-elf-gdb/bin/`). No ELF for
-   the stock app exists, but: ROM symbols come from Espressif's `esp-rom-elfs` release
-   (`esp32s3_rev0_rom.elf`, `xtensa-esp-elf-nm -n`; the `.rom.ld` files only cover exported APIs),
-   the support doc lists stock IROM addresses (`writeCommand 0x4201a2d4`, `init 0x4201a568`, …,
-   `mountSD`, `Cw2017PowerHal`), and the FreeRTOS task list is walkable from `pxCurrentTCB`/
-   `pxReadyTasksLists`. Alternative without gdb: log every peripheral read that returns 0 in a loop
-   (the `iolog` overlays already do this) and look at the last ~200 qemu.log lines when it goes idle.
-3. **RTC IO pads**: stock writes `RTC_IO_TOUCH_PAD3/14` and `XTAL_32N` (hold/pull config for deep
-   sleep). A stored-value overlay (like the cache shim) removes them from the unknowns.
-4. **Light sleep / esp_pm**: IDF 6 apps often enable automatic light sleep; the sleep overlay returns
-   at once from light sleep (`x4pro_sleep.c`, `light_sleeps` counter in `state`). If the stock spends
-   its time there, wall-clock stops advancing for it; make light sleep advance the virtual clock by the
-   requested timer wake (`RTC_CNTL_SLP_TIMER0/1`, `WAKEUP_ENA` timer bit) instead of returning immediately.
-5. **Stock panel driver**: once it initialises the panel, compare its command stream
-   (`--trace-epd`) with the support doc's recovered sequences (`INIT 0x4201a568`, FULL 0xF7, FAST
-   0xFC/0xC7, the UC8279 `xtfAa` / `prebw_mid` LUT sets, `UC8279_gray_aa`, `UC8279_gray_full`,
-   `UC8279_aa_prebw_mid`). Add any unknown opcode to `models/epd_core.c` (the core counts
-   `epd_unknown_cmds` and remembers the last one). First-pixel acceptance: a stock screen in
-   `tests/golden/stock-*.png` reproduced from a device screenshot when the stock has one, else
-   compared against a photo the owner takes.
-6. **Stock input**: its `GT911Driver` may rely on the INT line (GPIO10) rather than polling; the
-   model drives INT low while a frame is pending and re-frames every 10 ms while a finger is down
-   (`x4pro_i2c_devs.c`). Verify with `x4emu tap` on stock screens; check `state.gt911.frames/clears`.
-7. **Frontlight ("backlight")**: stock drives LEDC channels 4 (GPIO8 cool) and 5 (GPIO9 warm) at
-   25 kHz, 10-bit (support doc), NVS `user_config/lightBri=100`, `lightCT=100`. `x4emu light -v`
-   already maps channels to pins through the GPIO matrix. World-class: render the light as a tint
-   overlay in `screenshot --light` and expose it in `state`.
-8. **NVS**: build the stock image on top of the dump so `hw_calib/screenType=2`, `user_config` and
-   the phy calibration blobs are present (`mkflash.py --base images/device/flash-…-a.bin --raw …`
-   or just the raw dump), but for a shareable image write a tool that blanks `sta_ssid/sta_pwd/
-   wifi_creds` (NVS page/entry format is decoded in `docs/device/partitions.md`; an NVS
-   editor lives in ESP-IDF `components/nvs_flash/nvs_partition_tool`). Consider setting
-   `user_config/net_en=0` so the stock does not start WiFi in the emulator.
-9. **WiFi/BLE**: no radio model exists and none is planned; make sure the stock fails fast rather
-   than hanging (watch for accesses at the WiFi MAC/BB/RF blocks 0x60033000/0x60035000/0x6001C000
-   in qemu.log; add `iolog` overlays there first).
-10. **USB mass storage (File Transfer)**: the ESP32-S3 USB OTG is a Synopsys DWC2 core at 0x60080000.
-    QEMU has `hw/usb/hcd-dwc2.c` (host mode, Raspberry Pi) but no DWC2 *device* mode. Research
-    item, large: implement DWC2 device mode enough for TinyUSB CDC+MSC and back it with a QEMU
-    usb-storage/host-side viewer, or accept "not emulated" and document. The stock and CrossPoint
-    both use it only from their File Transfer screens.
-11. Add `x4emu run --stock` (or `--boot-hold-power MS`): drive GPIO3 low for the first N ms so the
-    stock's preflight accepts a cold boot without the sleep/wake detour (input device property,
-    applied before the first reset).
+1. **Analog-master I2C block model** (`I2C_ANA_MST`, 0x6000E000/0x1000): an overlay like the cache
+   shim. Minimum: `+0x50` reads back with bits 26:24 = 7 (the ROM's "done" state; bit 1 is its
+   start bit), `+0x80..0x9C` (8 SAR2 samples, 13-bit) return mid-scale, and the ROM
+   `rom_i2c_readReg/writeReg` command registers (find them with an `iolog` overlay first: the ROM's
+   `rom_i2c_writeReg_Mask` is at 0x400358d8) answer "not busy". Re-run with `net_en=1`; the PHY
+   continues into `wifi:mode : sta`, then hits the MAC/BB blocks.
+2. **WiFi MAC/BB/RF loggers**: add `iolog` overlays at 0x60033000 (MAC), 0x60035000, 0x6001C000/
+   0x6001D000 (BB/NRX) and see what `esp_wifi_start` polls; the goal from the owner's brief is
+   "fail fast, never hang": either answer the few status bits the driver waits for so it reports an
+   error, or keep WiFi off in NVS for tests and document it. No radio model is planned.
+3. **SAR ADC model** (`hw/misc/esp32s3_saradc.c`, SENS 0x60008800 + APB_SARADC 0x60040000): not on
+   the stock's boot path (its ~250 accesses are `bootloader_random_enable/disable` and RTC IO clock
+   gating), but custom firmware may read the battery through it and the PHY uses SAR2 via the block
+   in step 1. Oneshot via `MEAS1/2_START_SAR` → `DONE` + `DATA`, QOM property for the value.
+4. **RTC IO pads**: `RTC_IO_TOUCH_PAD3/14`, `XTAL_32N`, `TOUCH_PAD0..` hold/pull writes (sleep
+   isolation); a stored-value overlay removes them from the unknowns.
+5. **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps`); keep
+   the plan to advance the virtual clock by the timer wake if it ever does.
+6. **Stock screens beyond Home**: the menu, All Files (the device card holds no books; add an EPUB
+   to the SD image), Settings (brightness slider → `x4emu light`), and a golden per screen. Compare
+   the panel stream of the full refresh with the support doc's recovered sequences.
+7. **Device oracle for the stock**: the stock has no screenshot function; a photo of the device's
+   Home compared by eye, or better: the owner boots the device into stock (`tools/device.py
+   restore-stock --yes`) and we compare its boot log + the UI timing.
+8. `x4emu run --stock` (or `--boot-hold-power MS`): drive GPIO3 low for the first N ms so the
+   preflight accepts a cold boot without the sleep/wake detour.
+9. **NVS shareable image**: `tools/nvsedit.py` can blank `sta_ssid/sta_pwd/wifi_creds` (add a
+   `set-str`/`erase` command) so a stock image without the owner's credentials can be shared.
 
-Acceptance for Goal A: the stock home screen renders; touch navigates it; the frontlight duty
-follows its brightness slider; a stock screenshot equals a device oracle (photo or BMP); a pytest
-boots the stock image and walks one screen; `docs/log.md` explains the blocker that was found.
+Acceptance for Goal A (updated): Home renders ✓; touch navigates it ✓ (menu); the frontlight duty
+follows its slider (open Settings and check `x4emu light`); a stock screen matches a device oracle
+(photo); a pytest boots the stock and walks one screen ✓ (`tests/test_stock.py`); WiFi fails fast
+instead of hanging (open).
 
 ## 4. Goal B — fidelity ("world class" model quality)
 
@@ -214,10 +184,24 @@ boots the stock image and walks one screen; `docs/log.md` explains the blocker t
 - zsh: quote globs that may not match (`ls x* 2>/dev/null` errors with "no matches found"), and
   variables holding commands are not word-split (use arrays or Python).
 - macOS builds `qemu-system-xtensa-unsigned`; `ninja qemu-system-xtensa` runs the signing step.
+- Espressif's models log only what they do not implement: `dwc_sdmmc_*` lines are `LOG_UNIMP`
+  defaults, the SPI/I2C/GPIO traffic of implemented registers is silent. Turn on QEMU trace events at
+  runtime through QMP (`trace-event-set-state`, e.g. `m25p80_*`, `sdcard_*`) before rebuilding anything.
+- `-d exec` (`log exec` via QMP) plus a debug stop shows the translation block that touched a bad
+  address; `get_pc()` in the memory path reports the block start, not the instruction.
+- FreeRTOS TCB walk (docs/log.md 2026-09-06) tells you what every task waits on without symbols;
+  ROM symbols come from `images/rom/esp32s3_rev0_rom.nm`; the app is disassembled with objdump on the
+  segments parsed from the ESP image header (esptool's "File offs" is the segment header, data is +8).
+- The pioarduino gdb builds do not work against this QEMU (python libs missing / no XML target
+  description); QMP `info registers -a`, `pmemsave` and `xp` do the job.
+- Three Espressif-model bugs bit the stock (patches 0006, 0008, 0009): interrupt re-routing, GDMA
+  descriptor look-ahead, QIO dummy cycles. When IDF code "spins forever" on this SoC, suspect the
+  model before the firmware.
 
 ## 8. Definition of "world class" (checklist)
 
-- [ ] Stock firmware: boots, renders, navigates, frontlight observable, one screen matched to the device.
+- [x] Stock firmware: boots, renders, navigates, frontlight observable (WiFi off in NVS).
+- [ ] Stock firmware: WiFi start fails fast (analog-master I2C block, WiFi MAC/BB loggers); one screen matched to a device photo.
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle.
 - [ ] Deterministic replay of an input script yields identical screenshots run to run.
 - [ ] Waveform-aware grayscale validated against device photos.
@@ -265,12 +249,14 @@ diffed pairwise, and every difference is either 0 or explained in the test's ass
 (battery %, clock). Acceptance: the M3/M5 device comparisons become an automated job the owner
 starts by plugging in the device.
 
-**D5. Fidelity gaps that block custom firmware first.** SAR ADC (§3.2 step 1), then RMT/I2S if the
-firmware uses them, then USB OTG device mode (large, optional).
+**D5. Fidelity gaps that block custom firmware first.** Analog-master I2C block and WiFi "fail
+fast" (§3.2 steps 1–2), SAR ADC (step 3), then RMT/I2S if the firmware uses them, then USB OTG
+device mode (large, optional).
 
 What the emulator guarantees a custom firmware today (design against this list): USB Serial/JTAG
-console both ways; GPIO 0..48 with edge/level interrupts; SPI2 to the panel; UC8279/UC8179/SSD1677
-with the real probe answers and device timings; I2C0 with GT911, BM8563, CW2017 (BATINFO
-resident); LEDC frontlight; SDMMC 1-bit card (MBR/FAT32 image); deep sleep with EXT1 wake on
-GPIO3; efuse/MAC of the desk unit. Not there: WiFi/BLE, USB OTG, SAR ADC, RMT, I2S, touch
-sensor pads, ULP.
+console both ways; GPIO 0..48 with edge/level interrupts; SPI2 to the panel, CPU FIFO or GDMA
+(ESP-IDF `spi_master`, interrupt-driven, re-routing in the interrupt matrix works); UC8279/UC8179/
+SSD1677 with the real probe answers and device timings; I2C0 with GT911, BM8563, CW2017 (BATINFO
+resident); LEDC frontlight; SDMMC 1-bit card (MBR/FAT32 image); NVS reads and writes through the
+QIO flash path; deep sleep with EXT1 wake on GPIO3; efuse/MAC of the desk unit. Not there: WiFi/BLE
+(the PHY hangs on the analog-master I2C block), USB OTG, SAR ADC, RMT, I2S, touch sensor pads, ULP.

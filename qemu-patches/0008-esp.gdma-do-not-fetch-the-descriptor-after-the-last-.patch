@@ -1,0 +1,47 @@
+From 309ec3f4bd2be6d76c08376452c8f2208010eecd Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 18:22:48 -0500
+Subject: [PATCH 8/9] esp.gdma: do not fetch the descriptor after the last one
+ of a read
+
+esp_gdma_read_channel() fetched the next list node even when the requested
+bytes were complete. The last node of a list has a NULL next pointer, so every
+transfer that ended on a node boundary read a 12-byte descriptor from guest
+address 0 (three LOG_GUEST_ERROR lines per SPI DMA transaction with the
+xteink-x4pro machine). Only fetch the next node when more bytes are needed,
+as the write path already does.
+---
+ hw/dma/esp_gdma.c | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/hw/dma/esp_gdma.c b/hw/dma/esp_gdma.c
+index 6640fca..8661f9b 100644
+--- a/hw/dma/esp_gdma.c
++++ b/hw/dma/esp_gdma.c
+@@ -366,14 +366,17 @@ bool esp_gdma_read_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uint
+ 
+             const bool eof_bit = out_list.config.suc_eof;
+ 
+-            /* Retrieve the next node  while updating the virtual guest address */
++            /* Retrieve the next node while updating the virtual guest address, but only
++             * when more bytes are needed: the last node of a list has a NULL next pointer
++             * and fetching it would read a descriptor from guest address 0. */
+             out_addr = out_list.next_addr;
+-            valid = esp_gdma_next_list_node(s, chan, ESP_GDMA_OUT_IDX, &out_list);
++            if (!exit_loop) {
++                valid = esp_gdma_next_list_node(s, chan, ESP_GDMA_OUT_IDX, &out_list);
+ 
+-            /* Only check the valid flag and the owner if we don't have to exit the loop*/
+-            if ( !exit_loop && (!valid || (owner_check_out && !out_list.config.owner)) ) {
+-                esp_gdma_set_status(&state->int_state, R_GDMA_INTERRUPT_OUT_DSCR_ERR_MASK);
+-                error = true;
++                if (!valid || (owner_check_out && !out_list.config.owner)) {
++                    esp_gdma_set_status(&state->int_state, R_GDMA_INTERRUPT_OUT_DSCR_ERR_MASK);
++                    error = true;
++                }
+             }
+ 
+             /* If the EOF bit was set, the real controller doesn't stop the transfer, it simply
+-- 
+2.50.1 (Apple Git-155)
+

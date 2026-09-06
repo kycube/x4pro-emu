@@ -397,3 +397,79 @@ Result: 151 pixels (0.039 %) as booted, **0 pixels** once the battery state matc
 `gpio.hasTouch()` was false and `UITheme::getMetrics()` kept `buttonHintsHeight`. With the touch
 controller present the emulator hides the legend exactly like the device. The device's
 `.crosspoint/settings.json` and `state.json` are kept in `docs/device/` (reader preferences only).
+
+## 2026-09-06 — Stock firmware: spi_master + GDMA, the interrupt matrix, quad flash reads, home screen
+
+Where the previous session left it: the stock `xteink_app` 7.2.4 reached `Returned from app_main()`
+and "idled"; the handoff blamed the SAR ADC. Findings, in the order they were made:
+
+- **SAR ADC was not it.** The ~250 SENS/APB_SARADC accesses are two `bootloader_random_enable/disable`
+  pairs (pattern tables written then cleared to `0xffffff`, `MEAS1_START_SAR` never set) plus
+  `rtcio_ll_function_select` toggling `SENS_SAR_PERI_CLK_GATE_CONF.iomux_clk_en` per RTC pad.
+  Nothing polled the ADC.
+- **`dwc_sdmmc` does not log every access.** Its `dwc_sdmmc_read/write:` lines are the `default:`
+  cases (`LOG_UNIMP`) for registers it does not implement (CLKENA, CTYPE, TMOUT, CDETECT, UHS, 0x800);
+  CMD/CMDARG/RINTSTS accesses are silent. The stock's card init and 4,600 single-sector reads
+  (`sdmmc_card_init` → CMD0/8/55/41/2/3/9/7/16/51/6…, then CMD13+CMD17 pairs, 6 writes) all
+  succeeded; the reads only looked "slow" because the trace hid the commands.
+- **Where the tasks really were** (FreeRTOS TCB walk over a `pmemsave` dump: name at TCB+52, list
+  items at +4/+24 with `pvOwner == TCB`, `xCoreID` at +68, stack end at +72; frames from
+  `pxTopOfStack`, PC at +4, windowed return addresses have bits 31:30 = call size): `xteink_ui`,
+  `xteink_input`, `xteink_sdmon`, `xteink_nvs`, `pwr_monitor` in short `vTaskDelay` polls,
+  `epd_flush` blocked forever in `spi_device_transmit()` → `spi_device_get_trans_result()` on the
+  spi_master result queue (strings at the frame addresses), i.e. **the stock drives the panel with
+  ESP-IDF's interrupt- and GDMA-driven `spi_master`**, not Arduino's CPU FIFO path.
+- **Bug 1, Espressif `esp32s3_intc.c`:** the matrix stored a new map entry but never re-evaluated
+  the CPU line. spi_master invokes its ISR by *re-routing* the SPI2 source (from 6 = disconnected to
+  its CPU interrupt) while TRANS_DONE is left pending, and parks it on 6 to disable it. Live state
+  said it all: `INT_RAW = INT_ENA = INT_ST = TRANS_DONE`, core-0 map for source 20 = 6. Patch 0006
+  tracks every source's level and drives each CPU interrupt with the OR of the sources routed to it,
+  on source changes and on map writes.
+- **SPI2 through GDMA** (patch 0007): `DMA_CONF.DMA_TX/RX_ENA` route the data phase through the
+  GDMA channel bound to peripheral SPI2 (`esp_gdma_get_channel_periph` + `read/write_channel`;
+  link property "gdma" = `/machine/soc/gdma`), up to the full 32 KB `MS_DLEN`; the FIFO path is
+  unchanged; `DMA_INT_SET` reads as 0; `state.spi2` gains `dma_tx_bytes/dma_rx_bytes/dma_errors`.
+  First result: 47 panel commands, 3 refreshes, 424 KB over DMA, 0 errors. The stock's UC8279 init:
+  `00 37 4D`, TRES `03 20 02 58` (800x600, gates 120..599 used), GSST 0, PFS 0x20, `E1 02`, DTM2/DTM1
+  60,000-byte planes, CDI 0x97, CCSET 0x02, TSSET 0x1E, PON, PSR `17 4D`, DRF 1.3 s later; partial
+  updates with PTIN/PTL/PTOUT, CDI 0xD7, TSSET 0x5A.
+- **Bug 2, Espressif `esp_gdma.c`:** `read_channel` fetched the descriptor after the last node even
+  when the transfer was complete; the last node's `next` is NULL so every SPI DMA transaction read a
+  12-byte descriptor from guest address 0 (three `Invalid read` lines each). Found with the exec
+  trace (`log exec` via QMP) around a debug stop; `get_pc()` in the unassigned-access logger is the
+  TB start, not the faulting instruction. Patch 0008 guards the fetch.
+- **The first screen was the first-boot "Select Region" page, and "Region save failed".** Region is
+  NVS `hw_calib/region` (u8, 1 = CN, 2 = overseas; getter 0x42069160, setter re-reads with default
+  238). The flash trace (`trace-event-set-state m25p80_*` at runtime, no rebuild) showed the entry
+  programmed, marked written, read back, then marked erased and zeroed: NVS's CRC-mismatch erase.
+  The read-back returned 30 of 32 bytes.
+- **Bug 3, Espressif `esp32s3_spi.c`:** dummy cycles were converted to bytes as single-line and the
+  field's "minus one" ignored. ESP-IDF's 0xEB read (24-bit address, `USR_DUMMY_CYCLELEN=5` = 6
+  cycles, `FREAD_QIO`) sent 1 dummy byte where QEMU's ISSI `is25lp128` expects 3 (6 cycles x 4
+  lines): every quad read shifted by two bytes. Consequences before the fix: NVS judged page 0
+  corrupt at **every** boot, erased and re-provisioned it (the 21 boot-time page programs), which is
+  why the stock showed its first-boot screens; and every NVS write "failed". Patch 0009 counts
+  cycles at the read mode's width (QIO 4, DIO 2, else 1); octal-PSRAM transactions keep 3 bytes.
+  After it: 0 page programs at boot, the stock boots straight to **Home ("Bookshelf", clock, 63 %)**,
+  warm frontlight at 249 permille on GPIO9, the menu tap repaints, and WiFi starts at 14 s as on the
+  device (13.4 s).
+- **WiFi start hangs the UI:** the `wifi` task (prio 23, core 0) spins in ROM
+  `rom_pkdet_vol_start+0x2e` (from `rom_get_sar2_vol`) polling `0x6000E050` bits 26:24 for 7 — the
+  analog-master I2C block (RTCCNTL+0x6050 in the ROM's naming; SAR2 samples at 0x6000E080..9C), which
+  the SoC's silent catch-all answers with 0. Everything on core 0 starves. `tools/nvsedit.py IMAGE
+  set-u8 user_config net_en 0` keeps the stock off the radio; that is what `tests/test_stock.py`
+  boots. Modelling the block is the next step (`docs/NEXT_PHASE.md`).
+- Tooling: `x4emu qmp` accepts arguments named `name` (positional-only fix); `tools/nvsedit.py`
+  lists/edits NVS; the ROM symbol table is at `images/rom/esp32s3_rev0_rom.nm` (esp-rom-elfs
+  20241011). QEMU trace events work at runtime through QMP (`trace-event-set-state`), which made
+  the flash and SD traces possible without rebuilding.
+- Dead ends: gdb from the pioarduino package cannot talk to this QEMU (the python builds miss
+  libpython, the no-python build has no XML target description: "'g' packet reply is too long");
+  a temporary `qemu_system_debug_request()` in the unassigned-access path plus `info registers -a`
+  and `pmemsave` replaced it. esptool's `image-info` "File offs" column is the segment *header*
+  offset (data starts 8 bytes later); objdump labels were off by 8 until the image was parsed
+  properly. In objdump output `l32r` literal values are true addresses but `call8` targets follow
+  the labels. zsh does not word-split a variable holding a command (use a function).
+
+Device state unchanged (app0 CrossPoint, app1 stock, backups intact). `images/stock.bin` is
+regenerated from the dump; the stock writes NVS at first touch of settings, so tests boot copies.

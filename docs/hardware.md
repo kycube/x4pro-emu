@@ -32,7 +32,16 @@ Stock partition table: nvs 0x9000/0x5000, otadata 0xE000/0x2000, app0 0x10000/0x
 spiffs 0xFD0000/0x14000, coredump 0xFE4000/0x1C000 (`docs/device/partitions.md`). CrossPoint's own table
 (`firmware/partitions.csv`): app0 0x10000/0x640000, app1 0x650000/0x640000, spiffs 0xC90000/0x360000,
 coredump 0xFF0000/0x10000. The community installs CrossPoint by writing only the app at 0x10000 over the
-stock bootloader and stock table (`firmware/README.md`).
+stock bootloader and stock table (`firmware/README.md`); the emulator reproduces that (CrossPoint on the
+stock bootloader/table/NVS reads `hw_calib/screenType=2` and boots to Home).
+
+NVS (0x9000, 20 KB, three used pages): namespaces `xteink_sys`, `hw_calib` (`screenType=2`; the code also
+knows `region` (1 CN / 2 overseas, unset on this unit) and `lightDS`), `user_config` (`pwrTimingVer`,
+`sta_ssid`, `sta_pwd`, `wifi_creds`, `cfg_init`, `fbLangDone`, `net_en`, `cloud_bind_st`, `otaPromptDay`),
+`misc`, `nvs.net80211`, `phy` (`cal_data`). `tools/nvsedit.py` lists and edits it. The flash is read in QIO
+(0xEB, 24-bit address, 6 dummy cycles) after `esp_flash_init`; IDF reports the real chip as "generic" and
+QEMU's `is25lp128` as "issi", which changes nothing observable so far. The eFuse user block holds the
+serial `X4CB02EN26082416646`.
 
 ## Panel: 800x480 mono e-paper
 
@@ -87,6 +96,17 @@ bytes each, 100 bytes per row, 1 = white. Refresh: 0x21 (0x00 fast, 0x40 otherwi
 fast ~500 ms; device measurement pending). Power-off: 0x3C 0x80, 0x22 0x03, 0x20, 200 ms + wait. Deep sleep:
 0x10 0x03 (RAM discarded). Grayscale: 0x32 + 105 LUT bytes, 0x03, 0x04 ×3, 0x2C, 0x3C 0xC0, then 0x22 0xCC
 (or 0xC7 factory mode) + 0x20. First paint after boot is promoted to HALF (0xD7).
+
+### UC8279 as the stock firmware drives it (emulator trace, 2026-09-06)
+
+The stock `xteink_app` 7.2.4 talks to the panel through ESP-IDF's `spi_master` (interrupt + GDMA
+channel 0 bound to SPI2, 24-bit-address transactions, frames as 60,000-byte DMA transfers) and
+reads VER (0x70) once through the same host in half-duplex. Init after three RST pulses:
+`00 37 4D` (PSR), `61 03 20 02 58` (TRES 800x600: the driver addresses 600 gates and uses 120..599),
+`65 00 00 00 00` (GSST), `03 20` (PFS), `E1 02`, DTM2/DTM1/DTM2 planes, `50 97` (CDI), `E0 02` (CCSET),
+`E5 1E` (TSSET), `04` (PON, 40 ms), `00 17 4D`, `12` (DRF, GC, 1.3 s). Page updates: PTIN, PTL
+(`90 x0 x1 y0 y1 01`), DTM1 48,000 bytes, PTOUT, DTM2, `50 D7`, `E5 5A`, `03 20`, `E1 02`, DRF (fast);
+toasts use small PTL windows. The frontlight defaults to the warm channel (GPIO9, LEDC) at ~25 %.
 
 ### UC8279 / UC8179 (X4 Pro variants)
 

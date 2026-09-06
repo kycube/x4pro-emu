@@ -1,0 +1,113 @@
+From d18e29402d715a657620d27cc9f7544793769cb7 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 17:40:37 -0500
+Subject: [PATCH 6/9] esp32s3.intmatrix: recompute CPU interrupt lines when a
+ source is re-routed
+
+The matrix only stored a new map entry; the CPU line was updated solely from
+the source's own level changes. ESP-IDF drivers rely on re-routing: spi_master
+leaves TRANS_DONE asserted and invokes its ISR by mapping the SPI source back
+to its CPU interrupt (esp_intr_enable), and parks it on interrupt 6 to disable
+it. Track every source's level and drive each CPU interrupt with the OR of the
+sources routed to it, on both source changes and map writes.
+
+Found with the stock Xteink X4 Pro firmware (IDF 6.0.1), whose panel task waited
+forever in spi_device_transmit().
+---
+ hw/xtensa/esp32s3_intc.c         | 46 +++++++++++++++++++++++++-------
+ include/hw/xtensa/esp32s3_intc.h |  3 +++
+ 2 files changed, 39 insertions(+), 10 deletions(-)
+
+diff --git a/hw/xtensa/esp32s3_intc.c b/hw/xtensa/esp32s3_intc.c
+index 0437230..496a5d0 100644
+--- a/hw/xtensa/esp32s3_intc.c
++++ b/hw/xtensa/esp32s3_intc.c
+@@ -26,20 +26,35 @@
+ 
+ #define IRQ_MAP(cpu, input) s->irq_map[cpu][input]
+ 
++/* Drive one CPU interrupt line with the OR of every source currently routed to it.
++ * out_index values that are not external interrupts of the core (e.g. 6, the value
++ * ESP-IDF uses to disconnect a source) reach no line, which disables the source. */
++static void esp32s3_intmatrix_update_output(Esp32s3IntMatrixState *s, int cpu, int out_index)
++{
++    if (s->outputs[cpu] == NULL) {
++        return;
++    }
++    int level = 0;
++    for (int src = 0; src < ESP32S3_INT_MATRIX_INPUTS; ++src) {
++        if (IRQ_MAP(cpu, src) == out_index && s->level[src]) {
++            level = 1;
++            break;
++        }
++    }
++    for (int int_index = 0; int_index < s->cpu[cpu]->env.config->nextint; ++int_index) {
++        if (s->cpu[cpu]->env.config->extint[int_index] == out_index) {
++            qemu_set_irq(s->outputs[cpu][int_index], level);
++            break;
++        }
++    }
++}
++
+ static void esp32s3_intmatrix_irq_handler(void *opaque, int n, int level)
+ {
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
++    s->level[n] = level ? 1 : 0;
+     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
+-        if (s->outputs[i] == NULL) {
+-            continue;
+-        }
+-        int out_index = IRQ_MAP(i, n);
+-        for (int int_index = 0; int_index < s->cpu[i]->env.config->nextint; ++int_index) {
+-            if (s->cpu[i]->env.config->extint[int_index] == out_index) {
+-                qemu_set_irq(s->outputs[i][int_index], level);
+-                break;
+-            }
+-        }
++        esp32s3_intmatrix_update_output(s, i, IRQ_MAP(i, n));
+     }
+ }
+ 
+@@ -72,7 +87,17 @@ static void esp32s3_intmatrix_write(void* opaque, hwaddr addr, uint64_t value, u
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
+     uint8_t* map_entry = get_map_entry(s, addr);
+     if (map_entry != NULL) {
++        int cpu_index = (addr / sizeof(uint32_t)) / ESP32S3_INT_MATRIX_INPUTS;
++        uint8_t old = *map_entry;
+         *map_entry = value & 0x1f;
++        /* A source whose line is already asserted must follow the new routing at once:
++         * ESP-IDF drivers (spi_master, ...) leave a "done" flag pending and re-enable the
++         * interrupt through the matrix to invoke their ISR. The line it leaves is released
++         * unless another source still drives it. */
++        if (old != *map_entry) {
++            esp32s3_intmatrix_update_output(s, cpu_index, old);
++            esp32s3_intmatrix_update_output(s, cpu_index, *map_entry);
++        }
+     }
+ }
+ 
+@@ -86,6 +111,7 @@ static void esp32s3_intmatrix_reset_hold(Object *obj, ResetType type)
+ {
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(obj);
+     memset(s->irq_map, INTMATRIX_UNINT_VALUE, sizeof(s->irq_map));
++    memset(s->level, 0, sizeof(s->level));
+     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
+         if (s->outputs[i] == NULL) {
+             continue;
+diff --git a/include/hw/xtensa/esp32s3_intc.h b/include/hw/xtensa/esp32s3_intc.h
+index 5960b9d..9a12047 100644
+--- a/include/hw/xtensa/esp32s3_intc.h
++++ b/include/hw/xtensa/esp32s3_intc.h
+@@ -142,6 +142,9 @@ typedef struct Esp32s3IntMatrixState {
+     MemoryRegion iomem;
+     qemu_irq *outputs[ESP32S3_CPU_COUNT];
+     uint8_t irq_map[ESP32S3_CPU_COUNT][ESP32S3_INT_MATRIX_INPUTS];
++    /* Current level of every interrupt source line, so that re-routing a source in the
++     * matrix can recompute the CPU interrupt lines it leaves and joins. */
++    uint8_t level[ESP32S3_INT_MATRIX_INPUTS];
+ 
+     /* properties */
+     XtensaCPU *cpu[ESP32S3_CPU_COUNT];
+-- 
+2.50.1 (Apple Git-155)
+

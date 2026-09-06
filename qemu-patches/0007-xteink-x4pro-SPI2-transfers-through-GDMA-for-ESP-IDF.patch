@@ -1,0 +1,222 @@
+From 3196a35bedd6d15c292da756c4b0d3cfa0d0efc5 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 17:40:37 -0500
+Subject: [PATCH 7/9] xteink-x4pro: SPI2 transfers through GDMA for ESP-IDF's
+ spi_master
+
+DMA_CONF.DMA_TX_ENA / DMA_RX_ENA route the data phase through the GDMA
+channel bound to peripheral SPI2 (link property "gdma", set by the machine to
+/machine/soc/gdma): TX bytes come from the out-link descriptors, RX bytes go
+to the in-link descriptors, up to the full MS_DLEN (32 KB). The CPU path
+(W0..W15) is unchanged. DMA_CONF's self-clearing AFIFO reset bits read as 0
+and DMA_INT_SET reads as 0. The board state reports dma_tx_bytes,
+dma_rx_bytes and dma_errors.
+
+The stock xteink_app 7.2.4 now initialises the UC8279 panel and paints its
+first screen (region selection), 424 KB of frame data per boot over DMA.
+---
+ hw/ssi/esp32s3_gpspi.c         | 81 +++++++++++++++++++++++++++-------
+ hw/xtensa/xteink_x4pro.c       | 13 ++++--
+ include/hw/ssi/esp32s3_gpspi.h |  6 +++
+ 3 files changed, 81 insertions(+), 19 deletions(-)
+
+diff --git a/hw/ssi/esp32s3_gpspi.c b/hw/ssi/esp32s3_gpspi.c
+index 28b95c6..a5ef6f0 100644
+--- a/hw/ssi/esp32s3_gpspi.c
++++ b/hw/ssi/esp32s3_gpspi.c
+@@ -1,14 +1,16 @@
+ /*
+  * ESP32-S3 GP-SPI master (SPI2 at 0x60024000, SPI3 at 0x60025000).
+  *
+- * Register map from ESP-IDF v5.5 soc/spi_reg.h (docs/audit.md). Only the
+- * CPU-driven (non-DMA) path is modelled, which is what the Arduino SPIClass
+- * uses: the driver fills W0..W15, sets MS_DLEN, pulses CMD.UPDATE, then sets
+- * CMD.USR. We then clock (MS_DLEN+1)/8 bytes out onto the SSIBus (and, if
+- * USR_MISO is set, store what comes back into W0..), clear USR and raise
+- * TRANS_DONE. Clock, timing and mode registers are stored but ignored. The
+- * peripheral's own CS outputs are provided but the X4 Pro firmware drives its
+- * chip select with a plain GPIO.
++ * Register map from ESP-IDF v5.5 soc/spi_reg.h (docs/audit.md). Two data paths:
++ * the CPU-driven one the Arduino SPIClass uses (the driver fills W0..W15, sets
++ * MS_DLEN, pulses CMD.UPDATE, then sets CMD.USR: we clock (MS_DLEN+1)/8 bytes
++ * out onto the SSIBus and, if USR_MISO is set, store what comes back into W0..),
++ * and the GDMA one ESP-IDF's spi_master driver uses (DMA_CONF.DMA_TX_ENA /
++ * DMA_RX_ENA: the bytes come from / go to the GDMA channel bound to this host
++ * through its descriptor lists). Both end with USR cleared and TRANS_DONE raised.
++ * Clock, timing and mode registers are stored but ignored. The peripheral's own
++ * CS outputs are provided but the X4 Pro firmware drives its chip select with a
++ * plain GPIO.
+  *
+  * x4pro-emu, GPL-2.0-or-later.
+  */
+@@ -60,6 +62,10 @@
+ 
+ #define INT_TRANS_DONE (1u << 12)
+ 
++#define DMA_CONF_RX_ENA   (1u << 27)
++#define DMA_CONF_TX_ENA   (1u << 28)
++#define DMA_CONF_RST_MASK (7u << 29)     /* RX_AFIFO_RST, BUF_AFIFO_RST, DMA_AFIFO_RST: self-clearing */
++
+ static void gpspi_update_irq(ESP32S3GpSpiState *s)
+ {
+     qemu_set_irq(s->irq, (s->dma_int_raw & s->dma_int_ena) != 0);
+@@ -99,19 +105,53 @@ static void gpspi_do_user_transfer(ESP32S3GpSpiState *s)
+     if (mosi || miso) {
+         int bits = (s->ms_dlen & 0x3FFFF) + 1;
+         int bytes = (bits + 7) / 8;
+-        if (bytes > ESP32S3_GPSPI_BUF_WORDS * 4) {
+-            bytes = ESP32S3_GPSPI_BUF_WORDS * 4;
+-        }
+-        uint8_t *buf = (uint8_t *)s->data_buf;
++        bool dma_tx = mosi && (s->dma_conf & DMA_CONF_TX_ENA) && s->gdma;
++        bool dma_rx = miso && (s->dma_conf & DMA_CONF_RX_ENA) && s->gdma;
++        uint8_t *fifo = (uint8_t *)s->data_buf;
+         int off = (mosi && (s->user & USER_MOSI_HIGHPART)) ? 32 : 0;
++        uint8_t *txbuf = NULL, *rxbuf = NULL;
++        uint32_t chan;
++        if (!dma_tx && !dma_rx && bytes > ESP32S3_GPSPI_BUF_WORDS * 4) {
++            bytes = ESP32S3_GPSPI_BUF_WORDS * 4;   /* CPU path: the W0..W15 buffer */
++        }
++        if (dma_tx) {
++            txbuf = g_malloc0(bytes);
++            if (esp_gdma_get_channel_periph(s->gdma, s->gdma_periph, ESP_GDMA_OUT_IDX, &chan) &&
++                esp_gdma_read_channel(s->gdma, chan, txbuf, bytes)) {
++                s->dma_tx_bytes += bytes;
++            } else {
++                s->dma_errors++;
++                qemu_log_mask(LOG_GUEST_ERROR, "esp32s3.gpspi: DMA TX of %d bytes failed "
++                              "(no GDMA out channel bound to peripheral %u, or bad descriptors)\n",
++                              bytes, s->gdma_periph);
++            }
++        }
++        if (dma_rx) {
++            rxbuf = g_malloc0(bytes);
++        }
+         for (int i = 0; i < bytes; i++) {
+-            uint8_t out = mosi ? buf[(off + i) & 63] : 0;
++            uint8_t out = dma_tx ? txbuf[i] : (mosi ? fifo[(off + i) & 63] : 0);
+             uint32_t in = ssi_transfer(s->spi, out);
+-            if (miso) {
+-                buf[(off + i) & 63] = in & 0xFF;
++            if (dma_rx) {
++                rxbuf[i] = in & 0xFF;
++            } else if (miso) {
++                fifo[(off + i) & 63] = in & 0xFF;
+             }
+             s->bytes_out++;
+         }
++        if (dma_rx) {
++            if (esp_gdma_get_channel_periph(s->gdma, s->gdma_periph, ESP_GDMA_IN_IDX, &chan) &&
++                esp_gdma_write_channel(s->gdma, chan, rxbuf, bytes)) {
++                s->dma_rx_bytes += bytes;
++            } else {
++                s->dma_errors++;
++                qemu_log_mask(LOG_GUEST_ERROR, "esp32s3.gpspi: DMA RX of %d bytes failed "
++                              "(no GDMA in channel bound to peripheral %u, or bad descriptors)\n",
++                              bytes, s->gdma_periph);
++            }
++        }
++        g_free(txbuf);
++        g_free(rxbuf);
+     }
+     gpspi_cs_set(s, 0);
+     s->transfers++;
+@@ -136,10 +176,11 @@ static uint64_t gpspi_read(void *opaque, hwaddr addr, unsigned int size)
+     case R_DIN_MODE:   r = s->din_mode; break;
+     case R_DIN_NUM:    r = s->din_num; break;
+     case R_DOUT_MODE:  r = s->dout_mode; break;
+-    case R_DMA_CONF:   r = s->dma_conf; break;
++    case R_DMA_CONF:   r = s->dma_conf & ~DMA_CONF_RST_MASK; break;
+     case R_DMA_INT_ENA: r = s->dma_int_ena; break;
+     case R_DMA_INT_RAW: r = s->dma_int_raw; break;
+     case R_DMA_INT_ST:  r = s->dma_int_raw & s->dma_int_ena; break;
++    case R_DMA_INT_SET: r = 0; break;               /* write-only; ESP-IDF's spi_ll reads it back */
+     case R_SLAVE:      r = s->slave; break;
+     case R_SLAVE1:     r = s->slave1; break;
+     case R_CLK_GATE:   r = s->clk_gate; break;
+@@ -232,10 +273,18 @@ static void gpspi_init(Object *obj)
+     qdev_init_gpio_out_named(DEVICE(s), s->cs_gpio, SSI_GPIO_CS, ESP32S3_GPSPI_CS_COUNT);
+ }
+ 
++static Property gpspi_properties[] = {
++    DEFINE_PROP_LINK("gdma", ESP32S3GpSpiState, gdma, TYPE_ESP_GDMA, ESPGdmaState *),
++    DEFINE_PROP_UINT32("gdma-periph", ESP32S3GpSpiState, gdma_periph, GDMA_SPI2),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
+ static void gpspi_class_init(ObjectClass *klass, void *data)
+ {
++    DeviceClass *dc = DEVICE_CLASS(klass);
+     ResettableClass *rc = RESETTABLE_CLASS(klass);
+     rc->phases.hold = gpspi_reset_hold;
++    device_class_set_props(dc, gpspi_properties);
+ }
+ 
+ static const TypeInfo gpspi_info = {
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 18f0edb..e335d7c 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -398,8 +398,9 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+             b->usj->tx_bytes, b->usj->rx_bytes, b->usj->flushes);
+     }
+     if (b->spi2) {
+-        g_string_append_printf(j, "\"spi2\":{\"transfers\":%" PRIu64 ",\"bytes\":%" PRIu64 "},",
+-            b->spi2->transfers, b->spi2->bytes_out);
++        g_string_append_printf(j, "\"spi2\":{\"transfers\":%" PRIu64 ",\"bytes\":%" PRIu64
++            ",\"dma_tx_bytes\":%" PRIu64 ",\"dma_rx_bytes\":%" PRIu64 ",\"dma_errors\":%" PRIu64 "},",
++            b->spi2->transfers, b->spi2->bytes_out, b->spi2->dma_tx_bytes, b->spi2->dma_rx_bytes, b->spi2->dma_errors);
+     }
+     if (b->input) {
+         g_string_append_printf(j, "\"buttons\":{\"left\":%s,\"right\":%s,\"power\":%s},\"charging\":%s,",
+@@ -578,11 +579,17 @@ static void x4pro_machine_init(MachineState *machine)
+         x4pro_input_apply(input);
+     }
+ 
+-    /* SPI2 (FSPI) master at 0x60024000 */
++    /* SPI2 (FSPI) master at 0x60024000, with the SoC's GDMA for ESP-IDF's spi_master driver */
+     ESP32S3GpSpiState *spi2;
+     {
+         DeviceState *dev = qdev_new(TYPE_ESP32S3_GPSPI);
+         object_property_add_child(OBJECT(machine), "x4pro-spi2", OBJECT(dev));
++        Object *gdma = object_resolve_path("/machine/soc/gdma", NULL);
++        if (gdma) {
++            object_property_set_link(OBJECT(dev), "gdma", gdma, &error_abort);
++        } else {
++            warn_report("xteink-x4pro: no /machine/soc/gdma; SPI2 DMA transfers disabled");
++        }
+         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE, mr, 2);
+diff --git a/include/hw/ssi/esp32s3_gpspi.h b/include/hw/ssi/esp32s3_gpspi.h
+index 0bc32da..8553aaa 100644
+--- a/include/hw/ssi/esp32s3_gpspi.h
++++ b/include/hw/ssi/esp32s3_gpspi.h
+@@ -6,6 +6,7 @@
+ 
+ #include "hw/sysbus.h"
+ #include "hw/ssi/ssi.h"
++#include "hw/dma/esp_gdma.h"
+ 
+ #define TYPE_ESP32S3_GPSPI "esp32s3.gpspi"
+ OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3GpSpiState, ESP32S3_GPSPI)
+@@ -19,6 +20,8 @@ struct ESP32S3GpSpiState {
+     qemu_irq irq;
+     qemu_irq cs_gpio[ESP32S3_GPSPI_CS_COUNT];
+     SSIBus *spi;
++    ESPGdmaState *gdma;      /* GDMA controller for DMA transfers (link property), may be NULL */
++    uint32_t gdma_periph;    /* GdmaPeripheral id this host is known as: GDMA_SPI2 or GDMA_SPI3 */
+ 
+     uint32_t addr;
+     uint32_t ctrl;
+@@ -41,4 +44,7 @@ struct ESP32S3GpSpiState {
+ 
+     uint64_t transfers;
+     uint64_t bytes_out;
++    uint64_t dma_tx_bytes;
++    uint64_t dma_rx_bytes;
++    uint64_t dma_errors;
+ };
+-- 
+2.50.1 (Apple Git-155)
+

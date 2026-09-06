@@ -2,8 +2,9 @@
 
 Linux/macOS-hosted emulator for unmodified Xteink X4 Pro firmware images, driven from a shell:
 buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots to its home screen,
-opens books, pages, sleeps and wakes in it. Progress and dead ends: `docs/log.md`.
-**Next agent: read `docs/NEXT_PHASE.md`** — the stock-firmware plan (SAR ADC first) and the world-class checklist.
+opens books, pages, sleeps and wakes in it; the stock `xteink_app` 7.2.4 boots to its home screen,
+paints, lights the frontlight and takes touch (with WiFi disabled in NVS). Progress and dead ends:
+`docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`** (WiFi/analog-master block next, world-class checklist).
 
 ## What is NOT emulated (how it shows up for a firmware developer)
 
@@ -20,8 +21,10 @@ opens books, pages, sleeps and wakes in it. Progress and dead ends: `docs/log.md
   CPU-frequency changes by the firmware do not change emulation speed.
 - **GPIO matrix / IO_MUX**: not modelled electrically. SPI2 always reaches the panel; pull settings
   are ignored (the GPIO model carries per-pin idle levels: buttons, MOSI, RST, CS idle HIGH).
-- **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1) stops after `cpu_start: Multicore app`; see
-  `docs/log.md` M6.
+- **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1): runs to Home and is usable **only with WiFi
+  disabled** (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0`). With `net_en=1` its radio task
+  spins at priority 23 from 14 s on in ROM `rom_pkdet_vol_start`, polling the analog-master I2C block
+  (0x6000E050, unmodelled) and starving core 0. SAR ADC, RTC IO pads, RMT, I2S, USB OTG stay unmodelled.
 
 ## Layout
 
@@ -29,7 +32,7 @@ opens books, pages, sleeps and wakes in it. Progress and dead ends: `docs/log.md
 qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (gitignored; make setup)
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
-tools/         x4emu CLI, mkflash.py, mksd.py, mkefuse.py, device.py, epdtrace.py
+tools/         x4emu CLI, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py
 tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants)
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
 docs/          hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures)
@@ -68,6 +71,12 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 8 MB PSRAM). Drop `--fast-epd` for real refresh timing. A raw 16 MB device dump runs as-is
 (`--flash images/device/flash-….bin`).
 
+Stock firmware: `tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin`, then
+`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0`, then
+`x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img`. Its boot-preflight
+rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it and Home follows in
+~5 s (`tests/test_stock.py` does exactly this on scratch copies: the stock writes both images).
+
 ## MCP server (preferred for agents)
 
 `.mcp.json` registers `tools/x4emu_mcp.py` (start Claude Code inside this directory, or
@@ -94,7 +103,12 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
 | `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
 | `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |
-| `mem read ADDR LEN` / `gdb` / `qmp JSON` | human-monitor `xp`; launches `xtensa-esp-elf-gdb` on :1234 (run with `--gdb`); raw QMP |
+| `mem read ADDR LEN` / `gdb` / `qmp JSON` | human-monitor `xp`; launches `xtensa-esp-elf-gdb` on :1234 (run with `--gdb`; the pioarduino gdb builds cannot talk to this QEMU, see log); raw QMP, e.g. `{"execute":"trace-event-set-state","arguments":{"name":"m25p80_*","enable":true}}` turns QEMU trace events into `qemu.log` lines at runtime |
+| `tools/nvsedit.py IMAGE list` / `set-u8 NS KEY VALUE` | read or edit the NVS partition of a flash image (0x9000/0x5000 by default) |
+
+ROM symbols for the stock app's PCs: `make rom-symbols` → `images/rom/esp32s3_rev0_rom.nm`; the app
+itself is disassembled from `images/device/stock-app0-7.2.4.bin` (segments parsed from the image
+header; see docs/log.md 2026-09-06 for the TCB walk and the tricks that replace gdb).
 
 Tips: CrossPoint ignores input while it is painting, so use `--quiet 2` or `wait-quiet` before an
 input in scripts. Power: < 400 ms is a click (double-click toggles the frontlight), ≥ 400 ms held
@@ -134,4 +148,5 @@ ESP32-S3 rev v0.2, 8 MB octal PSRAM, MAC 98:c3:77:be:ea:30. Panel **UC8279** (pr
 (files copied to `images/device/sd-files/`, including CrossPoint's `.crosspoint/` state). Oracles from
 the device: its home-screen screenshot (`tests/golden/device-home-screenshot-3824.bmp`, reproduced with
 0 pixels different), its panel command stream (`models/fixtures/`), its boot and wake logs
-(`docs/device/`). See `docs/hardware.md` and `docs/device/`.
+(`docs/device/`). The stock's home screen golden (`tests/golden/stock-home.png`) is emulator-made; the
+device shows the same empty bookshelf. See `docs/hardware.md` and `docs/device/`.

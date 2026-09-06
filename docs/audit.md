@@ -117,3 +117,17 @@ or measurements on the desk unit recorded in `docs/device/`.
 | Deep-sleep hook: "hook the sleep-start write to stop the CPUs and schedule a reset with cause 5 and ext1 status" | **implemented** | Sequence confirmed from `rtc_sleep.c`: WAKEUP_STATE.WAKEUP_ENA, INT_CLR, STATE0.SLEEP_EN, spin on INT_RAW. Deep vs light distinguished by DIG_PWC.DG_WRAP_PD_EN. EXT1 trigger bit = BIT(1) (`soc/rtc.h`), RTC IO number of GPIO3 = 3 (`rtc_io_channel.h`). |
 | Stock app needs an out-of-scope peripheral (USB OTG at boot) | **corrected** | It never touched USB OTG. It stalled in ROM `Cache_Occupy_Items` (D-cache occupy DONE never set by the cache model); with that overlaid it runs `app_main`, sleeps on a plain power-on by design (boot-preflight wants a ~600 ms power hold), boots after a modelled wake, probes the panel over SPI2 half-duplex, and idles after touching the SAR ADC and RTC IO (unmodelled). |
 | Stock reads the panel ID with a bit-banged probe like the SDK | **corrected** | The stock app reads 0x70 through the SPI2 peripheral in half-duplex (5 dummy bytes with DC high); the panel device answers on that path as well. |
+
+## Corrected during the stock-firmware phase (2026-09-06, see docs/log.md)
+
+| Claim (handoff / earlier log) | Status | Evidence |
+|---|---|---|
+| The stock idles because a task blocks on the SAR ADC (battery conversion) | **corrected** | No `MEAS1/2_START_SAR` write ever; the SENS/APB_SARADC pattern is `bootloader_random_enable/disable` twice plus `rtcio_ll_function_select` clock gating. The blocker was `epd_flush` in `spi_device_transmit()`. |
+| `hw/sd/dwc_sdmmc.c` prints DEBUG lines on every access | **corrected** | `DWC_SDMMC_DEBUG` is off; the `dwc_sdmmc_read/write:` lines are `LOG_UNIMP` for unimplemented registers only. CMD/RINTSTS traffic is invisible unless the macro is defined. |
+| Stock panel access = SPI2 CPU path like Arduino | **corrected** | IDF `spi_master` with GDMA channel 0 bound to SPI2, interrupt-driven; only the probe read is polled. |
+| Espressif `esp32s3_intc` routes interrupts correctly | **corrected** | Map writes did not re-evaluate an asserted source; `esp_intr_enable/disable` of non-shared interrupts is exactly a map write. Patch 0006. |
+| Espressif `esp32s3_spi` flash reads are exact | **corrected** | QIO (0xEB) reads returned 2 bytes short (dummy cycles counted single-line, minus-one field ignored); NVS erased and re-provisioned its pages every boot and rejected every write. Patch 0009. |
+| Espressif `esp_gdma` read path is clean | **corrected** | It fetched the descriptor after the last node (NULL → guest address 0). Patch 0008. |
+| Stock first screen = region selection | **corrected** | An artefact of the corrupted NVS; with intact NVS the stock boots to Home. Region lives in `hw_calib/region` (u8) and was never set on the device. |
+| WiFi absent = the stock "fails fast" | **corrected** | The `wifi` task spins at priority 23 in ROM `rom_pkdet_vol_start` on `0x6000E050` (analog-master I2C) and starves core 0; disable with `user_config/net_en=0` until the block is modelled. |
+| NVS `user_config` holds `lightBri`/`lightCT` | could not confirm | Keys present: `pwrTimingVer`, `sta_ssid`, `sta_pwd`, `cfg_init`, `fbLangDone`, `net_en`, `wifi_creds`, `cloud_bind_st`, `otaPromptDay`; `hw_calib`: `screenType` (code also knows `region`, `lightDS`). |
