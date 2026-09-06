@@ -323,3 +323,20 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
   firmware that waits for a BUSY edge after reset sees one.
 - Patch series (`qemu-patches/`, 5 patches) applies cleanly on a fresh febae182 checkout with
   `git am`; the symlinked core sources resolve only when the clone sits at `<repo>/qemu/`.
+
+## 2026-09-06 — Session status
+
+| Milestone | State | Open items |
+|---|---|---|
+| M0 environment, audit, first contact | done | — |
+| M1 it boots (USB Serial/JTAG console) | done | real-device boot log comparison done for CrossPoint (`docs/device/boot-crosspoint-1.6.0.log`) |
+| M2 first pixel (GPIO, SPI2, panel) | done | UC8179 answers are from the SDK doc, not measured (no such unit) |
+| M3 home screen with the device's SD contents | done except the device-screenshot diff | needs the owner to take CrossPoint's screenshot chord on the device and expose the card over USB, then `x4emu screenshot --diff` against the BMP |
+| M4 touch, I2C bus, battery, RTC | done | GT911 product ID / raw touch frame not read from the real chip (its ID registers are only reachable through a dev build) |
+| M5 frontlight PWM, deep sleep | done | device wake-log comparison pending: the device auto-slept and only its power button wakes it |
+| M6 stock firmware, other panels | stock runs to its idle loop after a power wake; variants tested in the emulator | stock's blocker (SAR ADC / SD-FATFS / an interrupt wait) not identified; UC8179 unverified on hardware |
+
+Device state at the end of the session: app0 = CrossPoint 1.6.0-x4pro with the EpdBus trace
+(`images/crosspoint-epdtrace.bin`), app1 = stock 7.2.4, bootloader/partition table/otadata
+untouched; `tools/device.py restore-stock --yes` returns app0 to stock. The device is in deep sleep
+(auto-sleep) and its USB port is gone until the power button is pressed.
