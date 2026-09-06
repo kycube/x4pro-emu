@@ -39,6 +39,15 @@
 /* ---- UC81xx commands ------------------------------------------------------ */
 #define U_PSR   0x00
 #define U_PWR   0x01
+#define U_BTST  0x06
+#define U_TCON  0x60
+#define U_PWS   0xE3
+#define U_VDCS  0x82
+#define U_TSC   0x40
+#define U_TSE   0x41
+#define U_LPD   0x51
+#define U_AUTO  0x17
+#define U_FLG2  0x71
 #define U_POF   0x02
 #define U_PFS   0x03
 #define U_PON   0x04
@@ -63,6 +72,7 @@
 #define U_TSSET 0xE5
 
 static void trace_cmd(EpdCore *c);
+static void request_busy(EpdCore *c, uint32_t us);
 
 const char *epd_variant_name(EpdVariant v)
 {
@@ -161,6 +171,11 @@ void epd_core_set_rst(EpdCore *c, bool line_high)
     c->in_reset = !line_high;
     if (!was && c->in_reset) {
         epd_core_reset(c);
+        c->busy = true;            /* BUSY asserted while in reset (SSD: HIGH, UC: BUSY_N LOW) */
+    } else if (was && !c->in_reset) {
+        /* after the reset pulse the controller stays busy for its power-up time,
+         * which gives firmware that waits for the BUSY edge something to see */
+        request_busy(c, c->timing.power_us);
     }
 }
 
@@ -456,6 +471,7 @@ static void uc_byte(EpdCore *c, uint8_t b)
         case U_PSR: case U_PWR: case U_PFS: case U_DSLP: case U_PLL: case U_CDI:
         case U_TRES: case U_GSST: case U_PTL: case U_CCSET: case U_GSCAN: case U_TSSET:
         case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4:
+        case U_BTST: case U_TCON: case U_PWS: case U_VDCS: case U_TSC: case U_TSE: case U_LPD: case U_AUTO:
             break;
         default:
             c->unknown_cmds++;

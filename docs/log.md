@@ -279,3 +279,47 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
   sleep and only the owner can press its button).
 - Short power presses (< 400 ms) are clicks (X4 Pro: double-click toggles the frontlight),
   not sleep: `SETTINGS.getPowerButtonDuration()` is 400 ms unless "short press = sleep" is set.
+
+## 2026-09-06 — M6 (part 1): where the stock firmware stops, and why
+
+- Stock `xteink_app` 7.2.4 (IDF 6.0.1) on the `xteink-x4pro` machine: ROM, bootloader, octal
+  PSRAM detection and `cpu_start: Multicore app` print, then nothing. `x4emu qmp` +
+  `info registers -a`: CPU0 PC=0x4004e89b, CPU1 PC=0x40041a76 (ROM). Resolved with the full ROM
+  symbol table from Espressif's `esp-rom-elfs` release 20241011 (`esp32s3_rev0_rom.elf`,
+  `xtensa-esp-elf-nm`; the public `esp32s3.rom*.ld` files only list exported API symbols and
+  gave nonsense for these addresses): CPU0 is in `Cache_Occupy_Items+0x3b`, called from
+  `Cache_Occupy_Addr+0x4c`, with A02=0x3C000000 (DROM window) and A08=0x600C4034 =
+  `EXTMEM_DCACHE_OCCUPY_CTRL_REG`; CPU1 idles in `ets_delay_us` (its ROM wait loop).
+  So IDF 6.0.1's startup asks the D-cache to "occupy" (lock) a region and polls
+  `DCACHE_OCCUPY_DONE` (bit 1), which Espressif's `esp32s3_cache` model never sets (it has no
+  occupy/preload/autoload handling). The fix is a register overlay that reports the operation
+  done; see part 2.
+
+## 2026-09-06 — M6 (part 2): stock firmware boots to its idle loop; panel variants
+
+- Overlay for `EXTMEM_DCACHE_OCCUPY_CTRL` (0x600C4034) and `EXTMEM_DCACHE_LOCK_CTRL`
+  (0x600C401C) reporting DONE: the stock app now runs `app_main`. Its `boot-preflight` rejects a
+  plain power-on (`hold=0ms decision=2 reason=3`) and enters deep sleep with `wake_on=next_press`,
+  which the sleep model pauses. `x4emu press power` (a 1.5 s hold) wakes it with DSLEEP and the
+  preflight accepts (`source=2 hold=602ms decision=0 reason=11`), so the stock reader wants the
+  power button held ~600 ms to boot, as the real device's log (`source=6 … decision=0`) came from a
+  USB-triggered reset that it also accepts.
+- After that the stock app initialises memory/tasks, `SD_HOST`, reads the GT911 ID/version/config
+  (0x8140: "911", 0x8144: 60 10, 0x8047..), the RTC time, polls the CW2017 SoC/VCELL every few
+  seconds, resets the panel three times and reads VER through SPI2 in half-duplex — the model now
+  answers `00 0F 68 00 00` on that path too — and then both CPUs sit in the idle loop. No panel
+  init, no WiFi (the device starts WiFi at 13 s). Not chased further (out of the brief's scope);
+  the untouched peripherals it did poke are the SAR ADC (`sens` 0x60008904/0x6000880C,
+  `apb_saradc` 0x60040000/04/18/28/70: ~250 accesses) and RTC IO (0x60008490/BC/C4). A stock
+  task is most likely blocked on one of those (battery ADC conversion) or on an SD/FATFS mount
+  under IDF 6's driver. `--trace-epd`/`--trace-i2c` capture everything it does up to that point.
+- Panel variants: `tests/test_panels.py` boots CrossPoint with `--panel ssd1677|uc8179|uc8279`;
+  the probe verdicts are `default controller` (line floats to 0xFF), `promoted … UC8179
+  (LUT_VER=01)` and `promoted … UC8279 800x480 (LUT_VER=68)` and each variant paints Home. The
+  UC8179 driver used two commands the core did not know (BTST 0x06, PWS 0xE3); added, along with
+  TCON/VDCS/TSC/TSE/LPD/AUTO. Only the UC8279 answers are measured; the UC8179 answers are the
+  SDK doc's example (`00 00 01 FF FF`, FLG 0x13) and the SSD1677 behaviour is the floating line.
+- Panel core: BUSY is asserted while RST is low and for the power-up time after it rises, so
+  firmware that waits for a BUSY edge after reset sees one.
+- Patch series (`qemu-patches/`, 5 patches) applies cleanly on a fresh febae182 checkout with
+  `git am`; the symlinked core sources resolve only when the clone sits at `<repo>/qemu/`.

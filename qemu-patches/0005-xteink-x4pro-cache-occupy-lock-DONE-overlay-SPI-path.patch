@@ -1,0 +1,135 @@
+From d1df048d5a97a7972600546a5a2e9740a370f057 Mon Sep 17 00:00:00 2001
+From: x4pro-emu <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 15:37:06 -0500
+Subject: [PATCH 5/5] xteink-x4pro: cache occupy/lock DONE overlay, SPI-path
+ probe answers, BUSY on reset
+
+- EXTMEM_DCACHE_OCCUPY_CTRL / LOCK_CTRL report DONE so IDF 6.x firmware leaves ROM.
+- The panel answers 0x70/0x71/0xA2 reads clocked through SPI2 (half-duplex) too.
+- Core: BUSY asserted during RST and for the power-up time after it.
+---
+ hw/display/x4pro_epd.c         | 27 +++++++++++++++++--
+ hw/xtensa/xteink_x4pro.c       | 48 ++++++++++++++++++++++++++++++++++
+ include/hw/display/x4pro_epd.h |  1 +
+ 3 files changed, 74 insertions(+), 2 deletions(-)
+
+diff --git a/hw/display/x4pro_epd.c b/hw/display/x4pro_epd.c
+index f33f21c..40e5c51 100644
+--- a/hw/display/x4pro_epd.c
++++ b/hw/display/x4pro_epd.c
+@@ -91,9 +91,32 @@ static void epd_after_byte(X4ProEpdState *s)
+ static uint32_t epd_transfer(SSIPeripheral *dev, uint32_t val)
+ {
+     X4ProEpdState *s = X4PRO_EPD(dev);
+-    epd_core_byte(&s->core, val & 0xFF);
++    EpdCore *c = &s->core;
++    /* Half-duplex read through the SPI peripheral (the stock app clocks dummy
++     * bytes after 0x70/0x71/0xA2 with DC high and samples the shared line):
++     * a UC part answers, an SSD part leaves the line floating (pull-up: 0xFF). */
++    if (c->cs && c->dc && (c->cmd == 0x70 || c->cmd == 0x71 || c->cmd == 0xA2)) {
++        uint32_t r = 0xFF;
++        if (c->variant != EPD_SSD1677) {
++            if (!c->probe_read_active) {
++                epd_core_set_dc(c, true);   /* (re)arm the read-out */
++            }
++            if (c->probe_read_active && c->probe_bit / 8 < c->probe_len) {
++                r = c->probe_buf[c->probe_bit / 8];
++                c->probe_bit += 8;
++            }
++        }
++        if (c->cmd_len < sizeof(c->arg)) {
++            c->arg[c->cmd_len] = r;   /* the trace shows what the panel answered */
++        }
++        c->cmd_len++;
++        c->bytes_in++;
++        s->spi_probe_bytes++;
++        return r;
++    }
++    epd_core_byte(c, val & 0xFF);
+     epd_after_byte(s);
+-    return 0xFF;   /* no MISO */
++    return 0xFF;   /* no MISO otherwise */
+ }
+ 
+ static void epd_set_line(X4ProEpdState *s)
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 97bff31..18f0edb 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -115,6 +115,53 @@ static void x4pro_add_iolog(MachineState *machine, MemoryRegion *sys_mem)
+     }
+ }
+ 
++/* ---- cache "done" overlay ----------------------------------------------------
++ * Espressif's esp32s3_cache model does not implement the D-cache OCCUPY and LOCK
++ * operations; ESP-IDF 6.x startup (stock xteink_app) polls their DONE bits in
++ * ROM (Cache_Occupy_Items) forever. Answer "done" for those two registers.
++ */
++typedef struct CacheDoneReg {
++    const char *name;
++    hwaddr addr;
++    uint32_t done_bit;
++    uint32_t value;
++    MemoryRegion mr;
++} CacheDoneReg;
++
++static CacheDoneReg cache_done_regs[] = {
++    { "dcache_lock_ctrl",   0x600C401C, 1u << 2, 0 },   /* EXTMEM_DCACHE_LOCK_CTRL: LOCK_DONE */
++    { "dcache_occupy_ctrl", 0x600C4034, 1u << 1, 0 },   /* EXTMEM_DCACHE_OCCUPY_CTRL: OCCUPY_DONE */
++};
++
++static uint64_t cache_done_read(void *opaque, hwaddr addr, unsigned size)
++{
++    CacheDoneReg *r = opaque;
++    return r->value | r->done_bit;
++}
++
++static void cache_done_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    CacheDoneReg *r = opaque;
++    r->value = value & ~r->done_bit;
++}
++
++static const MemoryRegionOps cache_done_ops = {
++    .read = cache_done_read,
++    .write = cache_done_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void x4pro_add_cache_done(MachineState *machine, MemoryRegion *sys_mem)
++{
++    for (size_t i = 0; i < ARRAY_SIZE(cache_done_regs); i++) {
++        CacheDoneReg *r = &cache_done_regs[i];
++        memory_region_init_io(&r->mr, OBJECT(machine), &cache_done_ops, r, r->name, 4);
++        memory_region_add_subregion_overlap(sys_mem, r->addr, &r->mr, 2);
++    }
++}
++
+ /* ---- board pins (docs/hardware.md) -------------------------------------- */
+ #define PIN_BTN_LEFT   0
+ #define PIN_BTN_RIGHT  7
+@@ -632,6 +679,7 @@ static void x4pro_machine_init(MachineState *machine)
+     }
+ 
+     x4pro_add_iolog(machine, sys_mem);
++    x4pro_add_cache_done(machine, sys_mem);
+ }
+ 
+ static void x4pro_machine_class_init(ObjectClass *oc, void *data)
+diff --git a/include/hw/display/x4pro_epd.h b/include/hw/display/x4pro_epd.h
+index ddde866..c2718fc 100644
+--- a/include/hw/display/x4pro_epd.h
++++ b/include/hw/display/x4pro_epd.h
+@@ -44,6 +44,7 @@ struct X4ProEpdState {
+ 
+     FILE *trace;
+     uint64_t busy_intervals;
++    uint64_t spi_probe_bytes;
+     int64_t last_refresh_ns;
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+
