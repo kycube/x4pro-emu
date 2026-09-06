@@ -16,7 +16,9 @@ def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
     assert pct < 0.2, r.stdout
     # match the device: 100%, USB power -> repaint via a Browse Files round trip
     x4emu(emu, 'battery', '--soc', 100, '--charging', 'on')
-    x4emu(emu, 'tap', 345, 350, '--wait', 20)
+    # the percentage change repaints the status bar within ~1.5 s; do not tap into that paint
+    x4emu(emu, 'tap', 345, 350, '--quiet', 3, '--wait', 20)
+    x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     x4emu(emu, 'home', '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)

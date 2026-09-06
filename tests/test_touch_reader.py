@@ -22,13 +22,13 @@ def test_tap_open_book_and_page_forward(images, emu, tmp_path):
     x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 90)
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
     # Home menu, portrait UI on the landscape panel: "Browse Files" sits around (345, 350)
-    x4emu(emu, 'tap', 345, 350, '--wait', 20)
+    x4emu(emu, 'tap', 345, 350, '--quiet', 2, '--wait', 20)
     x4emu(emu, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     # first entry of the file list: select it with the buttons (Right = down/next is not
     # needed for the first row); confirm via a tap on the first row
     x4emu(emu, 'screenshot', str(tmp_path / 'browser.png'))
-    x4emu(emu, 'tap', 140, 240, '--wait', 20)
+    x4emu(emu, 'tap', 140, 240, '--quiet', 1.5, '--wait', 20)
     x4emu(emu, 'wait-text', 'Loaded ePub: /Test Book.epub', '--timeout', 90)
     x4emu(emu, 'wait-quiet', '--seconds', 3, '--timeout', 120)
     p1 = tmp_path / 'page1.png'; p2 = tmp_path / 'page2.png'; p3 = tmp_path / 'page3.png'
