@@ -3,6 +3,7 @@
 Linux/macOS-hosted emulator for unmodified Xteink X4 Pro firmware images, driven from a shell:
 buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots to its home screen,
 opens books, pages, sleeps and wakes in it. Progress and dead ends: `docs/log.md`.
+**Next agent: read `docs/NEXT_PHASE.md`** — the stock-firmware plan (SAR ADC first) and the world-class checklist.
 
 ## What is NOT emulated (how it shows up for a firmware developer)
 
