@@ -1,0 +1,551 @@
+From f53b65ab07212e849ce123c4c0508ac216e5a88a Mon Sep 17 00:00:00 2001
+From: x4pro-emu <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 14:22:59 -0500
+Subject: [PATCH] xteink-x4pro: machine subclass, USB Serial/JTAG console
+ model, I/O access logger
+
+- hw/misc/esp32s3_usj.c: CDC half of the USB Serial/JTAG controller backed by a
+  chardev: EP1 packet buffer, WR_DONE flush -> SERIAL_IN_EMPTY, SOF raw bit every
+  1 ms of guest time, OUT_RECV_PKT on chardev input, never BUS_RESET.
+- hw/xtensa/xteink_x4pro.c: 'xteink-x4pro' machine = esp32s3 machine + board
+  devices; stub peripherals are shadowed at higher MemoryRegion priority. Named
+  logging overlays make peripheral accesses visible under -d unimp.
+---
+ hw/misc/esp32s3_usj.c         | 271 ++++++++++++++++++++++++++++++++++
+ hw/misc/meson.build           |   1 +
+ hw/xtensa/meson.build         |   1 +
+ hw/xtensa/xteink_x4pro.c      | 166 +++++++++++++++++++++
+ include/hw/misc/esp32s3_usj.h |  46 ++++++
+ 5 files changed, 485 insertions(+)
+ create mode 100644 hw/misc/esp32s3_usj.c
+ create mode 100644 hw/xtensa/xteink_x4pro.c
+ create mode 100644 include/hw/misc/esp32s3_usj.h
+
+diff --git a/hw/misc/esp32s3_usj.c b/hw/misc/esp32s3_usj.c
+new file mode 100644
+index 0000000..1c1a7d3
+--- /dev/null
++++ b/hw/misc/esp32s3_usj.c
+@@ -0,0 +1,271 @@
++/*
++ * ESP32-S3 USB Serial/JTAG controller (CDC console half).
++ *
++ * Register map from ESP-IDF v5.5 soc/usb_serial_jtag_reg.h. Behaviour the
++ * firmware depends on (see docs/hardware.md "USB Serial/JTAG console"):
++ *  - EP1 (+0x00): write = append to the 64-byte IN packet, read = pop the OUT packet.
++ *  - EP1_CONF (+0x04): WR_DONE (bit 0) write pushes the IN packet to the chardev
++ *    and raises SERIAL_IN_EMPTY; SERIAL_IN_EP_DATA_FREE (bit 1) is always set;
++ *    SERIAL_OUT_EP_DATA_AVAIL (bit 2) while OUT bytes remain.
++ *  - INT_RAW/ST/ENA/CLR (+0x08..+0x14): SOF (bit 1) is raised every 1 ms of
++ *    guest time while host-connected (ESP-IDF's connection monitor clears it
++ *    from the tick hook and needs to see it again next tick), SERIAL_OUT_RECV_PKT
++ *    (bit 2) on chardev input, SERIAL_IN_EMPTY (bit 3) after each flush.
++ *    USB_BUS_RESET (bit 9) is never raised.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/hw.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/qdev-properties-system.h"
++#include "hw/misc/esp32s3_usj.h"
++
++#define R_EP1           0x00
++#define R_EP1_CONF      0x04
++#define R_INT_RAW       0x08
++#define R_INT_ST        0x0C
++#define R_INT_ENA       0x10
++#define R_INT_CLR       0x14
++#define R_CONF0         0x18
++#define R_TEST          0x1C
++#define R_JFIFO_ST      0x20
++#define R_FRAM_NUM      0x24
++#define R_IN_EP0_ST     0x28
++#define R_IN_EP1_ST     0x2C
++#define R_IN_EP2_ST     0x30
++#define R_IN_EP3_ST     0x34
++#define R_OUT_EP0_ST    0x38
++#define R_OUT_EP1_ST    0x3C
++#define R_OUT_EP2_ST    0x40
++#define R_MISC_CONF     0x44
++#define R_MEM_CONF      0x48
++#define R_DATE          0x80
++
++#define EP1_CONF_WR_DONE            (1u << 0)
++#define EP1_CONF_IN_EP_DATA_FREE    (1u << 1)
++#define EP1_CONF_OUT_EP_DATA_AVAIL  (1u << 2)
++
++#define INT_JTAG_IN_FLUSH       (1u << 0)
++#define INT_SOF                 (1u << 1)
++#define INT_SERIAL_OUT_RECV_PKT (1u << 2)
++#define INT_SERIAL_IN_EMPTY     (1u << 3)
++#define INT_IN_TOKEN_REC_IN_EP1 (1u << 8)
++#define INT_USB_BUS_RESET       (1u << 9)
++#define INT_ALL                 0xFFFu
++
++#define SOF_PERIOD_NS 1000000
++
++static void usj_update_irq(ESP32S3UsjState *s)
++{
++    qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
++}
++
++static void usj_flush(ESP32S3UsjState *s)
++{
++    if (s->tx_len) {
++        if (qemu_chr_fe_backend_connected(&s->chr)) {
++            qemu_chr_fe_write_all(&s->chr, s->tx, s->tx_len);
++        }
++        s->tx_bytes += s->tx_len;
++        s->tx_len = 0;
++    }
++    s->flushes++;
++    if (s->host_connected) {
++        /* The host clocked the IN packet out: FIFO empty again. */
++        s->int_raw |= INT_SERIAL_IN_EMPTY | INT_IN_TOKEN_REC_IN_EP1;
++        usj_update_irq(s);
++    }
++}
++
++static uint64_t usj_read(void *opaque, hwaddr addr, unsigned int size)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(opaque);
++    uint32_t r = 0;
++
++    switch (addr) {
++    case R_EP1:
++        if (s->rx_pos < s->rx_len) {
++            r = s->rx[s->rx_pos++];
++            if (s->rx_pos >= s->rx_len) {
++                s->rx_pos = s->rx_len = 0;
++                qemu_chr_fe_accept_input(&s->chr);
++            }
++        }
++        break;
++    case R_EP1_CONF:
++        r = EP1_CONF_IN_EP_DATA_FREE;
++        if (s->rx_pos < s->rx_len) {
++            r |= EP1_CONF_OUT_EP_DATA_AVAIL;
++        }
++        break;
++    case R_INT_RAW:
++        r = s->int_raw;
++        break;
++    case R_INT_ST:
++        r = s->int_raw & s->int_ena;
++        break;
++    case R_INT_ENA:
++        r = s->int_ena;
++        break;
++    case R_CONF0:
++        r = s->conf0;
++        break;
++    case R_FRAM_NUM:
++        r = s->fram_num & 0x7FF;
++        break;
++    case R_IN_EP1_ST:
++        /* in_ep1_state bits 0..1, wr_addr bits 2..8, rd_addr bits 9..15 */
++        r = (s->tx_len & 0x7F) << 2;
++        break;
++    case R_OUT_EP1_ST:
++        /* out_ep1_state, wr_addr, rd_addr, rec_data_cnt (bits 16..22) */
++        r = ((s->rx_len - s->rx_pos) & 0x7F) << 16;
++        break;
++    case R_DATE:
++        r = 0x02101200;
++        break;
++    default:
++        break;
++    }
++    return r;
++}
++
++static void usj_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(opaque);
++
++    switch (addr) {
++    case R_EP1:
++        if (s->tx_len < ESP32S3_USJ_PKT) {
++            s->tx[s->tx_len++] = value & 0xFF;
++        }
++        if (s->tx_len >= ESP32S3_USJ_PKT) {
++            usj_flush(s);
++        }
++        break;
++    case R_EP1_CONF:
++        if (value & EP1_CONF_WR_DONE) {
++            usj_flush(s);
++        }
++        break;
++    case R_INT_ENA:
++        s->int_ena = value & INT_ALL;
++        usj_update_irq(s);
++        break;
++    case R_INT_CLR:
++        s->int_raw &= ~(value & INT_ALL);
++        usj_update_irq(s);
++        break;
++    case R_INT_RAW:
++        /* not writable on hardware; ignore */
++        break;
++    case R_CONF0:
++        s->conf0 = value;
++        break;
++    default:
++        break;
++    }
++}
++
++static const MemoryRegionOps usj_ops = {
++    .read = usj_read,
++    .write = usj_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void usj_sof_tick(void *opaque)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(opaque);
++    if (s->host_connected) {
++        s->fram_num = (s->fram_num + 1) & 0x7FF;
++        s->int_raw |= INT_SOF;
++        usj_update_irq(s);
++    }
++    timer_mod(s->sof_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SOF_PERIOD_NS);
++}
++
++static int usj_can_receive(void *opaque)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(opaque);
++    return (s->rx_pos >= s->rx_len) ? ESP32S3_USJ_PKT : 0;
++}
++
++static void usj_receive(void *opaque, const uint8_t *buf, int size)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(opaque);
++    if (size > ESP32S3_USJ_PKT) {
++        size = ESP32S3_USJ_PKT;
++    }
++    memcpy(s->rx, buf, size);
++    s->rx_len = size;
++    s->rx_pos = 0;
++    s->rx_bytes += size;
++    s->int_raw |= INT_SERIAL_OUT_RECV_PKT;
++    usj_update_irq(s);
++}
++
++static void usj_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(obj);
++    s->int_raw = 0;
++    s->int_ena = 0;
++    s->conf0 = 0;
++    s->fram_num = 0;
++    s->tx_len = 0;
++    s->rx_len = s->rx_pos = 0;
++    timer_mod(s->sof_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SOF_PERIOD_NS);
++}
++
++static void usj_realize(DeviceState *dev, Error **errp)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(dev);
++    qemu_chr_fe_set_handlers(&s->chr, usj_can_receive, usj_receive, NULL, NULL, s, NULL, true);
++    s->sof_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, usj_sof_tick, s);
++}
++
++static void usj_init(Object *obj)
++{
++    ESP32S3UsjState *s = ESP32S3_USJ(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &usj_ops, s, TYPE_ESP32S3_USJ, ESP32S3_USJ_REGS_SIZE);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++}
++
++static Property usj_properties[] = {
++    DEFINE_PROP_CHR("chardev", ESP32S3UsjState, chr),
++    DEFINE_PROP_BOOL("host-connected", ESP32S3UsjState, host_connected, true),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void usj_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = usj_reset_hold;
++    dc->realize = usj_realize;
++    device_class_set_props(dc, usj_properties);
++}
++
++static const TypeInfo usj_info = {
++    .name = TYPE_ESP32S3_USJ,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3UsjState),
++    .instance_init = usj_init,
++    .class_init = usj_class_init,
++};
++
++static void usj_register_types(void)
++{
++    type_register_static(&usj_info);
++}
++
++type_init(usj_register_types)
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 0ac4b77..6980a79 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -179,6 +179,7 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
+   'esp32s3_sha.c',
+   'esp32c3_jtag.c',
+   'esp32s3_rtc_cntl.c',
++  'esp32s3_usj.c',
+   'esp32s3_rng.c',
+   'esp32s3_pms.c',
+   'esp_hmac.c',
+diff --git a/hw/xtensa/meson.build b/hw/xtensa/meson.build
+index c1deccb..0d9dce8 100644
+--- a/hw/xtensa/meson.build
++++ b/hw/xtensa/meson.build
+@@ -12,6 +12,7 @@ xtensa_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
+   'esp32s3_clk.c',
+   'esp32s3_intc.c',
+   'esp32s3.c',
++  'xteink_x4pro.c',
+ ))
+ 
+ hw_arch += {'xtensa': xtensa_ss}
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+new file mode 100644
+index 0000000..6e7b113
+--- /dev/null
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -0,0 +1,166 @@
++/*
++ * Xteink X4 Pro board: ESP32-S3R8 + 800x480 e-paper (SSD1677 / UC8179 / UC8279)
++ * + GT911 touch + BM8563 RTC + CW2017 gauge + buttons.
++ *
++ * The machine is a QOM subclass of Espressif's "esp32s3" machine. It calls the
++ * parent init (which builds the whole SoC) and then adds the board devices.
++ * Stub SoC peripherals are shadowed by mapping full models at the same base
++ * with a higher memory-region priority, so esp32s3.c is not edited.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/units.h"
++#include "qapi/error.h"
++#include "hw/boards.h"
++#include "hw/sysbus.h"
++#include "hw/irq.h"
++#include "hw/qdev-properties.h"
++#include "exec/memory.h"
++#include "exec/address-spaces.h"
++#include "hw/misc/esp32s3_reg.h"
++#include "hw/xtensa/esp32s3_intc.h"
++#include "hw/misc/esp32s3_usj.h"
++
++#define TYPE_ESP32S3_MACHINE MACHINE_TYPE_NAME("esp32s3")
++#define TYPE_X4PRO_MACHINE   MACHINE_TYPE_NAME("xteink-x4pro")
++
++typedef struct X4ProMachineClass {
++    MachineClass parent_class;
++    void (*parent_init)(MachineState *machine);
++} X4ProMachineClass;
++
++DECLARE_CLASS_CHECKERS(X4ProMachineClass, X4PRO_MACHINE, TYPE_X4PRO_MACHINE)
++
++/* ---- I/O access logger for peripheral blocks we do not model yet ---------
++ * The stock SoC covers 0x60000000..0x600d1000 with a silent catch-all, so
++ * `-d unimp` never sees a peripheral access. These overlays (priority 1) log
++ * every access to the named block and return 0, which is exactly what the
++ * catch-all did, but visibly. Real models replace them one by one.
++ */
++typedef struct IoLogRegion {
++    const char *name;
++    hwaddr base;
++    uint32_t size;
++    MemoryRegion mr;
++} IoLogRegion;
++
++static IoLogRegion iolog_regions[] = {
++    { "gpio",      DR_REG_GPIO_BASE,            0x1000 },
++    { "rtcio",     DR_REG_RTCIO_BASE,           0x400  },
++    { "iomux",     DR_REG_IO_MUX_BASE,          0x1000 },
++    { "i2c0",      DR_REG_I2C_EXT_BASE,         0x1000 },
++    { "ledc",      DR_REG_LEDC_BASE,            0x1000 },
++    { "spi2",      DR_REG_SPI2_BASE,            0x1000 },
++    { "spi3",      DR_REG_SPI3_BASE,            0x1000 },
++    { "usb_wrap",  DR_REG_USB_WRAP_BASE,        0x1000 },
++    { "rmt",       DR_REG_RMT_BASE,             0x1000 },
++    { "sens",      0x60008800,                  0x400  },
++    { "apb_saradc",0x60040000,                  0x1000 },
++    { "pcnt",      0x60017000,                  0x1000 },
++    { "mcpwm0",    0x6001E000,                  0x1000 },
++    { "i2c1",      0x60027000,                  0x1000 },
++    { "uhci0",     0x60014000,                  0x1000 },
++    { "i2s0",      0x6000F000,                  0x1000 },
++    { "i2s1",      0x6002D000,                  0x1000 },
++    { "lcd_cam",   0x60041000,                  0x1000 },
++    { "usb_otg",   0x60080000,                  0x40000 },
++};
++
++static uint32_t x4pro_strap_mode = 0x4;   /* SPI flash boot; copied from /machine/soc/gpio */
++
++static uint64_t iolog_read(void *opaque, hwaddr addr, unsigned size)
++{
++    IoLogRegion *r = opaque;
++    if (r->base == DR_REG_GPIO_BASE && addr == 0x38) {
++        return x4pro_strap_mode;   /* GPIO_STRAP_REG: keep the SoC stub's answer */
++    }
++    qemu_log_mask(LOG_UNIMP, "x4pro/%s: read  0x%08" HWADDR_PRIx " size %u\n",
++                  r->name, r->base + addr, size);
++    return 0;
++}
++
++static void iolog_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    IoLogRegion *r = opaque;
++    qemu_log_mask(LOG_UNIMP, "x4pro/%s: write 0x%08" HWADDR_PRIx " = 0x%08" PRIx64 " size %u\n",
++                  r->name, r->base + addr, value, size);
++}
++
++static const MemoryRegionOps iolog_ops = {
++    .read = iolog_read,
++    .write = iolog_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++static void x4pro_add_iolog(MachineState *machine, MemoryRegion *sys_mem)
++{
++    for (size_t i = 0; i < ARRAY_SIZE(iolog_regions); i++) {
++        IoLogRegion *r = &iolog_regions[i];
++        char name[32];
++        snprintf(name, sizeof(name), "x4pro.iolog.%s", r->name);
++        memory_region_init_io(&r->mr, OBJECT(machine), &iolog_ops, r, name, r->size);
++        memory_region_add_subregion_overlap(sys_mem, r->base, &r->mr, 1);
++    }
++}
++
++/* ---- machine ------------------------------------------------------------ */
++
++static void x4pro_machine_init(MachineState *machine)
++{
++    X4ProMachineClass *xc = X4PRO_MACHINE_GET_CLASS(machine);
++    MemoryRegion *sys_mem = get_system_memory();
++
++    /* Build the stock ESP32-S3 SoC first. */
++    xc->parent_init(machine);
++
++    DeviceState *intmatrix = DEVICE(object_resolve_path("/machine/soc/intmatrix", NULL));
++    if (!intmatrix) {
++        error_report("xteink-x4pro: cannot find /machine/soc/intmatrix");
++        exit(1);
++    }
++
++    /* USB Serial/JTAG console, shadowing the SoC's stub at the same base. */
++    {
++        DeviceState *usj = qdev_new(TYPE_ESP32S3_USJ);
++        object_property_add_child(OBJECT(machine), "usj", OBJECT(usj));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(usj), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(usj), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_SERIAL_JTAG_BASE, mr, 1);
++        sysbus_connect_irq(SYS_BUS_DEVICE(usj), 0,
++                           qdev_get_gpio_in(intmatrix, ETS_USB_SERIAL_JTAG_INTR_SOURCE));
++    }
++
++    {
++        Object *gpio = object_resolve_path("/machine/soc/gpio", NULL);
++        if (gpio) {
++            x4pro_strap_mode = object_property_get_int(gpio, "strap_mode", &error_abort);
++        }
++    }
++    x4pro_add_iolog(machine, sys_mem);
++}
++
++static void x4pro_machine_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++    X4ProMachineClass *xc = X4PRO_MACHINE_CLASS(oc);
++
++    xc->parent_init = mc->init;   /* inherited esp32s3 init */
++    mc->init = x4pro_machine_init;
++    mc->desc = "Xteink X4 Pro e-reader (ESP32-S3R8, 800x480 EPD, GT911)";
++}
++
++static const TypeInfo x4pro_machine_info = {
++    .name = TYPE_X4PRO_MACHINE,
++    .parent = TYPE_ESP32S3_MACHINE,
++    .class_size = sizeof(X4ProMachineClass),
++    .class_init = x4pro_machine_class_init,
++};
++
++static void x4pro_machine_type_init(void)
++{
++    type_register_static(&x4pro_machine_info);
++}
++
++type_init(x4pro_machine_type_init);
+diff --git a/include/hw/misc/esp32s3_usj.h b/include/hw/misc/esp32s3_usj.h
+new file mode 100644
+index 0000000..a7e090c
+--- /dev/null
++++ b/include/hw/misc/esp32s3_usj.h
+@@ -0,0 +1,46 @@
++/*
++ * ESP32-S3 USB Serial/JTAG controller: the CDC-ACM half, modelled as a
++ * chardev-backed console. Enough of the register interface for ESP-IDF's
++ * usb_serial_jtag driver and Arduino's HWCDC to believe a host is attached.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++#include "chardev/char-fe.h"
++#include "qemu/timer.h"
++
++#define TYPE_ESP32S3_USJ "esp32s3.usj"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3UsjState, ESP32S3_USJ)
++
++#define ESP32S3_USJ_REGS_SIZE 0x84
++#define ESP32S3_USJ_PKT 64
++
++struct ESP32S3UsjState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion iomem;
++    qemu_irq irq;
++    CharBackend chr;
++    QEMUTimer *sof_timer;
++
++    /* properties */
++    bool host_connected;     /* generate SOF, accept IN packets */
++
++    uint32_t int_raw;
++    uint32_t int_ena;
++    uint32_t conf0;
++    uint32_t fram_num;
++
++    uint8_t tx[ESP32S3_USJ_PKT];
++    uint32_t tx_len;
++    uint8_t rx[ESP32S3_USJ_PKT];
++    uint32_t rx_len;
++    uint32_t rx_pos;
++
++    /* statistics for the board state property */
++    uint64_t tx_bytes;
++    uint64_t rx_bytes;
++    uint64_t flushes;
++};
+-- 
+2.50.1 (Apple Git-155)
+

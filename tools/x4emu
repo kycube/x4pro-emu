@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""x4emu: drive the Xteink X4 Pro emulator from a shell.
+
+  x4emu run --flash flash.bin [--sd sd.img] [--efuse efuse.bin] [--panel ssd1677|uc8179|uc8279]
+            [--fast-epd] [--gdb] [--trace-epd FILE] [--trace-i2c FILE] [--name dev0] [--no-usb-host]
+  x4emu stop | reset | status | state | log [--follow] [--since N] | wait-text TEXT [--timeout S]
+  x4emu screenshot out.png [--diff other.png] | wait-refresh [--count N] [--timeout S]
+  x4emu press left|right|power [--ms 120] | hold power --ms 3000
+  x4emu tap X Y | swipe X1 Y1 X2 Y2 [--ms 250] | home [--ms 120]
+  x4emu battery --soc 63 --mv 3910 [--charging on|off] | light
+  x4emu mem read ADDR LEN | gdb | qmp '{"execute":...}'
+
+Every instance lives in .x4emu/<name>/ (qmp.sock, console.log, uart0.log, qemu.log, pid, run.json).
+Nothing here blocks without a timeout; nothing needs a terminal.
+"""
+import argparse, json, os, shlex, signal, socket, subprocess, sys, time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+QEMU = os.environ.get('X4EMU_QEMU', os.path.join(ROOT, 'qemu', 'build', 'qemu-system-xtensa'))
+BOARD = '/machine/x4pro-board'
+INPUT = '/machine/x4pro-input'
+PANEL_W, PANEL_H = 800, 480
+
+def idir(name):
+    return os.path.join(ROOT, '.x4emu', name)
+
+# ---------------------------------------------------------------- QMP client
+class QMP:
+    def __init__(self, path, timeout=5.0):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(timeout)
+        self.sock.connect(path)
+        self.buf = b''
+        self._recv()                      # greeting
+        self.cmd('qmp_capabilities')
+
+    def _recv(self):
+        while b'\n' not in self.buf:
+            d = self.sock.recv(65536)
+            if not d:
+                raise EOFError('QMP closed')
+            self.buf += d
+        line, self.buf = self.buf.split(b'\n', 1)
+        return json.loads(line)
+
+    def cmd(self, name, **args):
+        msg = {'execute': name}
+        if args:
+            msg['arguments'] = args
+        self.sock.sendall((json.dumps(msg) + '\n').encode())
+        while True:
+            r = self._recv()
+            if 'event' in r:
+                continue
+            if 'error' in r:
+                raise RuntimeError(f"{name}: {r['error'].get('desc')}")
+            return r.get('return')
+
+    def qom_get(self, path, prop):
+        return self.cmd('qom-get', path=path, property=prop)
+
+    def qom_set(self, path, prop, value):
+        return self.cmd('qom-set', path=path, property=prop, value=value)
+
+    def close(self):
+        self.sock.close()
+
+def connect(name, timeout=5.0):
+    p = os.path.join(idir(name), 'qmp.sock')
+    if not os.path.exists(p):
+        sys.exit(f'no instance "{name}" (missing {p}); run `x4emu run` first')
+    return QMP(p, timeout)
+
+def pid_alive(name):
+    try:
+        pid = int(open(os.path.join(idir(name), 'pid')).read())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+# ---------------------------------------------------------------- commands
+def cmd_run(a):
+    d = idir(a.name)
+    if pid_alive(a.name):
+        sys.exit(f'instance "{a.name}" already running (pid {pid_alive(a.name)}); `x4emu stop` first')
+    os.makedirs(d, exist_ok=True)
+    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log'):
+        try: os.remove(os.path.join(d, f))
+        except FileNotFoundError: pass
+    flash = os.path.abspath(a.flash)
+    if os.path.getsize(flash) != 16 * 1024 * 1024:
+        sys.exit(f'{flash} is not a 16 MB image (use tools/mkflash.py)')
+    efuse = os.path.abspath(a.efuse) if a.efuse else None
+    if efuse is None:
+        efuse = os.path.join(d, 'efuse.bin')
+        if not os.path.exists(efuse):
+            subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'mkefuse.py'), efuse,
+                            '--dump', os.path.join(ROOT, 'docs', 'device', 'efuse-dump.txt')],
+                           check=True, stdout=subprocess.DEVNULL)
+    cmd = [QEMU, '-machine', a.machine, '-m', '8M',
+           '-global', 'driver=ssi_psram,property=is_octal,value=true',
+           '-drive', f'file={flash},if=mtd,format=raw',
+           '-drive', f'file={efuse},if=none,format=raw,id=efuse',
+           '-global', 'driver=nvram.esp32s3.efuse,property=drive,value=efuse',
+           '-display', 'none', '-monitor', 'none',
+           '-serial', f'file:{os.path.join(d, "uart0.log")}',
+           '-chardev', f'file,id=usbcon,path={os.path.join(d, "console.log")}',
+           '-global', 'driver=esp32s3.usj,property=chardev,value=usbcon',
+           '-qmp', f'unix:{os.path.join(d, "qmp.sock")},server,nowait',
+           '-d', a.debug, '-D', os.path.join(d, 'qemu.log')]
+    if a.sd:
+        sd = os.path.abspath(a.sd)
+        sz = os.path.getsize(sd)
+        if sz & (sz - 1):
+            sys.exit(f'{sd}: size must be a power of two')
+        cmd += ['-drive', f'file={sd},if=sd,format=raw']
+    if a.no_usb_host:
+        cmd += ['-global', 'driver=esp32s3.usj,property=host-connected,value=false']
+    if a.gdb:
+        cmd += ['-s', '-S']
+    if a.icount:
+        cmd += ['-icount', a.icount]
+    for k, v in (('panel', a.panel), ('fast-epd', 'on' if a.fast_epd else None),
+                 ('trace-epd', a.trace_epd), ('trace-i2c', a.trace_i2c)):
+        if v:
+            cmd += ['-global', f'driver=x4pro.board,property={k},value={v}']
+    cmd += a.extra
+    json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd}, open(os.path.join(d, 'run.json'), 'w'), indent=1)
+    if a.dry_run:
+        print(' '.join(shlex.quote(c) for c in cmd)); return
+    err = open(os.path.join(d, 'stderr.log'), 'wb')
+    p = subprocess.Popen(cmd, stdout=err, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True, cwd=ROOT)
+    open(os.path.join(d, 'pid'), 'w').write(str(p.pid))
+    t0 = time.time()
+    while time.time() - t0 < 15:
+        if p.poll() is not None:
+            sys.exit(f'qemu exited with {p.returncode}:\n' + open(os.path.join(d, 'stderr.log')).read())
+        if os.path.exists(os.path.join(d, 'qmp.sock')):
+            try:
+                q = QMP(os.path.join(d, 'qmp.sock')); st = q.cmd('query-status'); q.close()
+                print(f'{a.name}: pid {p.pid}, qmp ok, status {st["status"]}, console {os.path.join(d, "console.log")}')
+                return
+            except (OSError, EOFError):
+                pass
+        time.sleep(0.1)
+    sys.exit('qemu did not answer on QMP within 15 s')
+
+def cmd_stop(a):
+    pid = pid_alive(a.name)
+    if not pid:
+        print(f'{a.name}: not running'); return
+    try:
+        q = connect(a.name, 3); q.cmd('quit')
+    except Exception:
+        pass
+    for _ in range(30):
+        if not pid_alive(a.name):
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, signal.SIGKILL)
+    print(f'{a.name}: stopped')
+
+def cmd_reset(a):
+    q = connect(a.name); q.cmd('system_reset'); print('reset')
+
+def cmd_status(a):
+    pid = pid_alive(a.name)
+    if not pid:
+        print(f'{a.name}: not running'); return
+    q = connect(a.name)
+    st = q.cmd('query-status')
+    print(f'{a.name}: pid {pid}, {st["status"]}, running={st["running"]}')
+
+def cmd_state(a):
+    q = connect(a.name)
+    s = q.qom_get(BOARD, 'state')
+    print(json.dumps(json.loads(s) if isinstance(s, str) else s, indent=1))
+
+def cmd_log(a):
+    p = os.path.join(idir(a.name), a.file)
+    if not os.path.exists(p):
+        sys.exit(f'no {p}')
+    with open(p, 'rb') as f:
+        data = f.read()
+        lines = data.decode('utf-8', 'replace').splitlines()
+        if a.since:
+            lines = lines[-a.since:]
+        for l in lines:
+            print(l)
+        if a.follow:
+            t0 = time.time()
+            while time.time() - t0 < a.timeout:
+                d = f.read()
+                if d:
+                    sys.stdout.write(d.decode('utf-8', 'replace')); sys.stdout.flush()
+                else:
+                    time.sleep(0.1)
+
+def cmd_wait_text(a):
+    p = os.path.join(idir(a.name), a.file)
+    t0 = time.time()
+    while time.time() - t0 < a.timeout:
+        if os.path.exists(p) and a.text.encode() in open(p, 'rb').read():
+            print(f'found {a.text!r} after {time.time()-t0:.1f}s'); return
+        time.sleep(0.2)
+    sys.exit(f'timeout: {a.text!r} not seen in {a.timeout}s')
+
+def cmd_screenshot(a):
+    q = connect(a.name)
+    out = os.path.abspath(a.out)
+    q.cmd('screendump', filename=out, format='png')
+    shot = os.path.join(idir(a.name), 'last.png')
+    try:
+        import shutil; shutil.copyfile(out, shot)
+    except OSError:
+        pass
+    print(out)
+    if a.diff:
+        from PIL import Image, ImageChops
+        im1 = Image.open(out).convert('L'); im2 = Image.open(a.diff).convert('L')
+        if im2.size != im1.size:
+            im2 = im2.resize(im1.size)
+        diff = ImageChops.difference(im1, im2).point(lambda v: 255 if v > 64 else 0)
+        n = sum(1 for v in diff.getdata() if v)
+        print(f'{100.0*n/(im1.size[0]*im1.size[1]):.3f}% of pixels differ ({n})')
+        return 1 if n else 0
+
+def cmd_wait_refresh(a):
+    q = connect(a.name)
+    start = json.loads(q.qom_get(BOARD, 'state'))['refresh_count']
+    t0 = time.time()
+    while time.time() - t0 < a.timeout:
+        n = json.loads(q.qom_get(BOARD, 'state'))['refresh_count']
+        if n - start >= a.count:
+            print(f'refresh {n} after {time.time()-t0:.1f}s'); return
+        time.sleep(0.05)
+    sys.exit(f'timeout waiting for {a.count} refresh(es)')
+
+def cmd_press(a):
+    q = connect(a.name)
+    q.qom_set(INPUT, f'btn-{a.button}', True)
+    time.sleep(a.ms / 1000.0)
+    q.qom_set(INPUT, f'btn-{a.button}', False)
+    print(f'pressed {a.button} for {a.ms} ms')
+
+def to_gt911(x, y):
+    """Landscape panel pixel -> GT911 raw frame (inverse of pollGt911: swapXY, flipY)."""
+    return (PANEL_H - 1 - y), x
+
+def cmd_tap(a):
+    q = connect(a.name)
+    rx, ry = to_gt911(a.x, a.y)
+    q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
+    time.sleep(a.ms / 1000.0)
+    q.qom_set(INPUT, 'touch', '[]')
+    print(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})')
+
+def cmd_swipe(a):
+    q = connect(a.name)
+    steps = max(2, a.ms // 20)
+    for i in range(steps + 1):
+        x = a.x1 + (a.x2 - a.x1) * i // steps
+        y = a.y1 + (a.y2 - a.y1) * i // steps
+        rx, ry = to_gt911(x, y)
+        q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
+        time.sleep(a.ms / 1000.0 / steps)
+    q.qom_set(INPUT, 'touch', '[]')
+    print(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2})')
+
+def cmd_home(a):
+    q = connect(a.name)
+    q.qom_set(INPUT, 'home', True); time.sleep(a.ms / 1000.0); q.qom_set(INPUT, 'home', False)
+    print('home')
+
+def cmd_battery(a):
+    q = connect(a.name)
+    if a.soc is not None: q.qom_set(BOARD, 'battery-soc', a.soc)
+    if a.mv is not None: q.qom_set(BOARD, 'battery-mv', a.mv)
+    if a.charging is not None: q.qom_set(BOARD, 'charging', a.charging == 'on')
+    print(json.dumps({k: q.qom_get(BOARD, k) for k in ('battery-soc', 'battery-mv', 'charging')}))
+
+def cmd_light(a):
+    q = connect(a.name)
+    s = json.loads(q.qom_get(BOARD, 'state'))
+    print(json.dumps(s.get('ledc', {})))
+
+def cmd_mem(a):
+    q = connect(a.name)
+    print(q.cmd('human-monitor-command', **{'command-line': f'xp /{a.len}xb {a.addr}'}))
+
+def cmd_gdb(a):
+    import glob
+    cands = sorted(glob.glob(os.path.expanduser('~/.platformio/packages/tool-xtensa-esp-elf-gdb/bin/xtensa-esp-elf-gdb*')))
+    if not cands:
+        sys.exit('xtensa-esp-elf-gdb not found under ~/.platformio')
+    elf = a.elf or os.path.join(ROOT, 'firmware', '.pio', 'build', 'x4pro', 'firmware.elf')
+    os.execv(cands[-1], [cands[-1], elf, '-ex', 'set arch xtensa', '-ex', 'target remote :1234'])
+
+def cmd_qmp(a):
+    q = connect(a.name)
+    msg = json.loads(a.json)
+    print(json.dumps(q.cmd(msg['execute'], **msg.get('arguments', {})), indent=1))
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--name', default=os.environ.get('X4EMU_NAME', 'dev0'))
+    sp = ap.add_subparsers(dest='cmd', required=True)
+    p = sp.add_parser('run'); p.add_argument('--flash', required=True); p.add_argument('--sd'); p.add_argument('--efuse')
+    p.add_argument('--panel', choices=['ssd1677', 'uc8179', 'uc8279']); p.add_argument('--fast-epd', action='store_true')
+    p.add_argument('--gdb', action='store_true'); p.add_argument('--trace-epd'); p.add_argument('--trace-i2c')
+    p.add_argument('--no-usb-host', action='store_true'); p.add_argument('--icount')
+    p.add_argument('--machine', default='xteink-x4pro'); p.add_argument('--debug', default='guest_errors,unimp')
+    p.add_argument('--dry-run', action='store_true'); p.add_argument('extra', nargs='*'); p.set_defaults(fn=cmd_run)
+    sp.add_parser('stop').set_defaults(fn=cmd_stop)
+    sp.add_parser('reset').set_defaults(fn=cmd_reset)
+    sp.add_parser('status').set_defaults(fn=cmd_status)
+    sp.add_parser('state').set_defaults(fn=cmd_state)
+    p = sp.add_parser('log'); p.add_argument('--follow', action='store_true'); p.add_argument('--since', type=int)
+    p.add_argument('--timeout', type=float, default=30); p.add_argument('--file', default='console.log'); p.set_defaults(fn=cmd_log)
+    p = sp.add_parser('wait-text'); p.add_argument('text'); p.add_argument('--timeout', type=float, default=30)
+    p.add_argument('--file', default='console.log'); p.set_defaults(fn=cmd_wait_text)
+    p = sp.add_parser('screenshot'); p.add_argument('out'); p.add_argument('--diff'); p.set_defaults(fn=cmd_screenshot)
+    p = sp.add_parser('wait-refresh'); p.add_argument('--count', type=int, default=1); p.add_argument('--timeout', type=float, default=30); p.set_defaults(fn=cmd_wait_refresh)
+    p = sp.add_parser('press'); p.add_argument('button', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=120); p.set_defaults(fn=cmd_press)
+    p = sp.add_parser('hold'); p.add_argument('button', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=3000); p.set_defaults(fn=cmd_press)
+    p = sp.add_parser('tap'); p.add_argument('x', type=int); p.add_argument('y', type=int); p.add_argument('--ms', type=int, default=120); p.set_defaults(fn=cmd_tap)
+    p = sp.add_parser('swipe'); [p.add_argument(n, type=int) for n in ('x1', 'y1', 'x2', 'y2')]; p.add_argument('--ms', type=int, default=250); p.set_defaults(fn=cmd_swipe)
+    p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=120); p.set_defaults(fn=cmd_home)
+    p = sp.add_parser('battery'); p.add_argument('--soc', type=int); p.add_argument('--mv', type=int); p.add_argument('--charging', choices=['on', 'off']); p.set_defaults(fn=cmd_battery)
+    sp.add_parser('light').set_defaults(fn=cmd_light)
+    p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=cmd_mem)
+    p = sp.add_parser('gdb'); p.add_argument('--elf'); p.set_defaults(fn=cmd_gdb)
+    p = sp.add_parser('qmp'); p.add_argument('json'); p.set_defaults(fn=cmd_qmp)
+    a = ap.parse_args()
+    rc = a.fn(a)
+    sys.exit(rc or 0)
+
+if __name__ == '__main__':
+    main()

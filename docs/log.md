@@ -92,3 +92,46 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
   the parent `mc->init` and then adds board devices. Stub peripherals (USB Serial/JTAG, GPIO) are
   shadowed by mapping the real models at the same base with a higher memory-region priority, so
   `esp32s3.c` needs no edits. The SoC's children are reached by QOM path (`/machine/soc/intmatrix`, …).
+
+## 2026-09-06 — M1: it boots
+
+- **The big assumption holds.** The unmodified CrossPoint 1.6.0-x4pro image (Arduino 3.3.11 on
+  IDF 5.5.5, octal PSRAM) boots on Espressif's stock `esp32s3` machine with `-m 8M` and
+  `ssi_psram.is_octal=true`. No SoC-level fault; UART0 shows the bootloader and the app's
+  error-level lines within ~1.6 s of guest time.
+- New machine `xteink-x4pro` (`qemu/hw/xtensa/xteink_x4pro.c`): a QOM subclass of the esp32s3
+  machine that calls the parent init and then adds board devices. The stub USB Serial/JTAG at
+  0x60038000 is shadowed by `hw/misc/esp32s3_usj.c` mapped at priority 1. No edits to Espressif
+  files beyond two meson.build lines. Patch series exported to `qemu-patches/`.
+- USB Serial/JTAG model: EP1 packet buffer, `wr_done` → push to chardev + `SERIAL_IN_EMPTY`,
+  SOF raw bit every 1 ms of guest time, never `BUS_RESET`. With `-chardev file,id=usbcon` and
+  `-global driver=esp32s3.usj,property=chardev,value=usbcon`, the whole CrossPoint log appears:
+  IMU/RTC probe failures, `Device: xteink_x4_pro`, four SDMMC `send_op_cond` retries,
+  `SD card initialization failed`, `[XTDET]` NVS and bus-probe lines, SSD1677 init waits,
+  `Entering activity: FullScreenMessage`, then `[MEM]` every 10 s. 70 s of guest time on one
+  boot, no crash, no spin (`docs/emu/boot-crosspoint-1.6.0-m1-nosd.log`).
+- Dead end 1: the `v10.1.2`-based build had no ESP machines (see M0). Dead end 2: my first
+  overlay for GPIO shadowed the strap register and the ROM went to download mode ("waiting for
+  download", 10k reads of USB OTG); the overlay now answers +0x38 with the SoC gpio's `strap_mode`.
+- `-d unimp` is blind on this SoC: `esp32s3.iomem` swallows 0x60000000..0x600d1000 silently and
+  the SoC's unimp stubs sit at priority -1000 underneath it. The x4pro machine overlays named
+  logging regions (priority 1) so `x4pro/<block>: read/write ADDR` lines show what the firmware
+  touches. First boot without SD, top blocks: GPIO IN (0x3C) 520k reads (BUSY polling and
+  buttons), SPI2 W0..W15 3001 full 64-byte chunks (= BW+RED writes of the HALF paint plus the
+  post-refresh resync: 4 × 48,000 bytes), I2C0 CTR/FIFO_CONF/CLK_CONF/TO/SCL_* (the RTC probe),
+  IO_MUX pad config, RTC_IO +0xB0.
+- Observations for M2: with GPIO IN reading 0, every active-low button looks pressed, so
+  CrossPoint fires its screenshot chord at boot (`[SCR] Failed to save screenshot`); the GPIO
+  model's pull-up idle levels fix that. BUSY reads 0 so every panel wait completes in 0 ms.
+- Corrections: Arduino 3.3.11 `Wire` uses the **new** `driver/i2c_master.h` path
+  (`esp32-hal-i2c-ng.c`, `i2c_master_transmit_receive`), not the legacy `driver/i2c.h` the brief
+  assumed; the I2C model must satisfy the new driver's LL sequence. The S3 timer group type is
+  `timer.esp32s3.timg`, not `timer.esp32c3.timg`.
+- Console drops: one run lost the `[XTDET] bus probe` line while the next run had it. HWCDC
+  drops a line after 1 ms if the ring buffer is full, and the ISR-driven drain in the model
+  happens one 64-byte packet per IN_EMPTY; under a burst the guest can outrun it. Same as real
+  hardware in principle, but worth revisiting if tests see missing lines (a larger drain per
+  flush or a shorter IN_EMPTY latency in the model would help).
+- Not yet done for M1's acceptance: comparing against the real device's CrossPoint boot log, since
+  the device runs stock. Done as soon as CrossPoint is on the device.
+- Stock dump on the new machine: same as on the stock machine (stops after `Multicore app`).
