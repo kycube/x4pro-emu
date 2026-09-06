@@ -346,3 +346,24 @@ Note: the `firmware/` submodule working tree carries the uncommitted EpdBus trac
 `firmware-patches/freeink-sdk-epd-trace.patch` (`cd firmware/freeink-sdk && git apply
 ../../firmware-patches/freeink-sdk-epd-trace.patch`). The submodule pointer itself is unchanged
 (7db14a01). `images/crosspoint.bin` is the untraced build the emulator tests use.
+
+## 2026-09-06 — M5 device comparison: wake-from-deep-sleep log
+
+Device (`docs/device/sleep-wake-crosspoint-1.6.0.log`, owner held power to sleep and again to
+wake) vs emulator (`docs/emu/sleep-wake-crosspoint-1.6.0.log`, `hold power --ms 700` then
+`press power`):
+
+| Step | Device | Emulator |
+|---|---|---|
+| ROM banner | lost (USB re-enumerates after the wake) | `rst:0x5 (DSLEEP)` |
+| bring-up | RTC found, SD mounted, theme, frontlight | same (plus `IMU not found` first, lost on the device to the port reopen) |
+| probe | `NVS hw_calib/screenType=2 (UltraChip)`, `VER=00 0F 68 00 00 FLG=13`, MTP, promoted UC8279 | `NVS … not set` (blank NVS in the built image), same VER/MTP/promotion |
+| route | `Entering activity: Home` directly (splash-less wake) | same |
+| paints | PON 40 ms, DRF 1327 ms, DRF 483 ms | PON 42 ms, DRF 1327 ms, DRF 484 ms |
+| after | `Going to low-power mode` at +3.6 s | same at +3.4 s |
+
+Also on the device: `[CPS] Settings loaded from file` (a settings file now exists on its card).
+The device's sleep-entry lines were not captured: the USB Serial/JTAG drops the moment the chip
+sleeps, and the last lines before it never reach the host. To see them use `-DENABLE_SERIAL_LOG`
+on UART0 or read them in the emulator (`Power button held 405ms, sleeping` → Sleep activity →
+`Entering deep sleep`).

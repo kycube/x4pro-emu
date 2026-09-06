@@ -1,0 +1,99 @@
+[  84.563] [436] [INF] [CLK] SDK RTC found[436] [INF] [MAIN] Device: xteink_x4_pro
+[  84.766] [678] [SD] SDMMC card mounted
+[  84.766] [693] [DBG] [CPS] Settings loaded from file
+[  84.766] [696] [DBG] [UI] Using Lyra theme
+[  84.766] [697] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[  84.766] [697] [INF] [FrontlightMgr] begin: attached gpio=8 warm=9 ok=1
+[  84.766] [697] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[  84.766] [697] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[  84.766] [697] [INF] [LIGHT] Frontlight up: 60% warm=50% off
+[  84.766] [697] [DBG] [MAIN] Wakeup reason: After USB Power
+[  84.766] [697] [DBG] [MAIN] Starting CrossPoint version 1.6.0-x4pro-epdtrace
+[  84.766] [698] [XTDET] NVS hw_calib/screenType=2 (UltraChip)
+[  84.968] [817] [XTDET] bus probe VER=00 0F 68 00 00 FLG=13 -> UltraChip
+[  84.968] [818] [XTDET] MTP[0x000..0x02F]: A5 A5 1F 20 25 25 3C 00 97 02 02 03 20 02 58 00 00 00 00 00 00 00 00 0F 00 00 68 00 00 00 00 00 00 00 00 00 00 00 00 00 05 0A 0F 14 50 5F 64 7F
+[  84.968] [818] [XTDET] promoted SSD1677 -> UC8279 800x480 (LUT_VER=68)
+[  84.968] [818] [DBG] [MAIN] Panel controller: UltraChip UC81xx variant detected
+[  84.968] [900] [EPD] c=00 len=2 37 4D
+[  84.968] [900] [EPD] c=61 len=4 03 20 02 58
+[  84.968] [900] [EPD] c=65 len=4 00 00 00 00
+[  84.968] [900] [EPD] c=03 len=1 20
+[  84.968] [900] [EPD] c=30 len=1 0E
+[  84.968] [901] [DBG] [MAIN] Display initialized
+[  84.968] [902] [DBG] [SDREG] Fonts directory not found: /.fonts
+[  84.968] [902] [DBG] [SDREG] Fonts directory not found: /fonts
+[  84.969] [902] [DBG] [SDREG] Discovery complete: 0 families
+[  84.969] [902] [DBG] [SDFS] SD font system ready (0 families discovered)
+[  84.969] [902] [DBG] [MAIN] Fonts setup
+[  84.969] [902] [DBG] [ACT] Entering activity: Boot
+[  84.969] [908] [DBG] [GFX] Time = 6 ms from clearScreen to displayBuffer
+[  84.969] [900] [EPD] c=E1 len=1 02
+[  84.969] [911] [EPD] c=13 len=60000 FF FF FF FF FF FF FF FF
+[  85.173] [948] [EPD] c=10 len=60000 FF FF FF FF FF FF FF FF
+[  85.173] [981] [EPD] c=50 len=1 97
+[  85.173] [981] [EPD] c=E0 len=1 02
+[  85.173] [981] [EPD] c=E5 len=1 1E
+[  85.173] [981] [EPD] c=04 len=0
+[  85.173] [1022]   Wait complete:  8279x4_PON (41 ms)
+[  85.173] [1022] [EPD] c=00 len=2 17 4D
+[ 164.728] <port error: read failed: [Errno 6] Device not configured; reopening>
+[ 171.042] [445] [INF] [CLK] SDK RTC found[445] [INF] [MAIN] Device: xteink_x4_pro
+[ 171.244] [688] [SD] SDMMC card mounted
+[ 171.244] [702] [DBG] [CPS] Settings loaded from file
+[ 171.244] [706] [DBG] [UI] Using Lyra theme
+[ 171.244] [706] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[ 171.244] [706] [INF] [FrontlightMgr] begin: attached gpio=8 warm=9 ok=1
+[ 171.245] [707] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[ 171.245] [707] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[ 171.245] [707] [INF] [LIGHT] Frontlight up: 60% warm=50% off
+[ 171.245] [707] [DBG] [MAIN] Starting CrossPoint version 1.6.0-x4pro-epdtrace
+[ 171.245] [707] [XTDET] NVS hw_calib/screenType=2 (UltraChip)
+[ 171.445] [827] [XTDET] bus probe VER=00 0F 68 00 00 FLG=13 -> UltraChip
+[ 171.445] [827] [XTDET] MTP[0x000..0x02F]: A5 A5 1F 20 25 25 3C 00 97 02 02 03 20 02 58 00 00 00 00 00 00 00 00 0F 00 00 68 00 00 00 00 00 00 00 00 00 00 00 00 00 05 0A 0F 14 50 5F 64 7F
+[ 171.446] [828] [XTDET] promoted SSD1677 -> UC8279 800x480 (LUT_VER=68)
+[ 171.446] [828] [DBG] [MAIN] Panel controller: UltraChip UC81xx variant detected
+[ 171.446] [909] [EPD] c=00 len=2 37 4D
+[ 171.446] [910] [EPD] c=61 len=4 03 20 02 58
+[ 171.446] [910] [EPD] c=65 len=4 00 00 00 00
+[ 171.446] [910] [EPD] c=03 len=1 20
+[ 171.446] [910] [EPD] c=30 len=1 0E
+[ 171.446] [910] [DBG] [MAIN] Display initialized
+[ 171.446] [911] [DBG] [SDREG] Fonts directory not found: /.fonts
+[ 171.446] [912] [DBG] [SDREG] Fonts directory not found: /fonts
+[ 171.446] [912] [DBG] [SDREG] Discovery complete: 0 families
+[ 171.446] [912] [DBG] [SDFS] SD font system ready (0 families discovered)
+[ 171.446] [912] [DBG] [MAIN] Fonts setup
+[ 171.446] [929] [DBG] [ACT] Entering activity: Home
+[ 171.446] [955] [DBG] [GFX] Time = 24 ms from clearScreen to displayBuffer
+[ 171.446] [910] [EPD] c=E1 len=1 02
+[ 171.446] [958] [EPD] c=13 len=60000 FF FF FF FF FF FF FF FF
+[ 171.650] [998] [EPD] c=10 len=60000 FF FF FF FF FF FF FF FF
+[ 171.650] [1037] [EPD] c=50 len=1 97
+[ 171.650] [1037] [EPD] c=E0 len=1 02
+[ 171.650] [1037] [EPD] c=E5 len=1 1E
+[ 171.650] [1038] [EPD] c=04 len=0
+[ 171.650] [1078]   Wait complete:  8279x4_PON (40 ms)
+[ 171.650] [1078] [EPD] c=00 len=2 17 4D
+[ 172.872] [1078] [EPD] c=12 len=0
+[ 172.872] [2405]   Wait complete:  8279x4_DRF (1327 ms)
+[ 173.074] [2457] [DBG] [GFX] Time = 9 ms from clearScreen to displayBuffer
+[ 173.075] [2405] [EPD] c=10 len=60000 FF FF FF FF FF FF FF FF
+[ 173.075] [2460] [EPD] c=13 len=60000 FF FF FF FF FF FF FF FF
+[ 173.075] [2500] [EPD] c=50 len=1 D7
+[ 173.075] [2500] [EPD] c=E0 len=1 02
+[ 173.075] [2500] [EPD] c=E5 len=1 5A
+[ 173.075] [2501] [EPD] c=03 len=1 20
+[ 173.075] [2501] [EPD] c=E1 len=1 02
+[ 173.075] [2501] [EPD] c=91 len=0
+[ 173.075] [2501] [EPD] c=90 len=9 00 00 03 1F 00 78 02 57
+[ 173.075] [2501] [EPD] c=00 len=2 17 4D
+[ 173.483] [2501] [EPD] c=12 len=0
+[ 173.483] [2984]   Wait complete:  8279x4_DRF (483 ms)
+[ 173.483] [2984] [EPD] c=92 len=0
+[ 175.114] [4520] [DBG] [PWR] Going to low-power mode
+[ 180.599] [10032] [INF] [MEM] Free: 223252 bytes, Total: 293332 bytes, Min Free: 222020 bytes, MaxAlloc: 180212 bytes
+[ 190.558] [20069] [INF] [MEM] Free: 223252 bytes, Total: 293332 bytes, Min Free: 222020 bytes, MaxAlloc: 180212 bytes
+[ 200.739] [30106] [INF] [MEM] Free: 223252 bytes, Total: 293332 bytes, Min Free: 222020 bytes, MaxAlloc: 180212 bytes
+[ 210.727] [40143] [INF] [MEM] Free: 223252 bytes, Total: 293332 bytes, Min Free: 222020 bytes, MaxAlloc: 180212 bytes
+[ 220.694] [50180] [INF] [MEM] Free: 223252 bytes, Total: 293332 bytes, Min Free: 222020 bytes, MaxAlloc: 180212 bytes
+[ 230.855] [60217] [INF] [MEM] Free: 223252 bytes, Total: 293332 bytes, Min Free: 222020 bytes, MaxAlloc: 180212 bytes
