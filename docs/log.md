@@ -198,3 +198,31 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
 - SD: with `-drive if=sd` the card initialises (no `send_op_cond` retries) but SdFat's volume
   mount failed on a superfloppy image; SdFat opens MBR partition 1 (the device's card is MBR +
   one FAT32 partition). `mksd.py` now writes an MBR. Continued in M3.
+
+## 2026-09-06 — M3: home screen with the device's SD contents
+
+- `tools/mksd.py` writes an MBR with one FAT32 partition at 1 MiB (SdFat mounts partition 1 and
+  does not fall back to a superfloppy). With `images/sd-device.img` (the device card's files)
+  attached via `-drive if=sd`, CrossPoint mounts the card, loads the theme, brings up the
+  frontlight manager, paints the boot splash and goes Home, just like the device.
+- The complete panel stream now matches the device's recording opcode-for-opcode and
+  byte-for-byte for all 38 commands (`tools/epdtrace.py … --from-cmd 0x00`): init, GC full
+  refresh, and the two DU Home paints with PTIN/PTL/PTOUT.
+- `x4emu press right` moves the selection: 3.5 % of pixels change. Every press now triggers a
+  refresh within a few ms of release, also in CrossPoint's low-power (reduced CPU clock) mode.
+- Two false alarms on the way, both tool races: `wait-refresh` sampled its baseline after the
+  refresh had already been counted (fixed: `--total N`, and `press/tap --wait` measure from a
+  pre-input baseline), and a press issued while the firmware was still painting was ignored,
+  as on hardware (fixed in the CLI with `--quiet S` / `wait-quiet`).
+- Console line loss root cause: ESP-IDF's connection monitor clears the SOF raw bit from the
+  FreeRTOS tick hook and declares the host gone after a few ticks without SOF; when QEMU
+  delivers bunched ticks, HWCDC flips `connected=false` and replaces the oldest ring-buffer
+  bytes (its not-connected FIFO policy) — whole lines vanish in bursts. The model now
+  presents SOF on every INT_RAW read while a host is attached. No lines lost since.
+- GPIO5 (SD power enable) is ignored by the SDMMC path and visible in `state.gpio.sd_pwr`.
+- Device-vs-emulator home-screen diff: waiting for a device screenshot (CrossPoint's
+  Power + lower-side-button chord writes a BMP to the card; the owner has to take it and
+  expose the card over USB). The emulator's home screen shows "0%" battery because the CW2017
+  is not modelled until M4; the clock is absent for the same reason (RTC not found).
+- `tests/test_boot.py`: boots with a fresh 64 MiB MBR/FAT32 image, waits for Home and two
+  refreshes, presses Right, asserts a pixel diff, and checks the probe verdict text.

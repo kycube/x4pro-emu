@@ -1,0 +1,36 @@
+From 6b907155ec790c8f424f35470fdfe2b0bd9b7b40 Mon Sep 17 00:00:00 2001
+From: x4pro-emu <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 15:03:45 -0500
+Subject: [PATCH 3/3] esp32s3.usj: present SOF on every INT_RAW read while a
+ host is attached
+
+ESP-IDF's connection monitor clears SOF from the tick hook; bunched ticks made it
+declare the host gone and HWCDC then dropped whole lines. A live bus guarantees a
+SOF since the last look, so answer that on read.
+---
+ hw/misc/esp32s3_usj.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/hw/misc/esp32s3_usj.c b/hw/misc/esp32s3_usj.c
+index 1c1a7d3..146c080 100644
+--- a/hw/misc/esp32s3_usj.c
++++ b/hw/misc/esp32s3_usj.c
+@@ -105,6 +105,15 @@ static uint64_t usj_read(void *opaque, hwaddr addr, unsigned int size)
+         }
+         break;
+     case R_INT_RAW:
++        /* A host that is attached sends a SOF every 1 ms. ESP-IDF's connection
++         * monitor checks this bit from the FreeRTOS tick hook and clears it; if
++         * the guest's ticks bunch up (host scheduling) several ticks could see
++         * no SOF and declare the host gone, after which HWCDC drops output.
++         * Present the bit on every read while host-connected: "at least one
++         * SOF since you last looked" is exactly what a live bus guarantees. */
++        if (s->host_connected) {
++            s->int_raw |= INT_SOF;
++        }
+         r = s->int_raw;
+         break;
+     case R_INT_ST:
+-- 
+2.50.1 (Apple Git-155)
+

@@ -230,22 +230,52 @@ def cmd_screenshot(a):
         return 1 if n else 0
 
 def cmd_wait_refresh(a):
+    """Wait for --count more refreshes from now, or (with --total N) until refresh_count >= N."""
     q = connect(a.name)
     start = json.loads(q.qom_get(BOARD, 'state'))['refresh_count']
     t0 = time.time()
     while time.time() - t0 < a.timeout:
         n = json.loads(q.qom_get(BOARD, 'state'))['refresh_count']
-        if n - start >= a.count:
+        if (a.total is not None and n >= a.total) or (a.total is None and n - start >= a.count):
             print(f'refresh {n} after {time.time()-t0:.1f}s'); return
         time.sleep(0.05)
-    sys.exit(f'timeout waiting for {a.count} refresh(es)')
+    sys.exit(f'timeout waiting for refreshes (count={a.count}, total={a.total}, now={n})')
+
+def refresh_count(q):
+    return json.loads(q.qom_get(BOARD, 'state'))['refresh_count']
+
+def wait_quiet(q, quiet_s, timeout):
+    """Return once no refresh has started for quiet_s seconds (and BUSY is low)."""
+    t0 = time.time(); last = refresh_count(q); t_last = t0
+    while time.time() - t0 < timeout:
+        st = json.loads(q.qom_get(BOARD, 'state'))
+        if st['refresh_count'] != last:
+            last = st['refresh_count']; t_last = time.time()
+        if not st['busy'] and time.time() - t_last >= quiet_s:
+            return True
+        time.sleep(0.05)
+    return False
+
+def after_input(q, n0, a):
+    if getattr(a, 'wait', 0):
+        t0 = time.time()
+        while time.time() - t0 < a.wait:
+            n = refresh_count(q)
+            if n > n0:
+                print(f'refresh {n} started {time.time()-t0:.2f}s after the input'); return
+            time.sleep(0.02)
+        sys.exit(f'no refresh within {a.wait}s after the input (count still {n0})')
 
 def cmd_press(a):
     q = connect(a.name)
+    if getattr(a, 'quiet', 0):
+        wait_quiet(q, a.quiet, 30)
+    n0 = refresh_count(q)
     q.qom_set(INPUT, f'btn-{a.button}', True)
     time.sleep(a.ms / 1000.0)
     q.qom_set(INPUT, f'btn-{a.button}', False)
     print(f'pressed {a.button} for {a.ms} ms')
+    after_input(q, n0, a)
 
 def to_gt911(x, y):
     """Landscape panel pixel -> GT911 raw frame (inverse of pollGt911: swapXY, flipY)."""
@@ -253,11 +283,15 @@ def to_gt911(x, y):
 
 def cmd_tap(a):
     q = connect(a.name)
+    if getattr(a, 'quiet', 0):
+        wait_quiet(q, a.quiet, 30)
+    n0 = refresh_count(q)
     rx, ry = to_gt911(a.x, a.y)
     q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
     time.sleep(a.ms / 1000.0)
     q.qom_set(INPUT, 'touch', '[]')
     print(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})')
+    after_input(q, n0, a)
 
 def cmd_swipe(a):
     q = connect(a.name)
@@ -273,8 +307,16 @@ def cmd_swipe(a):
 
 def cmd_home(a):
     q = connect(a.name)
+    n0 = refresh_count(q)
     q.qom_set(INPUT, 'home', True); time.sleep(a.ms / 1000.0); q.qom_set(INPUT, 'home', False)
     print('home')
+    after_input(q, n0, a)
+
+def cmd_wait_quiet(a):
+    q = connect(a.name)
+    if not wait_quiet(q, a.seconds, a.timeout):
+        sys.exit('panel never went quiet')
+    print(f'quiet for {a.seconds}s')
 
 def cmd_battery(a):
     q = connect(a.name)
@@ -324,12 +366,16 @@ def main():
     p = sp.add_parser('wait-text'); p.add_argument('text'); p.add_argument('--timeout', type=float, default=30)
     p.add_argument('--file', default='console.log'); p.set_defaults(fn=cmd_wait_text)
     p = sp.add_parser('screenshot'); p.add_argument('out'); p.add_argument('--diff'); p.set_defaults(fn=cmd_screenshot)
-    p = sp.add_parser('wait-refresh'); p.add_argument('--count', type=int, default=1); p.add_argument('--timeout', type=float, default=30); p.set_defaults(fn=cmd_wait_refresh)
-    p = sp.add_parser('press'); p.add_argument('button', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=120); p.set_defaults(fn=cmd_press)
-    p = sp.add_parser('hold'); p.add_argument('button', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=3000); p.set_defaults(fn=cmd_press)
-    p = sp.add_parser('tap'); p.add_argument('x', type=int); p.add_argument('y', type=int); p.add_argument('--ms', type=int, default=120); p.set_defaults(fn=cmd_tap)
+    p = sp.add_parser('wait-refresh'); p.add_argument('--count', type=int, default=1); p.add_argument('--total', type=int); p.add_argument('--timeout', type=float, default=30); p.set_defaults(fn=cmd_wait_refresh)
+    for nm, dflt in (('press', 120), ('hold', 3000)):
+        p = sp.add_parser(nm); p.add_argument('button', choices=['left', 'right', 'power']); p.add_argument('--ms', type=int, default=dflt)
+        p.add_argument('--wait', type=float, default=0, help='wait up to S seconds for a refresh to start after the input')
+        p.add_argument('--quiet', type=float, default=0, help='first wait until the panel has been idle for S seconds'); p.set_defaults(fn=cmd_press)
+    p = sp.add_parser('tap'); p.add_argument('x', type=int); p.add_argument('y', type=int); p.add_argument('--ms', type=int, default=120)
+    p.add_argument('--wait', type=float, default=0); p.add_argument('--quiet', type=float, default=0); p.set_defaults(fn=cmd_tap)
+    p = sp.add_parser('wait-quiet'); p.add_argument('--seconds', type=float, default=2); p.add_argument('--timeout', type=float, default=60); p.set_defaults(fn=cmd_wait_quiet)
     p = sp.add_parser('swipe'); [p.add_argument(n, type=int) for n in ('x1', 'y1', 'x2', 'y2')]; p.add_argument('--ms', type=int, default=250); p.set_defaults(fn=cmd_swipe)
-    p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=120); p.set_defaults(fn=cmd_home)
+    p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=120); p.add_argument('--wait', type=float, default=0); p.set_defaults(fn=cmd_home)
     p = sp.add_parser('battery'); p.add_argument('--soc', type=int); p.add_argument('--mv', type=int); p.add_argument('--charging', choices=['on', 'off']); p.set_defaults(fn=cmd_battery)
     sp.add_parser('light').set_defaults(fn=cmd_light)
     p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=cmd_mem)
