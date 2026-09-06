@@ -12,10 +12,12 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
   (12 CrossPoint + 1 stock), all green. `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182
   with branch `x4pro`; **the source of truth for our QEMU changes is `qemu-patches/`** (export with
   `cd qemu && git format-patch -o ../qemu-patches febae182..x4pro` after every QEMU commit).
-- Machine `xteink-x4pro` = Espressif's `esp32s3` machine + overlays (higher MemoryRegion priority,
-  no edits to Espressif files beyond meson lines): USB Serial/JTAG console, full GPIO, SPI2, I2C0
-  (GT911 0x5D, BM8563 0x51, CW2017 0x63), LEDC, RTC_CNTL deep-sleep overlay, D-cache occupy/lock
-  DONE shim, named I/O access loggers for everything else (`x4pro/<block>` lines in qemu.log).
+- Machine `xteink-x4pro` = Espressif's `esp32s3` machine + overlays (higher MemoryRegion priority):
+  USB Serial/JTAG console, full GPIO, SPI2 (CPU FIFO and GDMA paths), I2C0 (GT911 0x5D, BM8563 0x51,
+  CW2017 0x63), LEDC, RTC_CNTL deep-sleep overlay, D-cache occupy/lock DONE shim, named I/O access
+  loggers for everything else (`x4pro/<block>` lines in qemu.log). Espressif files are edited only by
+  the separate, upstreamable patches 0003 (USJ SOF), 0006 (interrupt matrix), 0008 (GDMA), 0009 (SPI1
+  dummy cycles); everything else is overlays and new files.
 - Panel: pure-C core `models/epd_core.c` (SSD1677 / UC8179 / UC8279) behind `hw/display/x4pro_epd.c`
   (SSI peripheral + bit-banged probe pins + BUSY timer + QemuConsole, qdev id `epd`).
 - CrossPoint 1.6.0: boots to Home, touch, reader, battery, sleep/wake, all verified against the real
