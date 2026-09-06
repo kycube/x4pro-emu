@@ -340,3 +340,9 @@ Device state at the end of the session: app0 = CrossPoint 1.6.0-x4pro with the E
 (`images/crosspoint-epdtrace.bin`), app1 = stock 7.2.4, bootloader/partition table/otadata
 untouched; `tools/device.py restore-stock --yes` returns app0 to stock. The device is in deep sleep
 (auto-sleep) and its USB port is gone until the power button is pressed.
+
+Note: the `firmware/` submodule working tree carries the uncommitted EpdBus trace patch and a
+`platformio.local.ini` that sets `-DFREEINK_EPD_TRACE=1`; both are reproduced by
+`firmware-patches/freeink-sdk-epd-trace.patch` (`cd firmware/freeink-sdk && git apply
+../../firmware-patches/freeink-sdk-epd-trace.patch`). The submodule pointer itself is unchanged
+(7db14a01). `images/crosspoint.bin` is the untraced build the emulator tests use.
