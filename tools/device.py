@@ -167,19 +167,116 @@ def cmd_image_sd(a):
             f.truncate(p2)
     print('saved', out)
 
+STOCK_APP0 = 0x10000
+STOCK_APP1 = 0x7F0000
+OTADATA = 0xE000
+
+def esp_run(port, *args, before='default-reset', after='no-reset'):
+    cmd = [PY, '-m', 'esptool', '--chip', 'esp32s3', '-p', port, '--before', before, '--after', after] + list(args)
+    print('+', ' '.join(cmd), flush=True)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    tail = [l for l in (r.stdout + r.stderr).splitlines() if any(k in l for k in ('Wrote', 'verified', 'Hash', 'Error', 'error', 'Read '))]
+    for l in tail:
+        print('  ', l)
+    if r.returncode:
+        sys.exit(f'esptool failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
+
+def read_region(port, off, size, path, before='no-reset'):
+    esp_run(port, 'read-flash', hex(off), hex(size), path, before=before)
+    return open(path, 'rb').read()
+
+def app_image_size(blob):
+    """Size of an ESP app image (header + segments + checksum pad + optional SHA-256)."""
+    import struct
+    if blob[0] != 0xE9:
+        return None
+    nseg, hash_app = blob[1], blob[23]
+    p = 24
+    for _ in range(nseg):
+        _, size = struct.unpack('<II', blob[p:p + 8])
+        p += 8 + size
+    p = (p + 15) // 16 * 16
+    if hash_app:
+        p += 32
+    return p
+
 def cmd_flash_crosspoint(a):
+    """Write a CrossPoint firmware.bin into app0 (0x10000) on top of the stock bootloader and
+    partition table, the way the community web flasher does. Optionally keeps a copy of the stock
+    app in app1 first. Never touches 0x0..0x10000."""
+    import tempfile
     port = find_port(a.port)
     vb = verified_backup()
     if not vb:
         sys.exit('REFUSING: no verified double backup under images/device/ (run `device.py backup` first)')
-    print(f'verified backup present: {vb[0]}')
-    env = dict(os.environ, PLATFORMIO_UPLOAD_PORT=port)
-    cmd = ['pio', 'run', '-e', a.env, '-t', 'upload', '--upload-port', port]
-    print(f'Will run in {os.path.join(ROOT, "firmware")}: {" ".join(cmd)}')
-    print('This writes an OTA app slot only (pioarduino upload flashes bootloader/partitions/app; the app goes to app0 at 0x10000).')
+    backup = open(vb[0], 'rb').read()
+    fw = a.firmware or os.path.join(ROOT, 'firmware/.pio/build/x4pro/firmware.bin')
+    fwdata = open(fw, 'rb').read()
+    if fwdata[0] != 0xE9 or len(fwdata) > 0x7E0000:
+        sys.exit(f'{fw} is not an app image that fits app0')
+    stock_size = app_image_size(backup[STOCK_APP0:STOCK_APP0 + 0x7E0000])
+    print(f'verified backup: {vb[0]}')
+    print(f'plan: port {port}')
+    if a.preserve_stock:
+        print(f'  1. write the stock app0 image ({stock_size} bytes) from the backup into app1 @{STOCK_APP1:#x} (must be blank)')
+    print(f'  2. write {fw} ({len(fwdata)} bytes) into app0 @{STOCK_APP0:#x}')
+    print('  otadata/bootloader/partition table untouched; boot slot stays app0')
     if not a.yes:
         sys.exit('pass --yes to proceed')
-    subprocess.run(cmd, cwd=os.path.join(ROOT, 'firmware'), env=env, check=True)
+    tmp = tempfile.mkdtemp()
+    # sanity: the device still matches the backup where we are about to write
+    head = read_region(port, STOCK_APP0, 0x10000, os.path.join(tmp, 'app0-head.bin'), before='default-reset')
+    if head == backup[STOCK_APP0:STOCK_APP0 + 0x10000]:
+        print('sanity: app0 still holds the stock image (matches backup)')
+    else:
+        # app0 was already replaced (e.g. by an earlier CrossPoint flash): accept only if it is a
+        # valid app image and the stock copy is intact in app1
+        h1 = read_region(port, STOCK_APP1, 0x10000, os.path.join(tmp, 'app1-head.bin'))
+        if head[0] != 0xE9 or h1 != backup[STOCK_APP0:STOCK_APP0 + 0x10000]:
+            sys.exit('ABORT: app0 is neither the stock image nor a re-flash over a preserved stock copy in app1')
+        print('sanity: app0 holds another app image; stock copy verified in app1')
+        if a.preserve_stock:
+            a.preserve_stock = False
+            print('(stock already preserved in app1; skipping that step)')
+    if a.preserve_stock:
+        h1 = read_region(port, STOCK_APP1, 0x1000, os.path.join(tmp, 'app1-head.bin'))
+        if any(b != 0xFF for b in h1):
+            sys.exit('ABORT: app1 is not blank; not overwriting it')
+        stock_img = os.path.join(ROOT, 'images/device/stock-app0-7.2.4.bin')
+        open(stock_img, 'wb').write(backup[STOCK_APP0:STOCK_APP0 + stock_size])
+        esp_run(port, 'write-flash', hex(STOCK_APP1), stock_img)
+        back = read_region(port, STOCK_APP1, 0x1000, os.path.join(tmp, 'app1-head2.bin'))
+        if back != backup[STOCK_APP0:STOCK_APP0 + 0x1000]:
+            sys.exit('ABORT: app1 read-back mismatch')
+        print('app1 now holds the stock image (read-back OK)')
+    esp_run(port, 'write-flash', hex(STOCK_APP0), fw)
+    back = read_region(port, STOCK_APP0, 0x1000, os.path.join(tmp, 'cp-head.bin'))
+    if back != fwdata[:0x1000]:
+        sys.exit('ABORT: app0 read-back mismatch')
+    ota = read_region(port, OTADATA, 0x2000, os.path.join(tmp, 'otadata.bin'))
+    print('app0 read-back OK; otadata unchanged:', ota == backup[OTADATA:OTADATA + 0x2000])
+    esp_run(port, 'chip-id', before='no-reset', after='hard-reset')
+    print('device reset into the new app0')
+
+def cmd_restore_stock(a):
+    """Write the stock app image from the verified backup back into app0."""
+    import tempfile
+    port = find_port(a.port)
+    vb = verified_backup()
+    if not vb:
+        sys.exit('REFUSING: no verified double backup')
+    backup = open(vb[0], 'rb').read()
+    size = app_image_size(backup[STOCK_APP0:STOCK_APP0 + 0x7E0000])
+    img = os.path.join(ROOT, 'images/device/stock-app0-7.2.4.bin')
+    open(img, 'wb').write(backup[STOCK_APP0:STOCK_APP0 + size])
+    print(f'plan: write {size} bytes of stock app from {vb[0]} into app0 @{STOCK_APP0:#x} on {port}')
+    if not a.yes:
+        sys.exit('pass --yes to proceed')
+    esp_run(port, 'write-flash', hex(STOCK_APP0), img, before='default-reset')
+    tmp = tempfile.mkdtemp()
+    back = read_region(port, STOCK_APP0, 0x1000, os.path.join(tmp, 'head.bin'))
+    print('read-back OK:', back == backup[STOCK_APP0:STOCK_APP0 + 0x1000])
+    esp_run(port, 'chip-id', before='no-reset', after='hard-reset')
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -191,7 +288,8 @@ def main():
     p = sp.add_parser('console'); p.add_argument('--seconds', type=float, default=30); p.add_argument('--reset', action='store_true')
     p.add_argument('--out'); p.add_argument('--quiet', action='store_true'); p.set_defaults(fn=cmd_console)
     p = sp.add_parser('image-sd'); p.add_argument('--dev'); p.add_argument('--out'); p.set_defaults(fn=cmd_image_sd)
-    p = sp.add_parser('flash-crosspoint'); p.add_argument('--env', default='x4pro'); p.add_argument('--yes', action='store_true'); p.set_defaults(fn=cmd_flash_crosspoint)
+    p = sp.add_parser('flash-crosspoint'); p.add_argument('--firmware'); p.add_argument('--preserve-stock', action='store_true'); p.add_argument('--yes', action='store_true'); p.set_defaults(fn=cmd_flash_crosspoint)
+    p = sp.add_parser('restore-stock'); p.add_argument('--yes', action='store_true'); p.set_defaults(fn=cmd_restore_stock)
     a = ap.parse_args()
     a.fn(a)
 

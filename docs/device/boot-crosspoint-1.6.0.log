@@ -1,0 +1,63 @@
+[   0.107] <hard reset via RTS>
+[   0.312] ESP-ROM:esp32s3-20210327
+[   0.312] Build:Mar 27 2021
+[   0.312] rst:0x15 (USB_UART_CHIP_RESET),boot:0x29 (SPI_FAST_FLASH_BOOT)
+[   0.312] Saved PC:0x403781c6
+[   0.312] SPIWP:0xee
+[   0.312] mode:DIO, clock div:1
+[   0.312] load:0x3fce2820,len:0x53c
+[   0.312] load:0x403c8700,len:0xc2c
+[   0.312] load:0x403cb700,len:0x2b2c
+[   0.312] entry 0x403c8870
+[   1.327] [435] [ERR] [GYR] SDK IMU not found
+[   1.327] [436] [INF] [CLK] SDK RTC found[436] [INF] [MAIN] Device: xteink_x4_pro
+[   1.737] [678] [SD] SDMMC card mounted
+[   1.737] [679] [DBG] [UI] Using Lyra theme
+[   1.737] [680] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[   1.737] [680] [INF] [FrontlightMgr] begin: attached gpio=8 warm=9 ok=1
+[   1.737] [680] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[   1.737] [680] [INF] [FrontlightMgr] apply: brightness=0 level=0 totalDuty=0 coolDuty=0 warmDuty=0 lit=0
+[   1.737] [680] [INF] [LIGHT] Frontlight up: 60% warm=50% off
+[   1.737] [680] [DBG] [MAIN] Starting CrossPoint version 1.6.0-x4pro
+[   1.737] [681] [XTDET] NVS hw_calib/screenType=2 (UltraChip)
+[   1.737] [800] [XTDET] bus probe VER=00 0F 68 00 00 FLG=13 -> UltraChip
+[   1.737] [800] [XTDET] MTP[0x000..0x02F]: A5 A5 1F 20 25 25 3C 00 97 02 02 03 20 02 58 00 00 00 00 00 00 00 00 0F 00 00 68 00 00 00 00 00 00 00 00 00 00 00 00 00 05 0A 0F 14 50 5F 64 7F
+[   1.737] [801] [XTDET] promoted SSD1677 -> UC8279 800x480 (LUT_VER=68)
+[   1.737] [801] [DBG] [MAIN] Panel controller: UltraChip UC81xx variant detected
+[   1.942] [883] [DBG] [MAIN] Display initialized
+[   1.942] [884] [DBG] [SDREG] Fonts directory not found: /.fonts
+[   1.942] [884] [DBG] [SDREG] Fonts directory not found: /fonts
+[   1.942] [884] [DBG] [SDREG] Discovery complete: 0 families
+[   1.942] [884] [DBG] [SDFS] SD font system ready (0 families discovered)
+[   1.942] [884] [DBG] [MAIN] Fonts setup
+[   1.942] [884] [DBG] [ACT] Entering activity: Boot
+[   1.942] [890] [DBG] [GFX] Time = 6 ms from clearScreen to displayBuffer
+[   1.942] [1002]   Wait complete:  8279x4_PON (40 ms)
+[   3.367] [2328]   Wait complete:  8279x4_DRF (1326 ms)
+[   3.367] [2365] [DBG] [ACT] Exiting activity: Boot
+[   3.367] [2365] [DBG] [ACT] Entering activity: Home
+[   3.367] [2390] [DBG] [GFX] Time = 24 ms from clearScreen to displayBuffer
+[   3.978] [2915]   Wait complete:  8279x4_DRF (483 ms)
+[   3.978] [2971] [DBG] [GFX] Time = 7 ms from clearScreen to displayBuffer
+[   4.382] [3496]   Wait complete:  8279x4_DRF (483 ms)
+[   6.423] [5375] [DBG] [PWR] Going to low-power mode
+[   9.075] [8079] [DBG] [PWR] Restoring normal CPU frequency
+[   9.075] [8138] [DBG] [ACT] Exiting activity: Home
+[   9.075] [8138] [DBG] [ACT] Entering activity: FileBrowser
+[   9.075] [8146] [DBG] [GFX] Time = 7 ms from clearScreen to displayBuffer
+[   9.684] [8671]   Wait complete:  8279x4_DRF (482 ms)
+[  10.905] [10001] [INF] [MEM] Free: 222032 bytes, Total: 293348 bytes, Min Free: 220940 bytes, MaxAlloc: 180212 bytes
+[  14.158] [13081] [DBG] [GFX] Time = 7 ms from clearScreen to displayBuffer
+[  14.565] [13606]   Wait complete:  8279x4_DRF (483 ms)
+[  14.970] [13951] [DBG] [GFX] Time = 6 ms from clearScreen to displayBuffer
+[  15.378] [14476]   Wait complete:  8279x4_DRF (483 ms)
+[  15.786] [14877] [DBG] [GFX] Time = 7 ms from clearScreen to displayBuffer
+[  16.398] [15402]   Wait complete:  8279x4_DRF (483 ms)
+[  17.410] [16489] [DBG] [ACT] Exiting activity: FileBrowser
+[  17.410] [16489] [DBG] [ACT] Entering activity: Home
+[  17.410] [16497] [DBG] [GFX] Time = 8 ms from clearScreen to displayBuffer
+[  18.024] [17022]   Wait complete:  8279x4_DRF (482 ms)
+[  18.024] [17073] [DBG] [GFX] Time = 7 ms from clearScreen to displayBuffer
+[  18.633] [17598]   Wait complete:  8279x4_DRF (483 ms)
+[  20.463] [19499] [DBG] [PWR] Going to low-power mode
+[  21.075] [20018] [INF] [MEM] Free: 223956 bytes, Total: 293348 bytes, Min Free: 220940 bytes, MaxAlloc: 180212 bytes

@@ -122,9 +122,11 @@ def cmd_run(a):
     if a.icount:
         cmd += ['-icount', a.icount]
     for k, v in (('panel', a.panel), ('fast-epd', 'on' if a.fast_epd else None),
-                 ('trace-epd', a.trace_epd), ('trace-i2c', a.trace_i2c)):
+                 ('trace-epd', os.path.abspath(a.trace_epd) if a.trace_epd else None)):
         if v:
-            cmd += ['-global', f'driver=x4pro.board,property={k},value={v}']
+            cmd += ['-global', f'driver=x4pro.epd,property={k},value={v}']
+    if a.trace_i2c:
+        cmd += ['-global', f'driver=x4pro.i2c0,property=trace-i2c,value={os.path.abspath(a.trace_i2c)}']
     cmd += a.extra
     json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd}, open(os.path.join(d, 'run.json'), 'w'), indent=1)
     if a.dry_run:
@@ -210,7 +212,7 @@ def cmd_wait_text(a):
 def cmd_screenshot(a):
     q = connect(a.name)
     out = os.path.abspath(a.out)
-    q.cmd('screendump', filename=out, format='png')
+    q.cmd('screendump', filename=out, format='png', device='epd')
     shot = os.path.join(idir(a.name), 'last.png')
     try:
         import shutil; shutil.copyfile(out, shot)

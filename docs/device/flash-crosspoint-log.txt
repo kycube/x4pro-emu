@@ -1,0 +1,56 @@
+verified backup: /Users/mini/x4pro-emu/images/device/flash-2026-09-06-a.bin
+plan: port /dev/cu.usbmodem31101
+  1. write the stock app0 image (5503680 bytes) from the backup into app1 @0x7f0000 (must be blank)
+  2. write /Users/mini/x4pro-emu/firmware/.pio/build/x4pro/firmware.bin (5387264 bytes) into app0 @0x10000
+  otadata/bootloader/partition table untouched; boot slot stays app0
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before default-reset --after no-reset read-flash 0x10000 0x10000 /var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/app0-head.bin
+   Read 65536 bytes from 0x00010000 in 0.4 seconds (1442.7 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/app0-head.bin'.
+sanity: app0 head matches backup
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before no-reset --after no-reset read-flash 0x7f0000 0x1000 /var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/app1-head.bin
+   Read 4096 bytes from 0x007f0000 in 0.0 seconds (1425.2 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/app1-head.bin'.
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before default-reset --after no-reset write-flash 0x7f0000 /Users/mini/x4pro-emu/images/device/stock-app0-7.2.4.bin
+   Wrote 5503680 bytes (3184101 compressed) at 0x007f0000 in 42.0 seconds (1047.1 kbit/s).
+   Hash of data verified.
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before no-reset --after no-reset read-flash 0x7f0000 0x1000 /var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/app1-head2.bin
+   Read 4096 bytes from 0x007f0000 in 0.0 seconds (1453.3 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/app1-head2.bin'.
+app1 now holds the stock image (read-back OK)
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before default-reset --after no-reset write-flash 0x10000 /Users/mini/x4pro-emu/firmware/.pio/build/x4pro/firmware.bin
+   Wrote 5387264 bytes (3781355 compressed) at 0x00010000 in 36.6 seconds (1176.2 kbit/s).
+   Hash of data verified.
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before no-reset --after no-reset read-flash 0x10000 0x1000 /var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/cp-head.bin
+   Read 4096 bytes from 0x00010000 in 0.0 seconds (1452.7 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/cp-head.bin'.
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before no-reset --after no-reset read-flash 0xe000 0x2000 /var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/otadata.bin
+   Read 8192 bytes from 0x0000e000 in 0.0 seconds (1433.1 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpl2c8dnm3/otadata.bin'.
+app0 read-back OK; otadata unchanged: True
++ /Users/mini/x4pro-emu/.venv/bin/python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31101 --before no-reset --after hard-reset chip-id
+device reset into the new app0
+flash exit 0
+--- capturing CrossPoint boot on the device (45 s) ---
+capturing /dev/cu.usbmodem31101 @115200 -> docs/device/boot-crosspoint-1.6.0.log for 45.0s (reset first: False)
+saved docs/device/boot-crosspoint-1.6.0.log
+captured        0 lines
+verified backup: /Users/mini/x4pro-emu/images/device/flash-2026-09-06-a.bin
+plan: port /dev/cu.usbmodem31101
+  2. write images/crosspoint-epdtrace.bin (5387584 bytes) into app0 @0x10000
+  otadata/bootloader/partition table untouched; boot slot stays app0
+   Read 65536 bytes from 0x00010000 in 0.4 seconds (1441.1 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpk_zuvjjq/app0-head.bin'.
+ABORT: app0 on the device no longer matches the backup
+flash exit 0
+capturing /dev/cu.usbmodem31101 @115200 -> docs/device/boot-crosspoint-1.6.0-epdtrace.log for 40.0s (reset first: True)
+saved docs/device/boot-crosspoint-1.6.0-epdtrace.log
+verified backup: /Users/mini/x4pro-emu/images/device/flash-2026-09-06-a.bin
+plan: port /dev/cu.usbmodem31101
+  2. write images/crosspoint-epdtrace.bin (5387584 bytes) into app0 @0x10000
+  otadata/bootloader/partition table untouched; boot slot stays app0
+   Read 65536 bytes from 0x00010000 in 0.4 seconds (1438.5 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpml5yuegc/app0-head.bin'.
+   Read 65536 bytes from 0x007f0000 in 0.4 seconds (1468.9 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpml5yuegc/app1-head.bin'.
+sanity: app0 holds another app image; stock copy verified in app1
+   Wrote 5387584 bytes (3781675 compressed) at 0x00010000 in 37.0 seconds (1165.4 kbit/s).
+   Hash of data verified.
+   Read 4096 bytes from 0x00010000 in 0.0 seconds (1446.1 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpml5yuegc/cp-head.bin'.
+   Read 8192 bytes from 0x0000e000 in 0.0 seconds (1428.3 kbit/s) to '/var/folders/qd/0wcpyhsn0wj728wm9pzfml0m0000gn/T/tmpml5yuegc/otadata.bin'.
+app0 read-back OK; otadata unchanged: True
+device reset into the new app0
+flash exit 0
+capturing /dev/cu.usbmodem31101 @115200 -> docs/device/boot-crosspoint-1.6.0-epdtrace.log for 40.0s (reset first: True)
+saved docs/device/boot-crosspoint-1.6.0-epdtrace.log

@@ -1,0 +1,1471 @@
+From 590e8136b1fab3fe5602377dec4c80567e82550b Mon Sep 17 00:00:00 2001
+From: x4pro-emu <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 14:51:53 -0500
+Subject: [PATCH 2/2] xteink-x4pro: GPIO block, SPI2 master, e-paper panel
+ device, board state
+
+- hw/gpio/esp32s3_gpio_full.c: full GPIO register block with per-pin idle levels,
+  external drivers, edge/level interrupts.
+- hw/ssi/esp32s3_gpspi.c: GP-SPI master (CPU-driven path) on an SSIBus.
+- hw/display/x4pro_epd.c: panel device around models/epd_core.c (symlinked):
+  SSD1677 / UC8179 / UC8279, bit-banged probe answers, BUSY timer, QemuConsole.
+- xteink_x4pro.c: wiring, x4pro.input (buttons, charging) and x4pro.board (state JSON).
+---
+ hw/display/epd_core.h               |   1 +
+ hw/display/meson.build              |   1 +
+ hw/display/x4pro_epd.c              | 270 ++++++++++++++++++++++
+ hw/display/x4pro_epd_core.c         |   1 +
+ hw/gpio/esp32s3_gpio_full.c         | 340 ++++++++++++++++++++++++++++
+ hw/gpio/meson.build                 |   2 +-
+ hw/ssi/esp32s3_gpspi.c              | 254 +++++++++++++++++++++
+ hw/ssi/meson.build                  |   2 +-
+ hw/xtensa/xteink_x4pro.c            | 277 +++++++++++++++++++++-
+ include/hw/display/epd_core.h       |   1 +
+ include/hw/display/x4pro_epd.h      |  50 ++++
+ include/hw/gpio/esp32s3_gpio_full.h |  50 ++++
+ include/hw/ssi/esp32s3_gpspi.h      |  44 ++++
+ 13 files changed, 1289 insertions(+), 4 deletions(-)
+ create mode 120000 hw/display/epd_core.h
+ create mode 100644 hw/display/x4pro_epd.c
+ create mode 120000 hw/display/x4pro_epd_core.c
+ create mode 100644 hw/gpio/esp32s3_gpio_full.c
+ create mode 100644 hw/ssi/esp32s3_gpspi.c
+ create mode 120000 include/hw/display/epd_core.h
+ create mode 100644 include/hw/display/x4pro_epd.h
+ create mode 100644 include/hw/gpio/esp32s3_gpio_full.h
+ create mode 100644 include/hw/ssi/esp32s3_gpspi.h
+
+diff --git a/hw/display/epd_core.h b/hw/display/epd_core.h
+new file mode 120000
+index 0000000..78f6e4c
+--- /dev/null
++++ b/hw/display/epd_core.h
+@@ -0,0 +1 @@
++../../../models/epd_core.h
+\ No newline at end of file
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index 36a9ace..b392b80 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -144,3 +144,4 @@ endif
+ system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_lcdc.c'))
+ 
+ modules += { 'hw-display': hw_display_modules }
++system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('x4pro_epd.c', 'x4pro_epd_core.c'))
+diff --git a/hw/display/x4pro_epd.c b/hw/display/x4pro_epd.c
+new file mode 100644
+index 0000000..f33f21c
+--- /dev/null
++++ b/hw/display/x4pro_epd.c
+@@ -0,0 +1,270 @@
++/*
++ * Xteink X4 Pro e-paper panel device (glue around models/epd_core.c).
++ *
++ * Byte path: SPI2 -> SSIBus -> transfer() -> epd_core_byte() gated by the CS
++ * and DC levels that the firmware drives with plain GPIOs.
++ * Probe path: the firmware bit-bangs SCLK/MOSI; we watch those pins and feed
++ * the core's bit-bang decoder; a UC part answers on the shared line, which we
++ * drive back into the GPIO model's external input for the MOSI pad.
++ * BUSY: after any command that makes the core request a BUSY interval, a
++ * guest-time timer keeps BUSY asserted for that long (2 ms with fast-epd).
++ * Display: a QemuConsole surface (800x480 xRGB) refreshed from the core's
++ * image after each refresh, so `screendump device=epd` works headless.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/irq.h"
++#include "hw/qdev-properties.h"
++#include "ui/pixel_ops.h"
++#include "hw/display/x4pro_epd.h"
++
++static void epd_trace(void *opaque, uint8_t cmd, const uint8_t *data, size_t len, bool truncated)
++{
++    X4ProEpdState *s = opaque;
++    if (!s->trace) {
++        return;
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    fprintf(s->trace, "{\"t_us\":%" PRId64 ",\"cmd\":\"0x%02x\",\"len\":%u,\"data\":\"",
++            now / 1000, cmd, (unsigned)s->core.cmd_len);
++    size_t n = len < 16 ? len : 16;
++    for (size_t i = 0; i < n; i++) {
++        fprintf(s->trace, "%s%02x", i ? " " : "", data[i]);
++    }
++    fprintf(s->trace, "\"%s}\n", (truncated || len > 16) ? ",\"more\":true" : "");
++    fflush(s->trace);
++}
++
++static void epd_apply_busy(X4ProEpdState *s)
++{
++    EpdCore *c = &s->core;
++    if (c->busy_request_us) {
++        uint32_t us = s->fast_epd ? 2000 : c->busy_request_us;
++        c->busy_request_us = 0;
++        s->busy_intervals++;
++        timer_mod(s->busy_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (int64_t)us * 1000);
++    }
++    /* SSD1677: busy = HIGH. UC81xx: BUSY_N idle HIGH, busy LOW. */
++    int level = (c->variant == EPD_SSD1677) ? (c->busy ? 1 : 0) : (c->busy ? 0 : 1);
++    qemu_set_irq(s->busy_out, level);
++}
++
++static void epd_update_display(X4ProEpdState *s)
++{
++    if (!s->con || !s->core.image_dirty) {
++        return;
++    }
++    DisplaySurface *surface = qemu_console_surface(s->con);
++    if (!surface) {
++        return;
++    }
++    uint32_t *dst = surface_data(surface);
++    const uint8_t *src = s->core.image;
++    for (int i = 0; i < EPD_W * EPD_H; i++) {
++        uint8_t v = src[i];
++        dst[i] = 0xFF000000u | (v << 16) | (v << 8) | v;
++    }
++    dpy_gfx_update_full(s->con);
++    s->core.image_dirty = false;
++}
++
++static void epd_busy_timeout(void *opaque)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    epd_core_busy_done(&s->core);
++    epd_apply_busy(s);
++}
++
++static void epd_after_byte(X4ProEpdState *s)
++{
++    if (s->core.image_dirty) {
++        s->last_refresh_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++        epd_update_display(s);
++    }
++    epd_apply_busy(s);
++}
++
++static uint32_t epd_transfer(SSIPeripheral *dev, uint32_t val)
++{
++    X4ProEpdState *s = X4PRO_EPD(dev);
++    epd_core_byte(&s->core, val & 0xFF);
++    epd_after_byte(s);
++    return 0xFF;   /* no MISO */
++}
++
++static void epd_set_line(X4ProEpdState *s)
++{
++    int lvl = epd_core_line_level(&s->core);
++    int out = (lvl < 0) ? 2 : lvl;
++    if (out != s->line_driven) {
++        s->line_driven = out;
++        qemu_set_irq(s->line_out, out);
++    }
++}
++
++static void epd_gpio_cs(void *opaque, int n, int level)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    epd_core_set_cs(&s->core, level == 0);
++    epd_set_line(s);
++}
++
++static void epd_gpio_dc(void *opaque, int n, int level)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    epd_core_set_dc(&s->core, level != 0);
++    epd_set_line(s);
++}
++
++static void epd_gpio_rst(void *opaque, int n, int level)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    epd_core_set_rst(&s->core, level != 0);
++    epd_after_byte(s);
++    epd_set_line(s);
++}
++
++static void epd_gpio_sclk(void *opaque, int n, int level)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    if (level) {
++        epd_core_sclk_rise(&s->core, s->mosi_level);
++        epd_after_byte(s);
++    } else {
++        epd_core_sclk_fall(&s->core);
++    }
++    epd_set_line(s);
++}
++
++static void epd_gpio_mosi(void *opaque, int n, int level)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    s->mosi_level = level;
++}
++
++static void epd_invalidate(void *opaque)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    s->core.image_dirty = true;
++    epd_update_display(s);
++}
++
++static void epd_gfx_update(void *opaque)
++{
++    X4ProEpdState *s = X4PRO_EPD(opaque);
++    epd_update_display(s);
++}
++
++static const GraphicHwOps epd_gfx_ops = {
++    .invalidate = epd_invalidate,
++    .gfx_update = epd_gfx_update,
++};
++
++const EpdCore *x4pro_epd_core(X4ProEpdState *s)
++{
++    return &s->core;
++}
++
++static void epd_realize(SSIPeripheral *dev, Error **errp)
++{
++    X4ProEpdState *s = X4PRO_EPD(dev);
++    EpdVariant v = EPD_UC8279;   /* the desk unit's controller (docs/device/boot-crosspoint-1.6.0.log) */
++    if (s->panel) {
++        if (!strcmp(s->panel, "uc8179")) v = EPD_UC8179;
++        else if (!strcmp(s->panel, "uc8279")) v = EPD_UC8279;
++        else if (!strcmp(s->panel, "ssd1677")) v = EPD_SSD1677;
++        else {
++            error_setg(errp, "x4pro.epd: unknown panel '%s' (ssd1677|uc8179|uc8279)", s->panel);
++            return;
++        }
++    }
++    epd_core_init(&s->core, v);
++    if (s->full_ms) s->core.timing.full_us = s->full_ms * 1000;
++    if (s->fast_ms) s->core.timing.fast_us = s->fast_ms * 1000;
++    if (s->half_ms) s->core.timing.half_us = s->half_ms * 1000;
++    if (s->gray_ms) s->core.timing.gray_us = s->gray_ms * 1000;
++    if (s->power_ms) s->core.timing.power_us = s->power_ms * 1000;
++    s->core.trace = epd_trace;
++    s->core.trace_opaque = s;
++    if (s->trace_path && s->trace_path[0]) {
++        s->trace = fopen(s->trace_path, "w");
++        if (!s->trace) {
++            error_setg(errp, "x4pro.epd: cannot open trace file %s", s->trace_path);
++            return;
++        }
++    }
++    s->busy_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, epd_busy_timeout, s);
++    s->line_driven = 2;
++    s->mosi_level = 1;
++    s->con = graphic_console_init(DEVICE(dev), 0, &epd_gfx_ops, s);
++    qemu_console_resize(s->con, EPD_W, EPD_H);
++    s->core.image_dirty = true;
++    epd_update_display(s);
++}
++
++static void epd_reset_hold(Object *obj, ResetType type)
++{
++    X4ProEpdState *s = X4PRO_EPD(obj);
++    /* A system reset does not power-cycle the panel; keep RAM and the image. */
++    s->core.cs = false;
++    s->core.cmd = -1;
++    epd_apply_busy(s);
++}
++
++static void epd_init(Object *obj)
++{
++    X4ProEpdState *s = X4PRO_EPD(obj);
++    DeviceState *dev = DEVICE(obj);
++    qdev_init_gpio_in_named(dev, epd_gpio_cs, X4PRO_EPD_GPIO_CS, 1);
++    qdev_init_gpio_in_named(dev, epd_gpio_dc, X4PRO_EPD_GPIO_DC, 1);
++    qdev_init_gpio_in_named(dev, epd_gpio_rst, X4PRO_EPD_GPIO_RST, 1);
++    qdev_init_gpio_in_named(dev, epd_gpio_sclk, X4PRO_EPD_GPIO_SCLK, 1);
++    qdev_init_gpio_in_named(dev, epd_gpio_mosi, X4PRO_EPD_GPIO_MOSI, 1);
++    qdev_init_gpio_out_named(dev, &s->busy_out, X4PRO_EPD_GPIO_BUSY, 1);
++    qdev_init_gpio_out_named(dev, &s->line_out, X4PRO_EPD_GPIO_LINE, 1);
++}
++
++static Property epd_properties[] = {
++    DEFINE_PROP_STRING("panel", X4ProEpdState, panel),
++    DEFINE_PROP_BOOL("fast-epd", X4ProEpdState, fast_epd, false),
++    DEFINE_PROP_STRING("trace-epd", X4ProEpdState, trace_path),
++    /* 0 = the core's per-variant default measured on the device */
++    DEFINE_PROP_UINT32("full-ms", X4ProEpdState, full_ms, 0),
++    DEFINE_PROP_UINT32("fast-ms", X4ProEpdState, fast_ms, 0),
++    DEFINE_PROP_UINT32("half-ms", X4ProEpdState, half_ms, 0),
++    DEFINE_PROP_UINT32("gray-ms", X4ProEpdState, gray_ms, 0),
++    DEFINE_PROP_UINT32("power-ms", X4ProEpdState, power_ms, 0),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void epd_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    k->realize = epd_realize;
++    k->transfer = epd_transfer;
++    k->cs_polarity = SSI_CS_NONE;   /* CS is a plain GPIO on this board */
++    rc->phases.hold = epd_reset_hold;
++    device_class_set_props(dc, epd_properties);
++    dc->desc = "Xteink X4 Pro e-paper panel";
++}
++
++static const TypeInfo epd_info = {
++    .name = TYPE_X4PRO_EPD,
++    .parent = TYPE_SSI_PERIPHERAL,
++    .instance_size = sizeof(X4ProEpdState),
++    .instance_init = epd_init,
++    .class_init = epd_class_init,
++};
++
++static void epd_register_types(void)
++{
++    type_register_static(&epd_info);
++}
++
++type_init(epd_register_types)
+diff --git a/hw/display/x4pro_epd_core.c b/hw/display/x4pro_epd_core.c
+new file mode 120000
+index 0000000..952476f
+--- /dev/null
++++ b/hw/display/x4pro_epd_core.c
+@@ -0,0 +1 @@
++../../../models/epd_core.c
+\ No newline at end of file
+diff --git a/hw/gpio/esp32s3_gpio_full.c b/hw/gpio/esp32s3_gpio_full.c
+new file mode 100644
+index 0000000..1ffedc8
+--- /dev/null
++++ b/hw/gpio/esp32s3_gpio_full.c
+@@ -0,0 +1,340 @@
++/*
++ * ESP32-S3 GPIO block. Register map from ESP-IDF v5.5 soc/gpio_reg.h
++ * (see docs/audit.md "Register offsets"):
++ *   OUT +0x04 (W1TS +0x08, W1TC +0x0C), OUT1 +0x10 (+0x14/+0x18),
++ *   ENABLE +0x20 (+0x24/+0x28), ENABLE1 +0x2C (+0x30/+0x34), STRAP +0x38,
++ *   IN +0x3C, IN1 +0x40, STATUS +0x44 (+0x48/+0x4C), STATUS1 +0x50 (+0x54/+0x58),
++ *   PCPU_INT +0x5C, PCPU_NMI_INT +0x60, CPUSDIO_INT +0x64, PCPU_INT1 +0x68,
++ *   PCPU_NMI_INT1 +0x6C, CPUSDIO_INT1 +0x70, PINn +0x74 + 4n,
++ *   STATUS_NEXT +0x14C/+0x150, FUNCn_IN_SEL_CFG +0x154 + 4n,
++ *   FUNCn_OUT_SEL_CFG +0x554 + 4n, CLOCK_GATE +0x62C, DATE +0x6FC.
++ *
++ * Electrical model: a pad's level is OUT when ENABLE is set, otherwise the
++ * external driver's level if one is attached (a board device on "pin-in"),
++ * otherwise the pin's idle level (1 for pull-ups). IN always reads the pad
++ * level. Every level change is reported on "pin-out" and evaluated against
++ * the PINn interrupt type; STATUS latches, PCPU_INT shows STATUS for pins
++ * whose INT_ENA has bit 0 (core 0), and the irq line follows PCPU_INT != 0.
++ * The GPIO matrix (FUNC_*_SEL) is stored but not modelled electrically.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/hw.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/gpio/esp32s3_gpio_full.h"
++
++#define R_BT_SELECT      0x00
++#define R_OUT            0x04
++#define R_OUT_W1TS       0x08
++#define R_OUT_W1TC       0x0C
++#define R_OUT1           0x10
++#define R_OUT1_W1TS      0x14
++#define R_OUT1_W1TC      0x18
++#define R_ENABLE         0x20
++#define R_ENABLE_W1TS    0x24
++#define R_ENABLE_W1TC    0x28
++#define R_ENABLE1        0x2C
++#define R_ENABLE1_W1TS   0x30
++#define R_ENABLE1_W1TC   0x34
++#define R_STRAP          0x38
++#define R_IN             0x3C
++#define R_IN1            0x40
++#define R_STATUS         0x44
++#define R_STATUS_W1TS    0x48
++#define R_STATUS_W1TC    0x4C
++#define R_STATUS1        0x50
++#define R_STATUS1_W1TS   0x54
++#define R_STATUS1_W1TC   0x58
++#define R_PCPU_INT       0x5C
++#define R_PCPU_NMI_INT   0x60
++#define R_CPUSDIO_INT    0x64
++#define R_PCPU_INT1      0x68
++#define R_PCPU_NMI_INT1  0x6C
++#define R_CPUSDIO_INT1   0x70
++#define R_PIN0           0x74
++#define R_PIN_END        (R_PIN0 + 4 * ESP32S3_GPIO_PINS)
++#define R_STATUS_NEXT    0x14C
++#define R_STATUS_NEXT1   0x150
++#define R_FUNC_IN_SEL0   0x154
++#define R_FUNC_IN_SEL_END (R_FUNC_IN_SEL0 + 4 * ESP32S3_GPIO_FUNC_IN_COUNT)
++#define R_FUNC_OUT_SEL0  0x554
++#define R_FUNC_OUT_SEL_END (R_FUNC_OUT_SEL0 + 4 * ESP32S3_GPIO_PINS)
++#define R_CLOCK_GATE     0x62C
++#define R_DATE           0x6FC
++
++#define PIN_INT_TYPE_SHIFT 7
++#define PIN_INT_TYPE_MASK  0x7
++#define PIN_INT_ENA_SHIFT  13
++#define PIN_INT_ENA_MASK   0x1F
++
++enum { INT_DISABLE = 0, INT_POSEDGE = 1, INT_NEGEDGE = 2, INT_ANYEDGE = 3, INT_LOW = 4, INT_HIGH = 5 };
++
++#define PINMASK ((1ULL << ESP32S3_GPIO_PINS) - 1)
++
++static inline int pin_int_type(ESP32S3GpioFullState *s, int n)
++{
++    return (s->pin[n] >> PIN_INT_TYPE_SHIFT) & PIN_INT_TYPE_MASK;
++}
++
++static inline int pin_int_ena(ESP32S3GpioFullState *s, int n)
++{
++    return (s->pin[n] >> PIN_INT_ENA_SHIFT) & PIN_INT_ENA_MASK;
++}
++
++static uint64_t gpio_pcpu_int(ESP32S3GpioFullState *s)
++{
++    uint64_t r = 0;
++    for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
++        if ((s->status >> n & 1) && (pin_int_ena(s, n) & 1)) {
++            r |= 1ULL << n;
++        }
++    }
++    return r;
++}
++
++static void gpio_update_irq(ESP32S3GpioFullState *s)
++{
++    int level = gpio_pcpu_int(s) != 0;
++    qemu_set_irq(s->irq, level);
++}
++
++static uint64_t gpio_compute_level(ESP32S3GpioFullState *s)
++{
++    uint64_t driven = s->ext_valid ? ((s->ext & s->ext_valid) | (s->idle & ~s->ext_valid)) : s->idle;
++    return ((s->out & s->enable) | (driven & ~s->enable)) & PINMASK;
++}
++
++/* Recompute pad levels; report changes on pin-out and latch interrupts. */
++static void gpio_refresh(ESP32S3GpioFullState *s)
++{
++    uint64_t old = s->level;
++    uint64_t new = gpio_compute_level(s);
++    uint64_t changed = old ^ new;
++    s->level = new;
++
++    /* level-type interrupts latch whenever the level is present */
++    for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
++        int type = pin_int_type(s, n);
++        int lvl = (new >> n) & 1;
++        bool edge = (changed >> n) & 1;
++        bool fire = false;
++        switch (type) {
++        case INT_POSEDGE: fire = edge && lvl; break;
++        case INT_NEGEDGE: fire = edge && !lvl; break;
++        case INT_ANYEDGE: fire = edge; break;
++        case INT_LOW:     fire = !lvl; break;
++        case INT_HIGH:    fire = lvl; break;
++        default: break;
++        }
++        if (fire) {
++            s->status |= 1ULL << n;
++            s->irq_count++;
++        }
++    }
++    if (changed) {
++        for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
++            if ((changed >> n) & 1) {
++                qemu_set_irq(s->pin_out[n], (new >> n) & 1);
++            }
++        }
++    }
++    gpio_update_irq(s);
++}
++
++void esp32s3_gpio_full_set_idle(ESP32S3GpioFullState *s, int pin, int level)
++{
++    if (pin < 0 || pin >= ESP32S3_GPIO_PINS) {
++        return;
++    }
++    if (level) {
++        s->idle |= 1ULL << pin;
++    } else {
++        s->idle &= ~(1ULL << pin);
++    }
++    gpio_refresh(s);
++}
++
++int esp32s3_gpio_full_get_level(ESP32S3GpioFullState *s, int pin)
++{
++    return (s->level >> pin) & 1;
++}
++
++bool esp32s3_gpio_full_is_output(ESP32S3GpioFullState *s, int pin)
++{
++    return (s->enable >> pin) & 1;
++}
++
++static void gpio_pin_in_handler(void *opaque, int n, int level)
++{
++    ESP32S3GpioFullState *s = ESP32S3_GPIO_FULL(opaque);
++    uint64_t bit = 1ULL << n;
++    if (level == ESP32S3_GPIO_RELEASE) {
++        s->ext_valid &= ~bit;
++    } else {
++        s->ext_valid |= bit;
++        if (level) {
++            s->ext |= bit;
++        } else {
++            s->ext &= ~bit;
++        }
++    }
++    gpio_refresh(s);
++}
++
++static uint64_t gpio_read(void *opaque, hwaddr addr, unsigned int size)
++{
++    ESP32S3GpioFullState *s = ESP32S3_GPIO_FULL(opaque);
++    uint64_t r = 0;
++
++    switch (addr) {
++    case R_OUT:        r = (uint32_t)s->out; break;
++    case R_OUT1:       r = (uint32_t)(s->out >> 32); break;
++    case R_ENABLE:     r = (uint32_t)s->enable; break;
++    case R_ENABLE1:    r = (uint32_t)(s->enable >> 32); break;
++    case R_STRAP:      r = s->strap_mode; break;
++    case R_IN:         r = (uint32_t)s->level; break;
++    case R_IN1:        r = (uint32_t)(s->level >> 32); break;
++    case R_STATUS:     r = (uint32_t)s->status; break;
++    case R_STATUS1:    r = (uint32_t)(s->status >> 32); break;
++    case R_PCPU_INT:   r = (uint32_t)gpio_pcpu_int(s); break;
++    case R_PCPU_INT1:  r = (uint32_t)(gpio_pcpu_int(s) >> 32); break;
++    case R_PCPU_NMI_INT: case R_CPUSDIO_INT: case R_PCPU_NMI_INT1: case R_CPUSDIO_INT1:
++    case R_OUT_W1TS: case R_OUT_W1TC: case R_OUT1_W1TS: case R_OUT1_W1TC:
++    case R_ENABLE_W1TS: case R_ENABLE_W1TC: case R_ENABLE1_W1TS: case R_ENABLE1_W1TC:
++    case R_STATUS_W1TS: case R_STATUS_W1TC: case R_STATUS1_W1TS: case R_STATUS1_W1TC:
++        r = 0; break;
++    case R_STATUS_NEXT: case R_STATUS_NEXT1:
++        r = 0; break;
++    case R_CLOCK_GATE: r = s->clock_gate; break;
++    case R_DATE:       r = 0x2006130; break;
++    default:
++        if (addr >= R_PIN0 && addr < R_PIN_END) {
++            r = s->pin[(addr - R_PIN0) / 4];
++        } else if (addr >= R_FUNC_IN_SEL0 && addr < R_FUNC_IN_SEL_END) {
++            r = s->func_in_sel[(addr - R_FUNC_IN_SEL0) / 4];
++        } else if (addr >= R_FUNC_OUT_SEL0 && addr < R_FUNC_OUT_SEL_END) {
++            r = s->func_out_sel[(addr - R_FUNC_OUT_SEL0) / 4];
++        } else {
++            qemu_log_mask(LOG_UNIMP, "esp32s3.gpio: unhandled read +0x%" HWADDR_PRIx "\n", addr);
++        }
++        break;
++    }
++    return r;
++}
++
++static void gpio_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
++{
++    ESP32S3GpioFullState *s = ESP32S3_GPIO_FULL(opaque);
++    uint32_t v = value;
++    const uint64_t hi_mask = 0x1FFFFULL << 32;   /* pins 32..48 */
++
++    switch (addr) {
++    case R_OUT:         s->out = (s->out & hi_mask) | v; break;
++    case R_OUT_W1TS:    s->out |= v; break;
++    case R_OUT_W1TC:    s->out &= ~(uint64_t)v; break;
++    case R_OUT1:        s->out = (s->out & 0xFFFFFFFFULL) | ((uint64_t)(v & 0x1FFFF) << 32); break;
++    case R_OUT1_W1TS:   s->out |= (uint64_t)(v & 0x1FFFF) << 32; break;
++    case R_OUT1_W1TC:   s->out &= ~((uint64_t)(v & 0x1FFFF) << 32); break;
++    case R_ENABLE:      s->enable = (s->enable & hi_mask) | v; break;
++    case R_ENABLE_W1TS: s->enable |= v; break;
++    case R_ENABLE_W1TC: s->enable &= ~(uint64_t)v; break;
++    case R_ENABLE1:     s->enable = (s->enable & 0xFFFFFFFFULL) | ((uint64_t)(v & 0x1FFFF) << 32); break;
++    case R_ENABLE1_W1TS: s->enable |= (uint64_t)(v & 0x1FFFF) << 32; break;
++    case R_ENABLE1_W1TC: s->enable &= ~((uint64_t)(v & 0x1FFFF) << 32); break;
++    case R_STATUS:      s->status = (s->status & hi_mask) | v; gpio_update_irq(s); return;
++    case R_STATUS_W1TS: s->status |= v; gpio_update_irq(s); return;
++    case R_STATUS_W1TC: s->status &= ~(uint64_t)v; gpio_update_irq(s); return;
++    case R_STATUS1:     s->status = (s->status & 0xFFFFFFFFULL) | ((uint64_t)(v & 0x1FFFF) << 32); gpio_update_irq(s); return;
++    case R_STATUS1_W1TS: s->status |= (uint64_t)(v & 0x1FFFF) << 32; gpio_update_irq(s); return;
++    case R_STATUS1_W1TC: s->status &= ~((uint64_t)(v & 0x1FFFF) << 32); gpio_update_irq(s); return;
++    case R_STRAP:       return;
++    case R_CLOCK_GATE:  s->clock_gate = v; return;
++    case R_BT_SELECT:   return;
++    default:
++        if (addr >= R_PIN0 && addr < R_PIN_END) {
++            s->pin[(addr - R_PIN0) / 4] = v;
++            gpio_refresh(s);   /* a newly enabled level interrupt may latch at once */
++            return;
++        } else if (addr >= R_FUNC_IN_SEL0 && addr < R_FUNC_IN_SEL_END) {
++            s->func_in_sel[(addr - R_FUNC_IN_SEL0) / 4] = v;
++            return;
++        } else if (addr >= R_FUNC_OUT_SEL0 && addr < R_FUNC_OUT_SEL_END) {
++            s->func_out_sel[(addr - R_FUNC_OUT_SEL0) / 4] = v;
++            return;
++        }
++        qemu_log_mask(LOG_UNIMP, "esp32s3.gpio: unhandled write +0x%" HWADDR_PRIx " = 0x%x\n", addr, v);
++        return;
++    }
++    gpio_refresh(s);
++}
++
++static const MemoryRegionOps gpio_ops = {
++    .read = gpio_read,
++    .write = gpio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void gpio_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3GpioFullState *s = ESP32S3_GPIO_FULL(obj);
++    s->out = 0;
++    s->enable = 0;
++    s->status = 0;
++    memset(s->pin, 0, sizeof(s->pin));
++    memset(s->func_in_sel, 0, sizeof(s->func_in_sel));
++    for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
++        s->func_out_sel[n] = 0x100;   /* SIG_GPIO_OUT_IDX */
++    }
++    s->clock_gate = 1;
++    /* external drivers (board devices) keep their state across a reset */
++    s->level = ~gpio_compute_level(s);   /* force a full report */
++    gpio_refresh(s);
++}
++
++static void gpio_init(Object *obj)
++{
++    ESP32S3GpioFullState *s = ESP32S3_GPIO_FULL(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &gpio_ops, s, TYPE_ESP32S3_GPIO_FULL, 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++    qdev_init_gpio_out_named(DEVICE(sbd), s->pin_out, ESP32S3_GPIO_PIN_OUT, ESP32S3_GPIO_PINS);
++    qdev_init_gpio_in_named(DEVICE(sbd), gpio_pin_in_handler, ESP32S3_GPIO_PIN_IN, ESP32S3_GPIO_PINS);
++}
++
++static Property gpio_properties[] = {
++    DEFINE_PROP_UINT32("strap_mode", ESP32S3GpioFullState, strap_mode, 0x4),
++    DEFINE_PROP_UINT64("idle", ESP32S3GpioFullState, idle, 0),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void gpio_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = gpio_reset_hold;
++    device_class_set_props(dc, gpio_properties);
++}
++
++static const TypeInfo gpio_info = {
++    .name = TYPE_ESP32S3_GPIO_FULL,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3GpioFullState),
++    .instance_init = gpio_init,
++    .class_init = gpio_class_init,
++};
++
++static void gpio_register_types(void)
++{
++    type_register_static(&gpio_info);
++}
++
++type_init(gpio_register_types)
+diff --git a/hw/gpio/meson.build b/hw/gpio/meson.build
+index 0b78485..a43e733 100644
+--- a/hw/gpio/meson.build
++++ b/hw/gpio/meson.build
+@@ -20,5 +20,5 @@ system_ss.add(when: 'CONFIG_SIFIVE_GPIO', if_true: files('sifive_gpio.c'))
+ system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files('esp32_gpio.c'))
+ system_ss.add(when: 'CONFIG_RISCV_ESP32C3', if_true: files('esp32_gpio.c', 'esp32c3_gpio.c'))
+ system_ss.add(when: 'CONFIG_RISCV_ESP32C6', if_true: files('esp32_gpio.c', 'esp32c3_gpio.c', 'esp32c6_gpio.c'))
+-system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('esp32_gpio.c', 'esp32s3_gpio.c'))
++system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('esp32_gpio.c', 'esp32s3_gpio.c', 'esp32s3_gpio_full.c'))
+ system_ss.add(when: 'CONFIG_PCF8574', if_true: files('pcf8574.c'))
+diff --git a/hw/ssi/esp32s3_gpspi.c b/hw/ssi/esp32s3_gpspi.c
+new file mode 100644
+index 0000000..28b95c6
+--- /dev/null
++++ b/hw/ssi/esp32s3_gpspi.c
+@@ -0,0 +1,254 @@
++/*
++ * ESP32-S3 GP-SPI master (SPI2 at 0x60024000, SPI3 at 0x60025000).
++ *
++ * Register map from ESP-IDF v5.5 soc/spi_reg.h (docs/audit.md). Only the
++ * CPU-driven (non-DMA) path is modelled, which is what the Arduino SPIClass
++ * uses: the driver fills W0..W15, sets MS_DLEN, pulses CMD.UPDATE, then sets
++ * CMD.USR. We then clock (MS_DLEN+1)/8 bytes out onto the SSIBus (and, if
++ * USR_MISO is set, store what comes back into W0..), clear USR and raise
++ * TRANS_DONE. Clock, timing and mode registers are stored but ignored. The
++ * peripheral's own CS outputs are provided but the X4 Pro firmware drives its
++ * chip select with a plain GPIO.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/hw.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/ssi/esp32s3_gpspi.h"
++
++#define R_CMD          0x00
++#define R_ADDR         0x04
++#define R_CTRL         0x08
++#define R_CLOCK        0x0C
++#define R_USER         0x10
++#define R_USER1        0x14
++#define R_USER2        0x18
++#define R_MS_DLEN      0x1C
++#define R_MISC         0x20
++#define R_DIN_MODE     0x24
++#define R_DIN_NUM      0x28
++#define R_DOUT_MODE    0x2C
++#define R_DMA_CONF     0x30
++#define R_DMA_INT_ENA  0x34
++#define R_DMA_INT_CLR  0x38
++#define R_DMA_INT_RAW  0x3C
++#define R_DMA_INT_ST   0x40
++#define R_DMA_INT_SET  0x44
++#define R_W0           0x98
++#define R_W15          0xD4
++#define R_SLAVE        0xE0
++#define R_SLAVE1       0xE4
++#define R_CLK_GATE     0xE8
++#define R_DATE         0xF0
++
++#define CMD_USR        (1u << 24)
++#define CMD_UPDATE     (1u << 23)
++
++#define USER_COMMAND   (1u << 31)
++#define USER_ADDR      (1u << 30)
++#define USER_DUMMY     (1u << 29)
++#define USER_MISO      (1u << 28)
++#define USER_MOSI      (1u << 27)
++#define USER_MOSI_HIGHPART (1u << 25)
++#define USER_MISO_HIGHPART (1u << 24)
++
++#define INT_TRANS_DONE (1u << 12)
++
++static void gpspi_update_irq(ESP32S3GpSpiState *s)
++{
++    qemu_set_irq(s->irq, (s->dma_int_raw & s->dma_int_ena) != 0);
++}
++
++static void gpspi_cs_set(ESP32S3GpSpiState *s, int active)
++{
++    /* MISC bits 0..5: CSn_DIS. An enabled CS follows the transaction (active low). */
++    for (int i = 0; i < ESP32S3_GPSPI_CS_COUNT; i++) {
++        bool enabled = !((s->misc >> i) & 1);
++        qemu_set_irq(s->cs_gpio[i], enabled ? !active : 1);
++    }
++}
++
++static void gpspi_do_user_transfer(ESP32S3GpSpiState *s)
++{
++    gpspi_cs_set(s, 1);
++    if (s->user & USER_COMMAND) {
++        int bits = ((s->user2 >> 28) & 0xF) + 1;
++        uint32_t cmd = s->user2 & 0xFFFF;
++        for (int b = 0; b < (bits + 7) / 8; b++) {
++            ssi_transfer(s->spi, (cmd >> (8 * b)) & 0xFF);   /* LSB-first byte order as the hw sends */
++            s->bytes_out++;
++        }
++    }
++    if (s->user & USER_ADDR) {
++        int bits = ((s->user1 >> 27) & 0x1F) + 1;
++        int bytes = (bits + 7) / 8;
++        uint32_t addr = s->addr;
++        for (int b = bytes - 1; b >= 0; b--) {
++            ssi_transfer(s->spi, (addr >> (8 * b)) & 0xFF);
++            s->bytes_out++;
++        }
++    }
++    bool mosi = s->user & USER_MOSI;
++    bool miso = s->user & USER_MISO;
++    if (mosi || miso) {
++        int bits = (s->ms_dlen & 0x3FFFF) + 1;
++        int bytes = (bits + 7) / 8;
++        if (bytes > ESP32S3_GPSPI_BUF_WORDS * 4) {
++            bytes = ESP32S3_GPSPI_BUF_WORDS * 4;
++        }
++        uint8_t *buf = (uint8_t *)s->data_buf;
++        int off = (mosi && (s->user & USER_MOSI_HIGHPART)) ? 32 : 0;
++        for (int i = 0; i < bytes; i++) {
++            uint8_t out = mosi ? buf[(off + i) & 63] : 0;
++            uint32_t in = ssi_transfer(s->spi, out);
++            if (miso) {
++                buf[(off + i) & 63] = in & 0xFF;
++            }
++            s->bytes_out++;
++        }
++    }
++    gpspi_cs_set(s, 0);
++    s->transfers++;
++    s->dma_int_raw |= INT_TRANS_DONE;
++    gpspi_update_irq(s);
++}
++
++static uint64_t gpspi_read(void *opaque, hwaddr addr, unsigned int size)
++{
++    ESP32S3GpSpiState *s = ESP32S3_GPSPI(opaque);
++    uint32_t r = 0;
++    switch (addr) {
++    case R_CMD:        r = 0; break;                 /* USR and UPDATE self-clear at once */
++    case R_ADDR:       r = s->addr; break;
++    case R_CTRL:       r = s->ctrl; break;
++    case R_CLOCK:      r = s->clock; break;
++    case R_USER:       r = s->user; break;
++    case R_USER1:      r = s->user1; break;
++    case R_USER2:      r = s->user2; break;
++    case R_MS_DLEN:    r = s->ms_dlen; break;
++    case R_MISC:       r = s->misc; break;
++    case R_DIN_MODE:   r = s->din_mode; break;
++    case R_DIN_NUM:    r = s->din_num; break;
++    case R_DOUT_MODE:  r = s->dout_mode; break;
++    case R_DMA_CONF:   r = s->dma_conf; break;
++    case R_DMA_INT_ENA: r = s->dma_int_ena; break;
++    case R_DMA_INT_RAW: r = s->dma_int_raw; break;
++    case R_DMA_INT_ST:  r = s->dma_int_raw & s->dma_int_ena; break;
++    case R_SLAVE:      r = s->slave; break;
++    case R_SLAVE1:     r = s->slave1; break;
++    case R_CLK_GATE:   r = s->clk_gate; break;
++    case R_DATE:       r = 0x2101040; break;
++    default:
++        if (addr >= R_W0 && addr <= R_W15) {
++            r = s->data_buf[(addr - R_W0) / 4];
++        } else {
++            qemu_log_mask(LOG_UNIMP, "esp32s3.gpspi: unhandled read +0x%" HWADDR_PRIx "\n", addr);
++        }
++    }
++    return r;
++}
++
++static void gpspi_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
++{
++    ESP32S3GpSpiState *s = ESP32S3_GPSPI(opaque);
++    uint32_t v = value;
++    switch (addr) {
++    case R_CMD:
++        if (v & CMD_USR) {
++            gpspi_do_user_transfer(s);
++        }
++        break;
++    case R_ADDR:       s->addr = v; break;
++    case R_CTRL:       s->ctrl = v; break;
++    case R_CLOCK:      s->clock = v; break;
++    case R_USER:       s->user = v; break;
++    case R_USER1:      s->user1 = v; break;
++    case R_USER2:      s->user2 = v; break;
++    case R_MS_DLEN:    s->ms_dlen = v; break;
++    case R_MISC:       s->misc = v; break;
++    case R_DIN_MODE:   s->din_mode = v; break;
++    case R_DIN_NUM:    s->din_num = v; break;
++    case R_DOUT_MODE:  s->dout_mode = v; break;
++    case R_DMA_CONF:   s->dma_conf = v; break;
++    case R_DMA_INT_ENA: s->dma_int_ena = v; gpspi_update_irq(s); break;
++    case R_DMA_INT_CLR: s->dma_int_raw &= ~v; gpspi_update_irq(s); break;
++    case R_DMA_INT_SET: s->dma_int_raw |= v; gpspi_update_irq(s); break;
++    case R_DMA_INT_RAW: break;
++    case R_SLAVE:      s->slave = v; break;
++    case R_SLAVE1:     s->slave1 = v; break;
++    case R_CLK_GATE:   s->clk_gate = v; break;
++    default:
++        if (addr >= R_W0 && addr <= R_W15) {
++            s->data_buf[(addr - R_W0) / 4] = v;
++        } else {
++            qemu_log_mask(LOG_UNIMP, "esp32s3.gpspi: unhandled write +0x%" HWADDR_PRIx " = 0x%x\n", addr, v);
++        }
++    }
++}
++
++static const MemoryRegionOps gpspi_ops = {
++    .read = gpspi_read,
++    .write = gpspi_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void gpspi_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3GpSpiState *s = ESP32S3_GPSPI(obj);
++    s->addr = 0;
++    s->ctrl = 0x3C0000;
++    s->clock = 0x80003043;
++    s->user = 0x800000C0;
++    s->user1 = 0xB8410007;
++    s->user2 = 0x70000000;
++    s->ms_dlen = 0;
++    s->misc = 0x3E;          /* CS1..CS5 disabled, CS0 enabled */
++    s->dma_conf = 0;
++    s->dma_int_ena = 0;
++    s->dma_int_raw = 0;
++    s->slave = 0;
++    s->slave1 = 0;
++    s->clk_gate = 0;
++    memset(s->data_buf, 0, sizeof(s->data_buf));
++    gpspi_cs_set(s, 0);
++}
++
++static void gpspi_init(Object *obj)
++{
++    ESP32S3GpSpiState *s = ESP32S3_GPSPI(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &gpspi_ops, s, TYPE_ESP32S3_GPSPI, 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++    s->spi = ssi_create_bus(DEVICE(s), "spi");
++    qdev_init_gpio_out_named(DEVICE(s), s->cs_gpio, SSI_GPIO_CS, ESP32S3_GPSPI_CS_COUNT);
++}
++
++static void gpspi_class_init(ObjectClass *klass, void *data)
++{
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = gpspi_reset_hold;
++}
++
++static const TypeInfo gpspi_info = {
++    .name = TYPE_ESP32S3_GPSPI,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3GpSpiState),
++    .instance_init = gpspi_init,
++    .class_init = gpspi_class_init,
++};
++
++static void gpspi_register_types(void)
++{
++    type_register_static(&gpspi_info);
++}
++
++type_init(gpspi_register_types)
+diff --git a/hw/ssi/meson.build b/hw/ssi/meson.build
+index b6f6c3e..0727ded 100644
+--- a/hw/ssi/meson.build
++++ b/hw/ssi/meson.build
+@@ -13,7 +13,7 @@ system_ss.add(when: 'CONFIG_IMX', if_true: files('imx_spi.c'))
+ system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files('esp32_spi.c'))
+ system_ss.add(when: 'CONFIG_RISCV_ESP32C3', if_true: files('esp32c3_spi.c'))
+ system_ss.add(when: 'CONFIG_RISCV_ESP32C6', if_true: files('esp32c3_spi.c', 'esp32c6_spi.c'))
+-system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('esp32s3_spi.c'))
++system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('esp32s3_spi.c', 'esp32s3_gpspi.c'))
+ system_ss.add(when: 'CONFIG_IBEX', if_true: files('ibex_spi_host.c'))
+ system_ss.add(when: 'CONFIG_BCM2835_SPI', if_true: files('bcm2835_spi.c'))
+ system_ss.add(when: 'CONFIG_PNV_SPI', if_true: files('pnv_spi.c'))
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 6e7b113..1f50a6b 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -22,6 +22,11 @@
+ #include "hw/misc/esp32s3_reg.h"
+ #include "hw/xtensa/esp32s3_intc.h"
+ #include "hw/misc/esp32s3_usj.h"
++#include "hw/gpio/esp32s3_gpio_full.h"
++#include "hw/ssi/esp32s3_gpspi.h"
++#include "hw/display/x4pro_epd.h"
++#include "monitor/qdev.h"
++#include "qapi/visitor.h"
+ 
+ #define TYPE_ESP32S3_MACHINE MACHINE_TYPE_NAME("esp32s3")
+ #define TYPE_X4PRO_MACHINE   MACHINE_TYPE_NAME("xteink-x4pro")
+@@ -47,12 +52,10 @@ typedef struct IoLogRegion {
+ } IoLogRegion;
+ 
+ static IoLogRegion iolog_regions[] = {
+-    { "gpio",      DR_REG_GPIO_BASE,            0x1000 },
+     { "rtcio",     DR_REG_RTCIO_BASE,           0x400  },
+     { "iomux",     DR_REG_IO_MUX_BASE,          0x1000 },
+     { "i2c0",      DR_REG_I2C_EXT_BASE,         0x1000 },
+     { "ledc",      DR_REG_LEDC_BASE,            0x1000 },
+-    { "spi2",      DR_REG_SPI2_BASE,            0x1000 },
+     { "spi3",      DR_REG_SPI3_BASE,            0x1000 },
+     { "usb_wrap",  DR_REG_USB_WRAP_BASE,        0x1000 },
+     { "rmt",       DR_REG_RMT_BASE,             0x1000 },
+@@ -105,6 +108,203 @@ static void x4pro_add_iolog(MachineState *machine, MemoryRegion *sys_mem)
+     }
+ }
+ 
++/* ---- board pins (docs/hardware.md) -------------------------------------- */
++#define PIN_BTN_LEFT   0
++#define PIN_BTN_RIGHT  7
++#define PIN_BTN_POWER  3
++#define PIN_EPD_SCLK   12
++#define PIN_EPD_MOSI   11
++#define PIN_EPD_CS     13
++#define PIN_EPD_DC     18
++#define PIN_EPD_RST    14
++#define PIN_EPD_BUSY   6
++#define PIN_TP_INT     10
++#define PIN_TP_RST     4
++#define PIN_TP_PWR     2
++#define PIN_SD_PWR     5
++#define PIN_CHG_STAT   21
++#define PIN_RAIL       1
++
++/* ---- input device: buttons (and later touch) as QOM properties ----------- */
++#define TYPE_X4PRO_INPUT "x4pro.input"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProInputState, X4PRO_INPUT)
++
++struct X4ProInputState {
++    DeviceState parent_obj;
++    ESP32S3GpioFullState *gpio;
++    bool btn[3];            /* left, right, power: true = pressed */
++    bool charging;
++};
++
++static const int btn_pin[3] = { PIN_BTN_LEFT, PIN_BTN_RIGHT, PIN_BTN_POWER };
++static const char *btn_name[3] = { "btn-left", "btn-right", "btn-power" };
++
++static void x4pro_input_apply(X4ProInputState *s)
++{
++    if (!s->gpio) {
++        return;
++    }
++    for (int i = 0; i < 3; i++) {
++        /* active-low with pull-up: pressed drives 0, released floats to the idle 1 */
++        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(s->gpio), ESP32S3_GPIO_PIN_IN, btn_pin[i]),
++                     s->btn[i] ? 0 : ESP32S3_GPIO_RELEASE);
++    }
++    /* charger STAT: input, no pull, HIGH = charging */
++    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(s->gpio), ESP32S3_GPIO_PIN_IN, PIN_CHG_STAT),
++                 s->charging ? 1 : 0);
++}
++
++static void x4pro_input_get_btn(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    bool val = s->btn[(intptr_t)opaque];
++    visit_type_bool(v, name, &val, errp);
++}
++
++static void x4pro_input_set_btn(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    bool val;
++    if (!visit_type_bool(v, name, &val, errp)) {
++        return;
++    }
++    s->btn[(intptr_t)opaque] = val;
++    x4pro_input_apply(s);
++}
++
++static void x4pro_input_get_charging(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    visit_type_bool(v, name, &s->charging, errp);
++}
++
++static void x4pro_input_set_charging(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    bool val;
++    if (!visit_type_bool(v, name, &val, errp)) {
++        return;
++    }
++    s->charging = val;
++    x4pro_input_apply(s);
++}
++
++static void x4pro_input_init(Object *obj)
++{
++    for (intptr_t i = 0; i < 3; i++) {
++        object_property_add(obj, btn_name[i], "bool", x4pro_input_get_btn, x4pro_input_set_btn, NULL, (void *)i);
++    }
++    object_property_add(obj, "charging", "bool", x4pro_input_get_charging, x4pro_input_set_charging, NULL, NULL);
++}
++
++static const TypeInfo x4pro_input_info = {
++    .name = TYPE_X4PRO_INPUT,
++    .parent = TYPE_DEVICE,
++    .instance_size = sizeof(X4ProInputState),
++    .instance_init = x4pro_input_init,
++};
++
++/* ---- board object: read-only "state" JSON for tooling ------------------- */
++#define TYPE_X4PRO_BOARD "x4pro.board"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProBoardState, X4PRO_BOARD)
++
++struct X4ProBoardState {
++    DeviceState parent_obj;
++    ESP32S3GpioFullState *gpio;
++    ESP32S3GpSpiState *spi2;
++    X4ProEpdState *epd;
++    ESP32S3UsjState *usj;
++    X4ProInputState *input;
++};
++
++static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProBoardState *b = X4PRO_BOARD(obj);
++    const EpdCore *c = b->epd ? x4pro_epd_core(b->epd) : NULL;
++    GString *j = g_string_new("{");
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    g_string_append_printf(j, "\"uptime_us\":%" PRId64 ",", now / 1000);
++    if (c) {
++        g_string_append_printf(j,
++            "\"panel\":\"%s\",\"refresh_count\":%" PRIu64 ",\"last_mode\":\"%s\",\"last_ctrl2\":\"0x%02x\","
++            "\"busy\":%s,\"gray_approx\":%s,\"probe_reads\":%" PRIu64 ",\"epd_bytes\":%" PRIu64 ","
++            "\"epd_cmds\":%" PRIu64 ",\"epd_unknown_cmds\":%" PRIu64 ",\"epd_last_unknown\":\"0x%02x\","
++            "\"epd_resets\":%" PRIu64 ",\"epd_deep_sleep\":%s,\"fast_epd\":%s,\"last_refresh_us\":%" PRId64 ",",
++            epd_variant_name(c->variant), c->refresh_count, epd_mode_name(c->last_mode), c->last_ctrl2,
++            c->busy ? "true" : "false", c->image_gray_approx ? "true" : "false", c->probe_reads, c->bytes_in,
++            c->cmds_in, c->unknown_cmds, c->last_unknown_cmd, c->resets, c->deep_sleep ? "true" : "false",
++            b->epd->fast_epd ? "true" : "false", b->epd->last_refresh_ns / 1000);
++    }
++    if (b->gpio) {
++        static const struct { const char *n; int pin; } pins[] = {
++            {"left", PIN_BTN_LEFT}, {"right", PIN_BTN_RIGHT}, {"power", PIN_BTN_POWER},
++            {"busy", PIN_EPD_BUSY}, {"cs", PIN_EPD_CS}, {"dc", PIN_EPD_DC}, {"rst", PIN_EPD_RST},
++            {"sclk", PIN_EPD_SCLK}, {"mosi", PIN_EPD_MOSI}, {"tp_int", PIN_TP_INT}, {"tp_rst", PIN_TP_RST},
++            {"tp_pwr", PIN_TP_PWR}, {"sd_pwr", PIN_SD_PWR}, {"rail", PIN_RAIL}, {"chg", PIN_CHG_STAT},
++            {"cool", 8}, {"warm", 9},
++        };
++        g_string_append(j, "\"gpio\":{");
++        for (size_t i = 0; i < ARRAY_SIZE(pins); i++) {
++            g_string_append_printf(j, "%s\"%s\":{\"level\":%d,\"out\":%s}", i ? "," : "", pins[i].n,
++                esp32s3_gpio_full_get_level(b->gpio, pins[i].pin),
++                esp32s3_gpio_full_is_output(b->gpio, pins[i].pin) ? "true" : "false");
++        }
++        g_string_append_printf(j, "},\"gpio_irqs\":%" PRIu64 ",", b->gpio->irq_count);
++    }
++    if (b->usj) {
++        g_string_append_printf(j, "\"usj\":{\"tx_bytes\":%" PRIu64 ",\"rx_bytes\":%" PRIu64 ",\"flushes\":%" PRIu64 "},",
++            b->usj->tx_bytes, b->usj->rx_bytes, b->usj->flushes);
++    }
++    if (b->spi2) {
++        g_string_append_printf(j, "\"spi2\":{\"transfers\":%" PRIu64 ",\"bytes\":%" PRIu64 "},",
++            b->spi2->transfers, b->spi2->bytes_out);
++    }
++    if (b->input) {
++        g_string_append_printf(j, "\"buttons\":{\"left\":%s,\"right\":%s,\"power\":%s},\"charging\":%s,",
++            b->input->btn[0] ? "true" : "false", b->input->btn[1] ? "true" : "false",
++            b->input->btn[2] ? "true" : "false", b->input->charging ? "true" : "false");
++    }
++    if (j->str[j->len - 1] == ',') {
++        g_string_truncate(j, j->len - 1);
++    }
++    g_string_append(j, "}");
++    char *str = g_string_free(j, false);
++    visit_type_str(v, name, &str, errp);
++    g_free(str);
++}
++
++static void x4pro_board_get_fast_epd(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProBoardState *b = X4PRO_BOARD(obj);
++    bool val = b->epd ? b->epd->fast_epd : false;
++    visit_type_bool(v, name, &val, errp);
++}
++
++static void x4pro_board_set_fast_epd(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProBoardState *b = X4PRO_BOARD(obj);
++    bool val;
++    if (!visit_type_bool(v, name, &val, errp)) {
++        return;
++    }
++    if (b->epd) {
++        b->epd->fast_epd = val;
++    }
++}
++
++static void x4pro_board_init(Object *obj)
++{
++    object_property_add(obj, "state", "string", x4pro_board_get_state, NULL, NULL, NULL);
++    object_property_add(obj, "fast-epd", "bool", x4pro_board_get_fast_epd, x4pro_board_set_fast_epd, NULL, NULL);
++}
++
++static const TypeInfo x4pro_board_info = {
++    .name = TYPE_X4PRO_BOARD,
++    .parent = TYPE_DEVICE,
++    .instance_size = sizeof(X4ProBoardState),
++    .instance_init = x4pro_board_init,
++};
++
+ /* ---- machine ------------------------------------------------------------ */
+ 
+ static void x4pro_machine_init(MachineState *machine)
+@@ -121,9 +321,11 @@ static void x4pro_machine_init(MachineState *machine)
+         exit(1);
+     }
+ 
++    ESP32S3UsjState *usj_state;
+     /* USB Serial/JTAG console, shadowing the SoC's stub at the same base. */
+     {
+         DeviceState *usj = qdev_new(TYPE_ESP32S3_USJ);
++        usj_state = ESP32S3_USJ(usj);
+         object_property_add_child(OBJECT(machine), "usj", OBJECT(usj));
+         sysbus_realize_and_unref(SYS_BUS_DEVICE(usj), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(usj), 0);
+@@ -138,6 +340,75 @@ static void x4pro_machine_init(MachineState *machine)
+             x4pro_strap_mode = object_property_get_int(gpio, "strap_mode", &error_abort);
+         }
+     }
++
++    /* Full GPIO block, shadowing the SoC's strap-only stub. */
++    ESP32S3GpioFullState *gpio;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_GPIO_FULL);
++        object_property_add_child(OBJECT(machine), "x4pro-gpio", OBJECT(dev));
++        qdev_prop_set_uint32(dev, "strap_mode", x4pro_strap_mode);
++        /* idle (undriven) levels: pull-ups on the buttons, the released MOSI line and RST */
++        uint64_t idle = (1ULL << PIN_BTN_LEFT) | (1ULL << PIN_BTN_RIGHT) | (1ULL << PIN_BTN_POWER) |
++                        (1ULL << PIN_EPD_MOSI) | (1ULL << PIN_EPD_RST) | (1ULL << PIN_TP_RST) |
++                        (1ULL << PIN_EPD_CS);
++        qdev_prop_set_uint64(dev, "idle", idle);
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_GPIO_BASE, mr, 2);
++        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(intmatrix, ETS_GPIO_INTR_SOURCE));
++        gpio = ESP32S3_GPIO_FULL(dev);
++    }
++
++    /* Buttons and charger line: /machine/x4pro-input */
++    X4ProInputState *input;
++    {
++        DeviceState *dev = qdev_new(TYPE_X4PRO_INPUT);
++        object_property_add_child(OBJECT(machine), "x4pro-input", OBJECT(dev));
++        X4PRO_INPUT(dev)->gpio = gpio;
++        qdev_realize_and_unref(dev, NULL, &error_fatal);
++        input = X4PRO_INPUT(dev);
++        x4pro_input_apply(input);
++    }
++
++    /* SPI2 (FSPI) master at 0x60024000 */
++    ESP32S3GpSpiState *spi2;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_GPSPI);
++        object_property_add_child(OBJECT(machine), "x4pro-spi2", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE, mr, 2);
++        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(intmatrix, ETS_SPI2_INTR_SOURCE));
++        spi2 = ESP32S3_GPSPI(dev);
++    }
++
++    /* E-paper panel on SPI2, with its control pins on the GPIO block. qdev id "epd"
++     * so that QMP screendump can select its console (the SoC's esp_rgb is console 0). */
++    X4ProEpdState *epd;
++    {
++        DeviceState *dev = qdev_new(TYPE_X4PRO_EPD);
++        qdev_set_id(dev, g_strdup("epd"), &error_fatal);
++        ssi_realize_and_unref(dev, spi2->spi, &error_fatal);
++        epd = X4PRO_EPD(dev);
++        DeviceState *g = DEVICE(gpio);
++        qdev_connect_gpio_out_named(g, ESP32S3_GPIO_PIN_OUT, PIN_EPD_CS,   qdev_get_gpio_in_named(dev, X4PRO_EPD_GPIO_CS, 0));
++        qdev_connect_gpio_out_named(g, ESP32S3_GPIO_PIN_OUT, PIN_EPD_DC,   qdev_get_gpio_in_named(dev, X4PRO_EPD_GPIO_DC, 0));
++        qdev_connect_gpio_out_named(g, ESP32S3_GPIO_PIN_OUT, PIN_EPD_RST,  qdev_get_gpio_in_named(dev, X4PRO_EPD_GPIO_RST, 0));
++        qdev_connect_gpio_out_named(g, ESP32S3_GPIO_PIN_OUT, PIN_EPD_SCLK, qdev_get_gpio_in_named(dev, X4PRO_EPD_GPIO_SCLK, 0));
++        qdev_connect_gpio_out_named(g, ESP32S3_GPIO_PIN_OUT, PIN_EPD_MOSI, qdev_get_gpio_in_named(dev, X4PRO_EPD_GPIO_MOSI, 0));
++        qdev_connect_gpio_out_named(dev, X4PRO_EPD_GPIO_BUSY, 0, qdev_get_gpio_in_named(g, ESP32S3_GPIO_PIN_IN, PIN_EPD_BUSY));
++        qdev_connect_gpio_out_named(dev, X4PRO_EPD_GPIO_LINE, 0, qdev_get_gpio_in_named(g, ESP32S3_GPIO_PIN_IN, PIN_EPD_MOSI));
++    }
++
++    /* Board state object: /machine/x4pro-board */
++    {
++        DeviceState *dev = qdev_new(TYPE_X4PRO_BOARD);
++        object_property_add_child(OBJECT(machine), "x4pro-board", OBJECT(dev));
++        X4ProBoardState *b = X4PRO_BOARD(dev);
++        b->gpio = gpio; b->spi2 = spi2; b->epd = epd; b->usj = usj_state; b->input = input;
++        qdev_realize_and_unref(dev, NULL, &error_fatal);
++    }
++
+     x4pro_add_iolog(machine, sys_mem);
+ }
+ 
+@@ -160,6 +431,8 @@ static const TypeInfo x4pro_machine_info = {
+ 
+ static void x4pro_machine_type_init(void)
+ {
++    type_register_static(&x4pro_input_info);
++    type_register_static(&x4pro_board_info);
+     type_register_static(&x4pro_machine_info);
+ }
+ 
+diff --git a/include/hw/display/epd_core.h b/include/hw/display/epd_core.h
+new file mode 120000
+index 0000000..2fe6fe5
+--- /dev/null
++++ b/include/hw/display/epd_core.h
+@@ -0,0 +1 @@
++../../../../models/epd_core.h
+\ No newline at end of file
+diff --git a/include/hw/display/x4pro_epd.h b/include/hw/display/x4pro_epd.h
+new file mode 100644
+index 0000000..ddde866
+--- /dev/null
++++ b/include/hw/display/x4pro_epd.h
+@@ -0,0 +1,50 @@
++/*
++ * Xteink X4 Pro e-paper panel as a QEMU device: SSI peripheral on SPI2 plus
++ * raw GPIO edges (CS/DC/RST/SCLK/MOSI) for the bit-banged probe, BUSY output,
++ * and a graphic console for screendump.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/ssi/ssi.h"
++#include "qemu/timer.h"
++#include "ui/console.h"
++#include "hw/display/epd_core.h"
++
++#define TYPE_X4PRO_EPD "x4pro.epd"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProEpdState, X4PRO_EPD)
++
++/* named GPIO inputs */
++#define X4PRO_EPD_GPIO_CS   "cs"
++#define X4PRO_EPD_GPIO_DC   "dc"
++#define X4PRO_EPD_GPIO_RST  "rst"
++#define X4PRO_EPD_GPIO_SCLK "sclk"
++#define X4PRO_EPD_GPIO_MOSI "mosi"
++/* named GPIO outputs */
++#define X4PRO_EPD_GPIO_BUSY "busy"          /* level as the controller drives it */
++#define X4PRO_EPD_GPIO_LINE "line"          /* driven level on the shared data line, 2 = released */
++
++struct X4ProEpdState {
++    SSIPeripheral parent_obj;
++
++    EpdCore core;
++    QEMUTimer *busy_timer;
++    QemuConsole *con;
++    qemu_irq busy_out;
++    qemu_irq line_out;
++    int mosi_level;
++    int line_driven;      /* last value sent on line_out */
++
++    /* properties */
++    char *panel;          /* "ssd1677" | "uc8179" | "uc8279" */
++    bool fast_epd;        /* 2 ms refreshes */
++    char *trace_path;
++    uint32_t full_ms, fast_ms, half_ms, gray_ms, power_ms;
++
++    FILE *trace;
++    uint64_t busy_intervals;
++    int64_t last_refresh_ns;
++};
++
++const EpdCore *x4pro_epd_core(X4ProEpdState *s);
+diff --git a/include/hw/gpio/esp32s3_gpio_full.h b/include/hw/gpio/esp32s3_gpio_full.h
+new file mode 100644
+index 0000000..a6f5cf7
+--- /dev/null
++++ b/include/hw/gpio/esp32s3_gpio_full.h
+@@ -0,0 +1,50 @@
++/*
++ * ESP32-S3 GPIO block: OUT/ENABLE/IN/STATUS/PINn/interrupts and per-pin
++ * external drivers, for boards that wire real devices to the pins.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++
++#define TYPE_ESP32S3_GPIO_FULL "esp32s3.gpio-full"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3GpioFullState, ESP32S3_GPIO_FULL)
++
++#define ESP32S3_GPIO_PINS 49
++#define ESP32S3_GPIO_FUNC_IN_COUNT 256
++
++/* Named GPIO lines of this device:
++ *   "pin-out"[49]: level the pad sits at (0/1), fired on every change.
++ *   "pin-in"[49] : external driver: 0/1 drives the pad, ESP32S3_GPIO_RELEASE releases it.
++ */
++#define ESP32S3_GPIO_PIN_OUT "pin-out"
++#define ESP32S3_GPIO_PIN_IN  "pin-in"
++#define ESP32S3_GPIO_RELEASE 2
++
++struct ESP32S3GpioFullState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;                          /* to the interrupt matrix (core 0) */
++    qemu_irq pin_out[ESP32S3_GPIO_PINS];
++
++    uint32_t strap_mode;
++
++    uint64_t out;        /* OUT + OUT1 */
++    uint64_t enable;     /* ENABLE + ENABLE1 */
++    uint64_t ext;        /* external driver level, valid where ext_valid */
++    uint64_t ext_valid;
++    uint64_t idle;       /* level of an undriven input (1 = pull-up) */
++    uint64_t status;     /* STATUS + STATUS1 (interrupt status) */
++    uint64_t level;      /* current pad level (cached) */
++    uint32_t pin[ESP32S3_GPIO_PINS];       /* PINn config */
++    uint32_t func_in_sel[ESP32S3_GPIO_FUNC_IN_COUNT];
++    uint32_t func_out_sel[ESP32S3_GPIO_PINS];
++    uint32_t clock_gate;
++    uint64_t irq_count;
++};
++
++/* Board helpers */
++void esp32s3_gpio_full_set_idle(ESP32S3GpioFullState *s, int pin, int level);
++int  esp32s3_gpio_full_get_level(ESP32S3GpioFullState *s, int pin);
++bool esp32s3_gpio_full_is_output(ESP32S3GpioFullState *s, int pin);
+diff --git a/include/hw/ssi/esp32s3_gpspi.h b/include/hw/ssi/esp32s3_gpspi.h
+new file mode 100644
+index 0000000..0bc32da
+--- /dev/null
++++ b/include/hw/ssi/esp32s3_gpspi.h
+@@ -0,0 +1,44 @@
++/*
++ * ESP32-S3 general-purpose SPI master (SPI2/SPI3, "GP-SPI").
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++#include "hw/ssi/ssi.h"
++
++#define TYPE_ESP32S3_GPSPI "esp32s3.gpspi"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3GpSpiState, ESP32S3_GPSPI)
++
++#define ESP32S3_GPSPI_BUF_WORDS 16
++#define ESP32S3_GPSPI_CS_COUNT 6
++
++struct ESP32S3GpSpiState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++    qemu_irq cs_gpio[ESP32S3_GPSPI_CS_COUNT];
++    SSIBus *spi;
++
++    uint32_t addr;
++    uint32_t ctrl;
++    uint32_t clock;
++    uint32_t user;
++    uint32_t user1;
++    uint32_t user2;
++    uint32_t ms_dlen;
++    uint32_t misc;
++    uint32_t din_mode;
++    uint32_t din_num;
++    uint32_t dout_mode;
++    uint32_t dma_conf;
++    uint32_t dma_int_ena;
++    uint32_t dma_int_raw;
++    uint32_t slave;
++    uint32_t slave1;
++    uint32_t clk_gate;
++    uint32_t data_buf[ESP32S3_GPSPI_BUF_WORDS];
++
++    uint64_t transfers;
++    uint64_t bytes_out;
++};
+-- 
+2.50.1 (Apple Git-155)
+

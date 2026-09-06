@@ -135,3 +135,66 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
 - Not yet done for M1's acceptance: comparing against the real device's CrossPoint boot log, since
   the device runs stock. Done as soon as CrossPoint is on the device.
 - Stock dump on the new machine: same as on the stock machine (stops after `Multicore app`).
+
+## 2026-09-06 — Device: CrossPoint on the X4 Pro, ground truth for the panel
+
+- The stock app switched itself to a TinyUSB mass-storage personality ("XTEink X4 Pro",
+  0x303A:0x4002) while idle; the owner confirmed they had put it in USB mode. macOS mounted the
+  SD card (15.7 GB FAT32 "NO NAME", 8 KB clusters). Only 16 MB used: `XTCache/`, `XTData/`
+  (stock system fonts, home-startup archive), no books. Copied read-only to
+  `images/device/sd-files/` (`rsync`, excluding macOS metadata). A raw block image over the
+  ESP32-S3's full-speed USB would take hours; not done.
+- After the owner exited USB mode the USB Serial/JTAG came back. `tools/device.py
+  flash-crosspoint --preserve-stock --yes`: sanity-read app0 == backup, app1 blank, wrote the
+  stock 7.2.4 image (`images/device/stock-app0-7.2.4.bin`) into app1 @0x7F0000, wrote CrossPoint
+  1.6.0-x4pro (5,387,264 bytes) into app0 @0x10000, read-backs OK, otadata untouched.
+  `tools/device.py restore-stock --yes` reverses it.
+- First CrossPoint boot on the device (`docs/device/boot-crosspoint-1.6.0.log`): SD mounts,
+  RTC found, IMU absent, frontlight attached (gpio 8 / warm 9), and the panel probe:
+  `[XTDET] NVS hw_calib/screenType=2 (UltraChip)`,
+  `[XTDET] bus probe VER=00 0F 68 00 00 FLG=13 -> UltraChip`, MTP dump
+  `A5 A5 1F 20 25 25 3C 00 97 02 02 03 20 02 58 00 … 0F 00 00 68 … 05 0A 0F 14 50 5F 64 7F`,
+  `promoted SSD1677 -> UC8279 800x480 (LUT_VER=68)`. **The desk unit is a UC8279 (LUT_VER
+  0x68).** Not `00 00 01 FF FF` as the doc's UC8179 example; the brief's SSD1677-first plan is
+  kept only as the reference model, the emulator defaults to `uc8279`.
+- Measured BUSY intervals from CrossPoint's own `Wait complete` lines: `8279x4_PON` 40 ms,
+  `8279x4_DRF` 1326 ms for the boot screen (GC full), 482-483 ms for every DU/fast page. These
+  are now the core's defaults for the UC variants.
+- CrossPoint idles by dropping the CPU frequency (`[PWR] Going to low-power mode` /
+  `Restoring normal CPU frequency`), no light sleep.
+- The first capture after flashing recorded nothing: the port was opened after the boot and
+  HWCDC only emits once the host has read an IN packet, while the periodic `[MEM]` line comes
+  every 10 s... it did not show either; a capture with an RTS reset worked normally. Unclear
+  whether CrossPoint had already dropped into its low-power idle with the console detached.
+  Always capture with `--reset`.
+
+## 2026-09-06 — M2: first pixel (UC8279), probe answered, stream matches the device
+
+- Models: `hw/gpio/esp32s3_gpio_full.c` (OUT/ENABLE/IN/STATUS/PINn, per-pin idle levels,
+  external drivers via "pin-in", edges on "pin-out", edge/level interrupts to ETS_GPIO_INTR_SOURCE),
+  `hw/ssi/esp32s3_gpspi.c` (SPI2 CPU-driven transfers: W0..W15, MS_DLEN, CMD.USR, TRANS_DONE),
+  `hw/display/x4pro_epd.c` (SSI peripheral + probe pins + BUSY timer + QemuConsole, qdev id `epd`),
+  and the pure-C `models/epd_core.c` (SSD1677 / UC8179 / UC8279 command sets, RAM addressing,
+  compose, bit-banged probe answers) with host tests `models/tests/test_epd.c` and a fixture
+  replayer `models/tests/replay.c`.
+- With the GPIO idle levels the boot no longer trips the screenshot chord, and the probe on an
+  SSD1677 sees `VER=FF FF FF FF FF FLG=FF` (floating pull-up) exactly as XteinkDetect expects.
+- Panel default = **uc8279** (the desk unit). The emulator's `[XTDET]` lines are byte-identical
+  to the device's: `VER=00 0F 68 00 00 FLG=13`, the 48-byte MTP, `promoted … UC8279 (LUT_VER=68)`.
+- First screenshot (`tests/golden/sd_error.png`): "SD card error" in CrossPoint's portrait UI
+  orientation, rendered from the UC8279 NEW plane (gates 120..599 of the 600-gate scan).
+- `--trace-epd` vs the device (CrossPoint built with `firmware-patches/freeink-sdk-epd-trace.patch`,
+  `-DFREEINK_EPD_TRACE=1`, flashed to app0; `docs/device/boot-crosspoint-1.6.0-epdtrace.log`):
+  `tools/epdtrace.py` shows the init + first full refresh identical opcode-for-opcode with the
+  same data bytes (`00 61 65 03 30 E1 13 10 50 E0 E5 04 00 12`). The device then paints Home
+  with DU pages (`10 13 50 E0 E5 03 E1 91 90 00 12 92`), which the emulator reaches only with an
+  SD card. Emulator BUSY waits: PON 41 ms, DRF 1329 ms (device 40 / 1325).
+- Fixture `models/fixtures/uc8279-device-boot-home.log` replays through the core: 38 commands,
+  3 refreshes, 0 unknown commands (`make -C models test`).
+- `-icount 3` works on the two-CPU machine (CrossPoint boots and idles normally under it).
+- Dead ends: the trace lost commands pending across a RST pulse (fixed: flush on reset and on
+  BUSY completion); `screendump` needs `device=epd` because the SoC's `esp_rgb` is console 0;
+  symlinking `models/epd_core.c` into the QEMU tree needs the right relative depth.
+- SD: with `-drive if=sd` the card initialises (no `send_op_cond` retries) but SdFat's volume
+  mount failed on a superfloppy image; SdFat opens MBR partition 1 (the device's card is MBR +
+  one FAT32 partition). `mksd.py` now writes an MBR. Continued in M3.

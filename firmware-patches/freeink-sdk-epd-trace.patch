@@ -1,0 +1,117 @@
+diff --git a/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp b/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp
+index db1252c..6498cb2 100644
+--- a/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp
++++ b/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp
+@@ -43,6 +43,50 @@ void boardEpdReset(bool high) {
+ }
+ }  // namespace
+ 
++
++// ---- x4pro-emu: optional panel command trace (build with -DFREEINK_EPD_TRACE=1) ----
++// One line per command, printed when the next command starts (so the data length
++// is known): "[EPD] c=XX len=N d=b0 b1 .. b7". Used to record fixtures for the
++// emulator's panel model. Not for production builds.
++#if defined(FREEINK_EPD_TRACE) && FREEINK_EPD_TRACE
++namespace {
++struct EpdTrace {
++  int cmd = -1;
++  uint32_t len = 0;
++  uint8_t head[8];
++  uint32_t t0 = 0;
++  void flush() {
++    if (cmd < 0 || !Serial) return;
++    Serial.printf("[%lu] [EPD] c=%02X len=%lu", (unsigned long)t0, cmd, (unsigned long)len);
++    const uint32_t n = len < 8 ? len : 8;
++    for (uint32_t i = 0; i < n; i++) Serial.printf(" %02X", head[i]);
++    Serial.printf("\n");
++    cmd = -1;
++  }
++  void command(uint8_t c) {
++    flush();
++    cmd = c;
++    len = 0;
++    t0 = millis();
++  }
++  void data(const uint8_t* d, uint32_t n) {
++    for (uint32_t i = 0; i < n && len + i < 8; i++) head[len + i] = d[i];
++    len += n;
++  }
++};
++EpdTrace g_epdTrace;
++}  // namespace
++#define EPD_TRACE_CMD(c) g_epdTrace.command(c)
++#define EPD_TRACE_DATA(d, n) g_epdTrace.data((d), (n))
++#define EPD_TRACE_BYTE(b) do { const uint8_t _b = (b); g_epdTrace.data(&_b, 1); } while (0)
++#define EPD_TRACE_FLUSH() g_epdTrace.flush()
++#else
++#define EPD_TRACE_CMD(c)
++#define EPD_TRACE_DATA(d, n)
++#define EPD_TRACE_BYTE(b)
++#define EPD_TRACE_FLUSH()
++#endif
++
+ namespace freeink {
+ 
+ // ── ISR-driven waveform-completion notification ──────────────────────────────
+@@ -141,6 +185,7 @@ void EpdBus::reset(uint16_t extraSettleMs) {
+ 
+ void EpdBus::cmd(uint8_t c) {
+   SPI.beginTransaction(_spi);
++  EPD_TRACE_CMD(c);
+   digitalWrite(_pins.dc, LOW);
+   digitalWrite(_pins.cs, LOW);
+   SPI.transfer(c);
+@@ -150,6 +195,7 @@ void EpdBus::cmd(uint8_t c) {
+ 
+ void EpdBus::data(uint8_t d) {
+   SPI.beginTransaction(_spi);
++  EPD_TRACE_BYTE(d);
+   digitalWrite(_pins.dc, HIGH);
+   digitalWrite(_pins.cs, LOW);
+   SPI.transfer(d);
+@@ -159,6 +205,7 @@ void EpdBus::data(uint8_t d) {
+ 
+ void EpdBus::data(const uint8_t* d, uint16_t len) {
+   SPI.beginTransaction(_spi);
++  EPD_TRACE_DATA(d, len);
+   digitalWrite(_pins.dc, HIGH);
+   digitalWrite(_pins.cs, LOW);
+   SPI.writeBytes(d, len);
+@@ -168,6 +215,8 @@ void EpdBus::data(const uint8_t* d, uint16_t len) {
+ 
+ void EpdBus::cmdData(uint8_t c, const uint8_t* d, uint16_t len) {
+   SPI.beginTransaction(_spi);
++  EPD_TRACE_CMD(c);
++  if (len > 0 && d != nullptr) EPD_TRACE_DATA(d, len);
+   digitalWrite(_pins.cs, LOW);
+   digitalWrite(_pins.dc, LOW);
+   SPI.transfer(c);
+@@ -198,17 +247,20 @@ void EpdBus::endTxn() {
+ }
+ 
+ void EpdBus::rawCmd(uint8_t c) {
++  EPD_TRACE_CMD(c);
+   digitalWrite(_pins.dc, LOW);
+   SPI.transfer(c);
+   digitalWrite(_pins.dc, HIGH);
+ }
+ 
+ void EpdBus::rawData(uint8_t d) {
++  EPD_TRACE_BYTE(d);
+   digitalWrite(_pins.dc, HIGH);
+   SPI.transfer(d);
+ }
+ 
+ void EpdBus::rawWriteBytes(const uint8_t* d, uint16_t len) {
++  EPD_TRACE_DATA(d, len);
+   digitalWrite(_pins.dc, HIGH);
+   SPI.writeBytes(d, len);
+ }
+@@ -300,6 +352,7 @@ void EpdBus::waitBusy(BusyPolarity p, const char* tag) {
+ 
+   if (hookFired && _busyWaitEndHook != nullptr) _busyWaitEndHook();
+   if (p == BusyPolarity::X3TwoPhase && !x3SawLow) return;
++  EPD_TRACE_FLUSH();
+ 
+   if (tag && Serial) {
+     Serial.printf("[%lu]   Wait complete: %s (%lu ms)\n", millis(), tag, millis() - start);
