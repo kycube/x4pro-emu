@@ -226,3 +226,56 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
   is not modelled until M4; the clock is absent for the same reason (RTC not found).
 - `tests/test_boot.py`: boots with a fresh 64 MiB MBR/FAT32 image, waits for Home and two
   refreshes, presses Right, asserts a pixel diff, and checks the probe verdict text.
+
+## 2026-09-06 — M4: touch and the rest of the I2C bus
+
+- `hw/i2c/esp32s3_i2c.c`: the S3 I2C controller in master FIFO mode as ESP-IDF 5.5's
+  `i2c_master` driver (Arduino 3.3.11 `Wire` → `esp32-hal-i2c-ng.c`) programs it: TX FIFO
+  through DATA, COMD0..7 command list (RSTART/WRITE/READ/STOP/END, byte_num, ack bits, done),
+  CTR.TRANS_START executes the list synchronously against a QEMU I2CBus; NACK / END_DETECT /
+  TRANS_COMPLETE interrupts into ETS_I2C_EXT0_INTR_SOURCE. `--trace-i2c` writes one JSON line
+  per transaction.
+- `hw/misc/x4pro_i2c_devs.c`: GT911 (16-bit pointer, 0x814E status / 0x8150 points / 0x8140
+  ID / config area, INT line, re-frames every 10 ms while a finger is down, NACKs while GPIO2
+  is not driven LOW), BM8563/PCF8563 (16 BCD registers, host wall clock seed + guest time,
+  settable), CW2017 (VERSION 0x0D, VCELL/SOC from `battery-soc`/`battery-mv`, MODE dance,
+  SOC_ALERT 0x80, the OEM 80-byte BATINFO resident so the firmware skips its upload).
+- Console now matches the device's I2C findings: `SDK RTC found`, no IMU (the X4 Pro profile
+  has `ImuType::None`, so nothing is probed), GT911 answers at 0x5D on the first try, the
+  status bar shows the gauge's percentage (63 % default; `x4emu battery --soc 42` changes it
+  after CrossPoint's 1.5 s poll and the next repaint).
+- Touch mapping verified end to end: `x4emu tap 345 350` (landscape panel pixels → GT911 raw
+  (129, 345)) opens "Browse Files"; `x4emu home` returns to Home. Both react within ~50 ms.
+- First BATINFO table I typed was wrong (two rows lost to a grep filter), which made the
+  firmware re-upload the profile; fixed from the source lines verbatim.
+- Tests: `tests/test_touch_reader.py` boots with a generated EPUB (`tests/mkepub.py`), checks the
+  I2C devices, taps into the file browser and the book, pages forward twice with pixel diffs,
+  and checks the battery/charging properties.
+
+## 2026-09-06 — M5: frontlight PWM and deep sleep
+
+- `hw/misc/esp32s3_ledc.c`: S3 LEDC (LS channels 0..7, timers 0..3) with the S3 offsets; duty
+  resolution from the timer, duty from LSCHn_DUTY, DUTY_CHNG_END raised at once on DUTY_START.
+  `state.ledc` lists every channel with the GPIO it is routed to (GPIO matrix
+  FUNC_OUT_SEL == LEDC_LS_SIG_OUT0_IDX + ch = 73 + ch). CrossPoint attaches the frontlight to
+  channels 0 (GPIO8 cool) and 1 (GPIO9 warm) at 25 kHz; the stock app used channels 4/5 for the
+  same pins (support doc). `x4emu light` prints the cool/warm duty in permille.
+- `hw/misc/x4pro_sleep.c`: an overlay on RTC_CNTL that handles STATE0.SLEEP_EN, WAKEUP_STATE,
+  INT_*, EXT_WAKEUP_CONF, SLP_REJECT_CONF, DIG_PWC, EXT_WAKEUP1(_STATUS), SLP_WAKEUP_CAUSE and
+  forwards every other offset to Espressif's rtc_cntl with `memory_region_dispatch_*`.
+  Deep sleep (DIG_PWC.DG_WRAP_PD_EN set) pauses the VM (`x4emu status` says so); the GPIO
+  model reports pin levels into the overlay, and when a pin selected in EXT_WAKEUP1 reaches the
+  EXT1 level it records EXT_WAKEUP1_STATUS + SLP_WAKEUP_CAUSE=EXT1, sets both CPUs' reset
+  cause to 5, requests a system reset and resumes the VM. Light sleep returns immediately.
+- Verified on CrossPoint: `x4emu hold power --ms 700` → "Power button held 408ms, sleeping" →
+  Sleep activity (the "CrossPoint SLEEPING" logo stays on the panel) → "Entering deep sleep" →
+  paused, `ext1_sel=0x8` (GPIO3), any-low. `x4emu press power` (auto-extended to a 1.5 s hold,
+  because CrossPoint re-sleeps unless the button is still held when it verifies the wake ~1.3 s
+  after the reset) → `rst:0x5 (DSLEEP)`, wake cause EXT1, status GPIO3, then the splash-less
+  wake path straight to Home. Wall-clock: the guest's millis() keeps counting across the modelled
+  reset (the systimer is not reset by QEMU's system reset), so post-wake timestamps continue
+  from where they were; real hardware restarts at 0.
+- Device comparison of the wake log: pending (the device had auto-slept; USB is off in deep
+  sleep and only the owner can press its button).
+- Short power presses (< 400 ms) are clicks (X4 Pro: double-click toggles the frontlight),
+  not sleep: `SETTINGS.getPowerButtonDuration()` is 400 ms unless "short press = sleep" is set.

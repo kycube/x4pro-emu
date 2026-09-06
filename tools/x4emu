@@ -126,7 +126,7 @@ def cmd_run(a):
         if v:
             cmd += ['-global', f'driver=x4pro.epd,property={k},value={v}']
     if a.trace_i2c:
-        cmd += ['-global', f'driver=x4pro.i2c0,property=trace-i2c,value={os.path.abspath(a.trace_i2c)}']
+        cmd += ['-global', f'driver=esp32s3.i2c,property=trace-i2c,value={os.path.abspath(a.trace_i2c)}']
     cmd += a.extra
     json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd}, open(os.path.join(d, 'run.json'), 'w'), indent=1)
     if a.dry_run:
@@ -173,7 +173,14 @@ def cmd_status(a):
         print(f'{a.name}: not running'); return
     q = connect(a.name)
     st = q.cmd('query-status')
-    print(f'{a.name}: pid {pid}, {st["status"]}, running={st["running"]}')
+    extra = ''
+    try:
+        sl = json.loads(q.qom_get(BOARD, 'state')).get('sleep', {})
+        if sl.get('sleeping'):
+            extra = ' (deep sleep: press power to wake)'
+    except Exception:
+        pass
+    print(f'{a.name}: pid {pid}, {st["status"]}, running={st["running"]}{extra}')
 
 def cmd_state(a):
     q = connect(a.name)
@@ -268,6 +275,15 @@ def after_input(q, n0, a):
 
 def cmd_press(a):
     q = connect(a.name)
+    if a.button == 'power' and a.ms < 1500:
+        # A wake from deep sleep must still be held when CrossPoint verifies it (~1.3 s after
+        # the reset), otherwise the firmware goes straight back to sleep. Hold long enough.
+        try:
+            if json.loads(q.qom_get(BOARD, 'state')).get('sleep', {}).get('sleeping'):
+                print('device is in deep sleep: holding power for 1500 ms to wake it')
+                a.ms = 1500
+        except Exception:
+            pass
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
@@ -322,13 +338,20 @@ def cmd_battery(a):
     q = connect(a.name)
     if a.soc is not None: q.qom_set(BOARD, 'battery-soc', a.soc)
     if a.mv is not None: q.qom_set(BOARD, 'battery-mv', a.mv)
-    if a.charging is not None: q.qom_set(BOARD, 'charging', a.charging == 'on')
-    print(json.dumps({k: q.qom_get(BOARD, k) for k in ('battery-soc', 'battery-mv', 'charging')}))
+    if a.charging is not None: q.qom_set(INPUT, 'charging', a.charging == 'on')
+    print(json.dumps({'soc': q.qom_get(BOARD, 'battery-soc'), 'mv': q.qom_get(BOARD, 'battery-mv'),
+                      'charging': q.qom_get(INPUT, 'charging')}))
 
 def cmd_light(a):
+    """Frontlight: LEDC duty of the channels routed to GPIO8 (cool) and GPIO9 (warm)."""
     q = connect(a.name)
     s = json.loads(q.qom_get(BOARD, 'state'))
-    print(json.dumps(s.get('ledc', {})))
+    chans = s.get('ledc', {}).get('channels', [])
+    out = {'cool': None, 'warm': None, 'channels': chans}
+    for c in chans:
+        if c['gpio'] == 8: out['cool'] = c['duty_permille']
+        if c['gpio'] == 9: out['warm'] = c['duty_permille']
+    print(json.dumps(out if a.verbose else {'cool': out['cool'], 'warm': out['warm']}))
 
 def cmd_mem(a):
     q = connect(a.name)
@@ -377,7 +400,7 @@ def main():
     p = sp.add_parser('swipe'); [p.add_argument(n, type=int) for n in ('x1', 'y1', 'x2', 'y2')]; p.add_argument('--ms', type=int, default=250); p.set_defaults(fn=cmd_swipe)
     p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=120); p.add_argument('--wait', type=float, default=0); p.set_defaults(fn=cmd_home)
     p = sp.add_parser('battery'); p.add_argument('--soc', type=int); p.add_argument('--mv', type=int); p.add_argument('--charging', choices=['on', 'off']); p.set_defaults(fn=cmd_battery)
-    sp.add_parser('light').set_defaults(fn=cmd_light)
+    p = sp.add_parser('light'); p.add_argument('-v', '--verbose', action='store_true'); p.set_defaults(fn=cmd_light)
     p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=cmd_mem)
     p = sp.add_parser('gdb'); p.add_argument('--elf'); p.set_defaults(fn=cmd_gdb)
     p = sp.add_parser('qmp'); p.add_argument('json'); p.set_defaults(fn=cmd_qmp)

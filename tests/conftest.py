@@ -24,7 +24,9 @@ def images(tmp_path_factory):
     sd = d / 'sd.img'
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'mkflash.py'), str(flash), '--build', BUILD], check=True, stdout=subprocess.DEVNULL)
     empty = d / 'sdroot'; empty.mkdir()
-    (empty / 'README.txt').write_text('x4pro-emu test card\n')
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mkepub import make_epub
+    make_epub(str(empty / 'Test Book.epub'))
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'mksd.py'), str(sd), '--size', '64M', '--src', str(empty)], check=True, stdout=subprocess.DEVNULL)
     return {'flash': str(flash), 'sd': str(sd), 'dir': d}
 

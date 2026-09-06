@@ -24,7 +24,10 @@ Register offsets used by the models are listed in `docs/audit.md` ("Register off
 
 ## Firmware on the desk unit
 
-Stock `xteink_app` 7.2.4 (ESP-IDF v6.0.1, built 2026-08-14) in **app0**; app1 is erased; otadata seq 1 → app0.
+Delivered state: stock `xteink_app` 7.2.4 (ESP-IDF v6.0.1, built 2026-08-14) in **app0**; app1 erased;
+otadata seq 1 → app0. Current state (2026-09-06): app0 = CrossPoint 1.6.0-x4pro (built with the EpdBus
+trace patch), app1 = a copy of the stock 7.2.4 image, otadata untouched; `tools/device.py restore-stock`
+reverses it. Panel identity from CrossPoint on the device: **UC8279**, `VER=00 0F 68 00 00 FLG=13`.
 Stock partition table: nvs 0x9000/0x5000, otadata 0xE000/0x2000, app0 0x10000/0x7E0000, app1 0x7F0000/0x7E0000,
 spiffs 0xFD0000/0x14000, coredump 0xFE4000/0x1C000 (`docs/device/partitions.md`). CrossPoint's own table
 (`firmware/partitions.csv`): app0 0x10000/0x640000, app1 0x650000/0x640000, spiffs 0xC90000/0x360000,
@@ -131,8 +134,11 @@ plus a real sector-0 read, and retries the whole sequence on failure; GPIO5 stay
 
 ## Frontlight
 
-LEDC low-speed channels: cool white GPIO8 on channel 4, warm GPIO9 on channel 5, 25 kHz, 10-bit, active-high
-(struct `frontlight = {8, 25000, 10, true, 9}`). `FrontlightManager` mixes the two for colour temperature.
+LEDC low-speed PWM, 25 kHz, 10-bit, active-high: cool white on GPIO8, warm on GPIO9 (struct
+`frontlight = {8, 25000, 10, true, 9}`). The stock app uses LEDC channels 4 and 5 (support doc);
+CrossPoint's `FrontlightManager` goes through the IDF `ledc` driver on timer 0 and lands on channels
+0 (GPIO8) and 1 (GPIO9), as the emulator's GPIO-matrix routing shows (`state.ledc`). The two are
+mixed for colour temperature; a power-button double-click toggles the light on the X4 Pro.
 
 ## I2C bus 39/38 device map
 
@@ -146,8 +152,18 @@ LEDC low-speed channels: cool white GPIO8 on channel 4, warm GPIO9 on channel 5,
 
 Deep sleep: `esp_sleep_enable_ext1_wakeup(1<<3, ANY_LOW)`, rails held at their off level with `gpio_hold_en`
 (RST HIGH, GPIO5 HIGH, GPIO2 HIGH), `gpio_deep_sleep_hold_en()`, `esp_deep_sleep_start()`
-(`PowerManager.cpp`). No light sleep in CrossPoint (grep). Wake cause is read from RTC_CNTL at boot;
-"after USB power" does not sleep on the X4 Pro.
+(`PowerManager.cpp`). No light sleep in CrossPoint (grep); it lowers the CPU clock when idle instead
+(`HalPowerManager`, "Going to low-power mode"). CrossPoint sleeps on a power-button hold of ≥ 400 ms
+(`getPowerButtonDuration()`; 10 ms when "short press = sleep" is set) or after its inactivity timeout;
+a wake press must still be held ~1.3 s after the reset when `verifyPowerButtonWakeup()` samples it,
+otherwise the firmware re-sleeps. In deep sleep the USB Serial/JTAG is unpowered: the port vanishes.
+
+Register sequence (ESP-IDF `rtc_sleep_start`): `RTC_CNTL_WAKEUP_STATE.WAKEUP_ENA` (bits 15..31) =
+trigger mask (EXT1 = bit 1), `INT_CLR`, `STATE0.SLEEP_EN` (bit 31), then spin on `INT_RAW &
+(SLP_REJECT|SLP_WAKEUP)`. Deep sleep is announced by `DIG_PWC.DG_WRAP_PD_EN` (bit 31). On wake the ROM
+sees reset cause 5 (DSLEEP); the app reads `SLP_WAKEUP_CAUSE` (+0x130, EXT1 = bit 1) and
+`EXT_WAKEUP1_STATUS` (+0xE4, RTC IO bit; GPIO3 = RTC IO 3). The emulator's `x4pro.sleep` overlay
+implements exactly these registers and pauses the VM while asleep.
 
 ## USB Serial/JTAG console
 

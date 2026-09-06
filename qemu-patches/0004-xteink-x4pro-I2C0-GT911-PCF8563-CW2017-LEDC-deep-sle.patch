@@ -1,0 +1,1759 @@
+From 32f012f1053a7def066fbc3b52c07bb8bf8a6b82 Mon Sep 17 00:00:00 2001
+From: x4pro-emu <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 15:26:38 -0500
+Subject: [PATCH 4/4] xteink-x4pro: I2C0 + GT911/PCF8563/CW2017, LEDC,
+ deep-sleep overlay, touch/battery QOM
+
+- hw/i2c/esp32s3_i2c.c: S3 I2C master (FIFO mode, COMD list) on an I2CBus, trace-i2c.
+- hw/misc/x4pro_i2c_devs.c: GT911 (INT line, power gating via GPIO2), BM8563/PCF8563,
+  CW2017 with the OEM BATINFO resident.
+- hw/misc/esp32s3_ledc.c: LS channels/timers, duty observable per channel.
+- hw/misc/x4pro_sleep.c: RTC_CNTL sleep registers; deep sleep pauses the VM, a wake
+  source resets with cause DSLEEP and EXT1 status.
+- xteink_x4pro.c: input.touch/home, board.battery-soc/mv, state JSON extended.
+---
+ hw/i2c/esp32s3_i2c.c             | 348 +++++++++++++++++++++++++++
+ hw/i2c/meson.build               |   2 +-
+ hw/misc/esp32s3_ledc.c           | 187 +++++++++++++++
+ hw/misc/meson.build              |   3 +
+ hw/misc/x4pro_i2c_devs.c         | 396 +++++++++++++++++++++++++++++++
+ hw/misc/x4pro_sleep.c            | 229 ++++++++++++++++++
+ hw/xtensa/xteink_x4pro.c         | 228 +++++++++++++++++-
+ include/hw/i2c/esp32s3_i2c.h     |  38 +++
+ include/hw/misc/esp32s3_ledc.h   |  31 +++
+ include/hw/misc/x4pro_i2c_devs.h |  68 ++++++
+ include/hw/misc/x4pro_sleep.h    |  37 +++
+ 11 files changed, 1563 insertions(+), 4 deletions(-)
+ create mode 100644 hw/i2c/esp32s3_i2c.c
+ create mode 100644 hw/misc/esp32s3_ledc.c
+ create mode 100644 hw/misc/x4pro_i2c_devs.c
+ create mode 100644 hw/misc/x4pro_sleep.c
+ create mode 100644 include/hw/i2c/esp32s3_i2c.h
+ create mode 100644 include/hw/misc/esp32s3_ledc.h
+ create mode 100644 include/hw/misc/x4pro_i2c_devs.h
+ create mode 100644 include/hw/misc/x4pro_sleep.h
+
+diff --git a/hw/i2c/esp32s3_i2c.c b/hw/i2c/esp32s3_i2c.c
+new file mode 100644
+index 0000000..2ecc587
+--- /dev/null
++++ b/hw/i2c/esp32s3_i2c.c
+@@ -0,0 +1,348 @@
++/*
++ * ESP32-S3 I2C controller, master FIFO mode, as ESP-IDF v5.5's i2c_master
++ * driver (used by Arduino 3.x Wire through esp32-hal-i2c-ng.c) programs it.
++ *
++ * Register map from soc/i2c_reg.h (docs/audit.md). The driver fills the TX FIFO
++ * through DATA, writes the command list COMD0..7 (byte_num 0..7, ack_en 8,
++ * ack_exp 9, ack_val 10, op_code 11..13: RSTART 6 / WRITE 1 / READ 3 / STOP 2 /
++ * END 4, done 31), pulses CTR.CONF_UPGATE and sets CTR.TRANS_START. The
++ * command list is executed synchronously here against the I2CBus: the first
++ * byte after a (re)start is the address, NACKs raise NACK_INT and stop the
++ * list, STOP raises TRANS_COMPLETE, END raises END_DETECT and leaves the bus
++ * open for the next list. Bus timing registers are stored and ignored.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "hw/hw.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/i2c/esp32s3_i2c.h"
++
++#define R_SCL_LOW_PERIOD 0x00
++#define R_CTR            0x04
++#define R_SR             0x08
++#define R_TO             0x0C
++#define R_SLAVE_ADDR     0x10
++#define R_FIFO_ST        0x14
++#define R_FIFO_CONF      0x18
++#define R_DATA           0x1C
++#define R_INT_RAW        0x20
++#define R_INT_CLR        0x24
++#define R_INT_ENA        0x28
++#define R_INT_STATUS     0x2C
++#define R_COMD0          0x58
++#define R_COMD7          0x74
++#define R_DATE           0xF8
++#define R_TXFIFO_START   0x100
++#define R_RXFIFO_START   0x180
++
++#define CTR_MS_MODE      (1u << 4)
++#define CTR_TRANS_START  (1u << 5)
++#define CTR_FSM_RST      (1u << 10)
++#define CTR_CONF_UPGATE  (1u << 11)
++
++#define FIFO_CONF_NONFIFO_EN (1u << 10)
++#define FIFO_CONF_RX_RST     (1u << 12)
++#define FIFO_CONF_TX_RST     (1u << 13)
++
++#define INT_RXFIFO_WM     (1u << 0)
++#define INT_TXFIFO_WM     (1u << 1)
++#define INT_RXFIFO_OVF    (1u << 2)
++#define INT_END_DETECT    (1u << 3)
++#define INT_BYTE_TRANS    (1u << 4)
++#define INT_ARB_LOST      (1u << 5)
++#define INT_MST_TXFIFO_UDF (1u << 6)
++#define INT_TRANS_COMPLETE (1u << 7)
++#define INT_TIME_OUT      (1u << 8)
++#define INT_TRANS_START   (1u << 9)
++#define INT_NACK          (1u << 10)
++#define INT_ALL           0x3FFFFu
++
++#define OP_RSTART 6
++#define OP_WRITE  1
++#define OP_READ   3
++#define OP_STOP   2
++#define OP_END    4
++
++static void i2c_update_irq(ESP32S3I2CState *s)
++{
++    qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
++}
++
++static void i2c_trace(ESP32S3I2CState *s, uint8_t addr, bool read, const uint8_t *w, int nw,
++                      const uint8_t *r, int nr, bool nack)
++{
++    if (!s->trace) {
++        return;
++    }
++    fprintf(s->trace, "{\"t_us\":%" PRId64 ",\"addr\":\"0x%02x\",\"rw\":\"%s\",\"w\":\"",
++            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000, addr, read ? "r" : "w");
++    for (int i = 0; i < nw; i++) fprintf(s->trace, "%s%02x", i ? " " : "", w[i]);
++    fprintf(s->trace, "\",\"r\":\"");
++    for (int i = 0; i < nr; i++) fprintf(s->trace, "%s%02x", i ? " " : "", r[i]);
++    fprintf(s->trace, "\"%s}\n", nack ? ",\"nack\":true" : "");
++    fflush(s->trace);
++}
++
++static void i2c_run_commands(ESP32S3I2CState *s)
++{
++    uint32_t tx_pos = 0;
++    bool addr_pending = false;
++    bool nacked = false;
++    uint8_t tw[64], tr[64];
++    int nw = 0, nr = 0;
++    uint8_t taddr = s->last_addr;
++    bool tread = false;
++
++    s->int_raw |= INT_TRANS_START;
++    for (int i = 0; i < ESP32S3_I2C_CMD_COUNT && !nacked; i++) {
++        uint32_t c = s->comd[i];
++        int op = (c >> 11) & 7;
++        int n = c & 0xFF;
++        bool ack_val = (c >> 10) & 1;
++        bool ack_en = (c >> 8) & 1;
++        bool done_cmd = true;
++
++        switch (op) {
++        case OP_RSTART:
++            addr_pending = true;
++            if (s->bus_open && nw + nr) {
++                i2c_trace(s, taddr, tread, tw, nw, tr, nr, false);
++                nw = nr = 0;
++            }
++            s->bus_open = true;
++            break;
++        case OP_WRITE:
++            for (int k = 0; k < n; k++) {
++                if (tx_pos >= s->tx_len) {
++                    s->int_raw |= INT_MST_TXFIFO_UDF;
++                    break;
++                }
++                uint8_t b = s->txfifo[tx_pos++];
++                int ret;
++                if (addr_pending) {
++                    addr_pending = false;
++                    taddr = b >> 1;
++                    tread = b & 1;
++                    s->last_addr = taddr;
++                    ret = i2c_start_transfer(s->bus, taddr, tread);
++                    s->transactions++;
++                } else {
++                    ret = i2c_send(s->bus, b);
++                    if (nw < 64) tw[nw++] = b;
++                }
++                if (ret && ack_en) {
++                    nacked = true;
++                    s->nacks++;
++                    s->int_raw |= INT_NACK;
++                    i2c_end_transfer(s->bus);
++                    s->bus_open = false;
++                    break;
++                }
++            }
++            break;
++        case OP_READ:
++            for (int k = 0; k < n; k++) {
++                uint8_t b = i2c_recv(s->bus);
++                if (s->rx_len < ESP32S3_I2C_FIFO_LEN) {
++                    s->rxfifo[s->rx_len++] = b;
++                } else {
++                    s->int_raw |= INT_RXFIFO_OVF;
++                }
++                if (nr < 64) tr[nr++] = b;
++                if (k == n - 1 && ack_val) {
++                    i2c_nack(s->bus);
++                }
++            }
++            break;
++        case OP_STOP:
++            if (s->bus_open) {
++                i2c_end_transfer(s->bus);
++            }
++            s->bus_open = false;
++            s->int_raw |= INT_TRANS_COMPLETE;
++            s->comd[i] |= 1u << 31;
++            i = ESP32S3_I2C_CMD_COUNT;   /* finished */
++            break;
++        case OP_END:
++            s->int_raw |= INT_END_DETECT;
++            s->comd[i] |= 1u << 31;
++            i = ESP32S3_I2C_CMD_COUNT;
++            break;
++        default:
++            done_cmd = false;
++            i = ESP32S3_I2C_CMD_COUNT;
++            break;
++        }
++        if (done_cmd && i < ESP32S3_I2C_CMD_COUNT) {
++            s->comd[i] |= 1u << 31;
++        }
++    }
++    /* consumed TX bytes leave the FIFO */
++    if (tx_pos < s->tx_len) {
++        memmove(s->txfifo, s->txfifo + tx_pos, s->tx_len - tx_pos);
++    }
++    s->tx_len -= tx_pos;
++    i2c_trace(s, taddr, tread, tw, nw, tr, nr, nacked);
++    s->ctr &= ~CTR_TRANS_START;
++    i2c_update_irq(s);
++}
++
++static uint64_t i2c_read(void *opaque, hwaddr addr, unsigned int size)
++{
++    ESP32S3I2CState *s = ESP32S3_I2C(opaque);
++    uint32_t r = 0;
++    switch (addr) {
++    case R_CTR:
++        r = s->ctr & ~(CTR_TRANS_START | CTR_FSM_RST | CTR_CONF_UPGATE);
++        break;
++    case R_SR:
++        r = ((s->rx_len - s->rx_pos) & 0x3F) << 8 | (s->tx_len & 0x3F) << 18 | (s->bus_open ? (1u << 4) : 0);
++        break;
++    case R_FIFO_ST:
++        r = (s->rx_pos & 0x1F) | (s->rx_len & 0x1F) << 5 | 0 << 10 | (s->tx_len & 0x1F) << 15;
++        break;
++    case R_FIFO_CONF:
++        r = s->fifo_conf & ~(FIFO_CONF_RX_RST | FIFO_CONF_TX_RST);
++        break;
++    case R_DATA:
++        if (s->rx_pos < s->rx_len) {
++            r = s->rxfifo[s->rx_pos++];
++            if (s->rx_pos >= s->rx_len) {
++                s->rx_pos = s->rx_len = 0;
++            }
++        }
++        break;
++    case R_INT_RAW:    r = s->int_raw; break;
++    case R_INT_ENA:    r = s->int_ena; break;
++    case R_INT_STATUS: r = s->int_raw & s->int_ena; break;
++    case R_DATE:       r = 0x20070201; break;
++    default:
++        if (addr >= R_COMD0 && addr <= R_COMD7) {
++            r = s->comd[(addr - R_COMD0) / 4];
++        } else if (addr < 0x100) {
++            r = s->timing[addr / 4];
++        } else if (addr >= R_RXFIFO_START && addr < R_RXFIFO_START + 0x80) {
++            r = s->rxfifo[((addr - R_RXFIFO_START) / 4) % ESP32S3_I2C_FIFO_LEN];
++        } else {
++            qemu_log_mask(LOG_UNIMP, "esp32s3.i2c: unhandled read +0x%" HWADDR_PRIx "\n", addr);
++        }
++    }
++    return r;
++}
++
++static void i2c_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
++{
++    ESP32S3I2CState *s = ESP32S3_I2C(opaque);
++    uint32_t v = value;
++    switch (addr) {
++    case R_CTR:
++        s->ctr = v & ~(CTR_FSM_RST | CTR_CONF_UPGATE);
++        if (v & CTR_FSM_RST) {
++            s->bus_open = false;
++        }
++        if (v & CTR_TRANS_START) {
++            i2c_run_commands(s);
++        }
++        break;
++    case R_FIFO_CONF:
++        s->fifo_conf = v;
++        if (v & FIFO_CONF_TX_RST) s->tx_len = 0;
++        if (v & FIFO_CONF_RX_RST) s->rx_len = s->rx_pos = 0;
++        break;
++    case R_DATA:
++        if (s->tx_len < ESP32S3_I2C_FIFO_LEN) {
++            s->txfifo[s->tx_len++] = v & 0xFF;
++        }
++        break;
++    case R_INT_ENA: s->int_ena = v & INT_ALL; i2c_update_irq(s); break;
++    case R_INT_CLR: s->int_raw &= ~(v & INT_ALL); i2c_update_irq(s); break;
++    case R_INT_RAW: break;
++    default:
++        if (addr >= R_COMD0 && addr <= R_COMD7) {
++            s->comd[(addr - R_COMD0) / 4] = v & 0x7FFFFFFF;   /* done is read-only */
++        } else if (addr < 0x100) {
++            s->timing[addr / 4] = v;
++        } else if (addr >= R_TXFIFO_START && addr < R_TXFIFO_START + 0x80) {
++            if (s->tx_len < ESP32S3_I2C_FIFO_LEN) s->txfifo[s->tx_len++] = v & 0xFF;
++        } else {
++            qemu_log_mask(LOG_UNIMP, "esp32s3.i2c: unhandled write +0x%" HWADDR_PRIx " = 0x%x\n", addr, v);
++        }
++    }
++}
++
++static const MemoryRegionOps i2c_ops = {
++    .read = i2c_read,
++    .write = i2c_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void i2c_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3I2CState *s = ESP32S3_I2C(obj);
++    s->ctr = 0;
++    s->fifo_conf = 0;
++    s->int_raw = 0;
++    s->int_ena = 0;
++    memset(s->comd, 0, sizeof(s->comd));
++    s->tx_len = s->rx_len = s->rx_pos = 0;
++    s->bus_open = false;
++}
++
++static void i2c_realize(DeviceState *dev, Error **errp)
++{
++    ESP32S3I2CState *s = ESP32S3_I2C(dev);
++    if (s->trace_path && s->trace_path[0]) {
++        s->trace = fopen(s->trace_path, "w");
++        if (!s->trace) {
++            error_setg(errp, "esp32s3.i2c: cannot open %s", s->trace_path);
++        }
++    }
++}
++
++static void i2c_init(Object *obj)
++{
++    ESP32S3I2CState *s = ESP32S3_I2C(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &i2c_ops, s, TYPE_ESP32S3_I2C, 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++    s->bus = i2c_init_bus(DEVICE(s), "i2c");
++}
++
++static Property i2c_properties[] = {
++    DEFINE_PROP_STRING("trace-i2c", ESP32S3I2CState, trace_path),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void i2c_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = i2c_reset_hold;
++    dc->realize = i2c_realize;
++    device_class_set_props(dc, i2c_properties);
++}
++
++static const TypeInfo i2c_info = {
++    .name = TYPE_ESP32S3_I2C,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3I2CState),
++    .instance_init = i2c_init,
++    .class_init = i2c_class_init,
++};
++
++static void i2c_register_types(void)
++{
++    type_register_static(&i2c_info);
++}
++
++type_init(i2c_register_types)
+diff --git a/hw/i2c/meson.build b/hw/i2c/meson.build
+index e72dca0..b77c766 100644
+--- a/hw/i2c/meson.build
++++ b/hw/i2c/meson.build
+@@ -16,7 +16,7 @@ i2c_ss.add(when: 'CONFIG_ARM_SBCON_I2C', if_true: files('arm_sbcon_i2c.c'))
+ i2c_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_i2c.c'))
+ i2c_ss.add(when: 'CONFIG_PPC4XX', if_true: files('ppc4xx_i2c.c'))
+ i2c_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files('esp32_i2c.c'))
+-i2c_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('esp32_i2c.c'))
++i2c_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files('esp32_i2c.c', 'esp32s3_i2c.c'))
+ i2c_ss.add(when: 'CONFIG_PCA954X', if_true: files('i2c_mux_pca954x.c'))
+ i2c_ss.add(when: 'CONFIG_PMBUS', if_true: files('pmbus_device.c'))
+ i2c_ss.add(when: 'CONFIG_BCM2835_I2C', if_true: files('bcm2835_i2c.c'))
+diff --git a/hw/misc/esp32s3_ledc.c b/hw/misc/esp32s3_ledc.c
+new file mode 100644
+index 0000000..6b5dc77
+--- /dev/null
++++ b/hw/misc/esp32s3_ledc.c
+@@ -0,0 +1,187 @@
++/*
++ * ESP32-S3 LEDC. Register map from soc/ledc_reg.h (docs/audit.md):
++ *   LSCHn_CONF0 +0x14n (TIMER_SEL bits 0..1, SIG_OUT_EN bit 2, IDLE_LV bit 3, PARA_UP bit 4),
++ *   LSCHn_HPOINT +0x14n+4, LSCHn_DUTY +0x14n+8 (duty << 4), LSCHn_CONF1 +0x14n+0xC
++ *   (DUTY_START bit 31), LSCHn_DUTY_R +0x14n+0x10, LSTIMERn_CONF +0xA0+8n (DUTY_RES
++ *   bits 0..3, CLK_DIV bits 4..21, PAUSE 22, RST 23, TICK_SEL 24, PARA_UP 25),
++ *   LSTIMERn_VALUE +0xA4+8n, INT_RAW/ST/ENA/CLR +0xC0..+0xCC (OVF timer n = bit n,
++ *   DUTY_CHNG_END ch n = bit 4+n), CONF +0xD0 (APB_CLK_SEL bits 0..1).
++ * A duty change completes instantly (DUTY_CHNG_END raised on DUTY_START).
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/misc/esp32s3_ledc.h"
++
++#define R_CH_BASE     0x00
++#define R_CH_STRIDE   0x14
++#define R_TIMER_BASE  0xA0
++#define R_INT_RAW     0xC0
++#define R_INT_ST      0xC4
++#define R_INT_ENA     0xC8
++#define R_INT_CLR     0xCC
++#define R_CONF        0xD0
++#define R_DATE        0xFC
++
++#define CONF0_SIG_OUT_EN (1u << 2)
++#define CONF1_DUTY_START (1u << 31)
++
++static void ledc_update_irq(ESP32S3LedcState *s)
++{
++    qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
++}
++
++int esp32s3_ledc_duty_permille(ESP32S3LedcState *s, int ch)
++{
++    if (ch < 0 || ch >= ESP32S3_LEDC_CHANNELS || !(s->ch_conf0[ch] & CONF0_SIG_OUT_EN)) {
++        return -1;
++    }
++    int timer = s->ch_conf0[ch] & 3;
++    int res = s->timer_conf[timer] & 0xF;
++    if (!res) {
++        return 0;
++    }
++    uint32_t max = 1u << res;
++    uint32_t duty = (s->ch_duty[ch] >> 4) & 0xFFFFF;
++    if (duty >= max) duty = max;
++    return (int)((uint64_t)duty * 1000 / max);
++}
++
++uint32_t esp32s3_ledc_freq_hz(ESP32S3LedcState *s, int ch)
++{
++    /* clk_div is Q18.8; source clock per CONF.APB_CLK_SEL: 1 = APB 80 MHz, 2 = RC_FAST ~17.5 MHz, 3 = XTAL 40 MHz */
++    int timer = s->ch_conf0[ch] & 3;
++    uint32_t res = s->timer_conf[timer] & 0xF;
++    uint32_t div = (s->timer_conf[timer] >> 4) & 0x3FFFF;
++    uint32_t src = 80000000;
++    switch (s->conf & 3) { case 2: src = 17500000; break; case 3: src = 40000000; break; default: break; }
++    if (!div || !res) return 0;
++    return (uint32_t)(((uint64_t)src * 256) / div / (1u << res));
++}
++
++static uint64_t ledc_read(void *opaque, hwaddr addr, unsigned int size)
++{
++    ESP32S3LedcState *s = ESP32S3_LEDC(opaque);
++    uint32_t r = 0;
++    if (addr < R_TIMER_BASE) {
++        int ch = addr / R_CH_STRIDE, off = addr % R_CH_STRIDE;
++        switch (off) {
++        case 0x0: r = s->ch_conf0[ch] & ~(1u << 4); break;
++        case 0x4: r = s->ch_hpoint[ch]; break;
++        case 0x8: r = s->ch_duty[ch]; break;
++        case 0xC: r = s->ch_conf1[ch] & ~CONF1_DUTY_START; break;
++        case 0x10: r = s->ch_duty[ch]; break;   /* DUTY_R: current duty */
++        }
++        return r;
++    }
++    if (addr >= R_TIMER_BASE && addr < R_INT_RAW) {
++        int t = (addr - R_TIMER_BASE) / 8;
++        if (((addr - R_TIMER_BASE) % 8) == 0) {
++            return s->timer_conf[t] & ~(1u << 25);
++        }
++        return 0;   /* timer value: not modelled */
++    }
++    switch (addr) {
++    case R_INT_RAW: return s->int_raw;
++    case R_INT_ST:  return s->int_raw & s->int_ena;
++    case R_INT_ENA: return s->int_ena;
++    case R_CONF:    return s->conf;
++    case R_DATE:    return 0x19040100;
++    default:
++        qemu_log_mask(LOG_UNIMP, "esp32s3.ledc: unhandled read +0x%" HWADDR_PRIx "\n", addr);
++        return 0;
++    }
++}
++
++static void ledc_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
++{
++    ESP32S3LedcState *s = ESP32S3_LEDC(opaque);
++    uint32_t v = value;
++    if (addr < R_TIMER_BASE) {
++        int ch = addr / R_CH_STRIDE, off = addr % R_CH_STRIDE;
++        switch (off) {
++        case 0x0: s->ch_conf0[ch] = v; break;
++        case 0x4: s->ch_hpoint[ch] = v; break;
++        case 0x8: s->ch_duty[ch] = v; break;
++        case 0xC:
++            s->ch_conf1[ch] = v;
++            if (v & CONF1_DUTY_START) {
++                s->duty_updates++;
++                s->int_raw |= 1u << (4 + ch);   /* DUTY_CHNG_END: the (instant) fade finished */
++                ledc_update_irq(s);
++            }
++            break;
++        default: break;
++        }
++        return;
++    }
++    if (addr >= R_TIMER_BASE && addr < R_INT_RAW) {
++        int t = (addr - R_TIMER_BASE) / 8;
++        if (((addr - R_TIMER_BASE) % 8) == 0) {
++            s->timer_conf[t] = v;
++        }
++        return;
++    }
++    switch (addr) {
++    case R_INT_ENA: s->int_ena = v; ledc_update_irq(s); break;
++    case R_INT_CLR: s->int_raw &= ~v; ledc_update_irq(s); break;
++    case R_INT_RAW: break;
++    case R_CONF:    s->conf = v; break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "esp32s3.ledc: unhandled write +0x%" HWADDR_PRIx " = 0x%x\n", addr, v);
++    }
++}
++
++static const MemoryRegionOps ledc_ops = {
++    .read = ledc_read,
++    .write = ledc_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void ledc_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3LedcState *s = ESP32S3_LEDC(obj);
++    memset(s->ch_conf0, 0, sizeof(s->ch_conf0));
++    memset(s->ch_hpoint, 0, sizeof(s->ch_hpoint));
++    memset(s->ch_duty, 0, sizeof(s->ch_duty));
++    memset(s->ch_conf1, 0, sizeof(s->ch_conf1));
++    memset(s->timer_conf, 0, sizeof(s->timer_conf));
++    s->int_raw = s->int_ena = 0;
++    s->conf = 0;
++}
++
++static void ledc_init(Object *obj)
++{
++    ESP32S3LedcState *s = ESP32S3_LEDC(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &ledc_ops, s, TYPE_ESP32S3_LEDC, 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++}
++
++static void ledc_class_init(ObjectClass *klass, void *data)
++{
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = ledc_reset_hold;
++}
++
++static const TypeInfo ledc_info = {
++    .name = TYPE_ESP32S3_LEDC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3LedcState),
++    .instance_init = ledc_init,
++    .class_init = ledc_class_init,
++};
++
++static void ledc_register_types(void)
++{
++    type_register_static(&ledc_info);
++}
++
++type_init(ledc_register_types)
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 6980a79..832eafa 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -180,6 +180,9 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
+   'esp32c3_jtag.c',
+   'esp32s3_rtc_cntl.c',
+   'esp32s3_usj.c',
++  'x4pro_i2c_devs.c',
++  'esp32s3_ledc.c',
++  'x4pro_sleep.c',
+   'esp32s3_rng.c',
+   'esp32s3_pms.c',
+   'esp_hmac.c',
+diff --git a/hw/misc/x4pro_i2c_devs.c b/hw/misc/x4pro_i2c_devs.c
+new file mode 100644
+index 0000000..7d1b9f1
+--- /dev/null
++++ b/hw/misc/x4pro_i2c_devs.c
+@@ -0,0 +1,396 @@
++/*
++ * X4 Pro I2C peripherals.
++ *
++ * GT911 (freeink InputManager::beginGt911/pollGt911): 16-bit register pointer
++ * written MSB first, auto-increment; 0x814E status (bit 7 buffer ready, bit 4
++ * Home pad, bits 0..3 point count), 0x8150.. 8-byte point records (X lo/hi,
++ * Y lo/hi, size lo/hi, reserved, id), product ID "911" at 0x8140, config area
++ * 0x8047.. accepted. INT is driven LOW while a frame is pending and released
++ * when the firmware writes 0 to 0x814E; a held finger produces a new frame
++ * 10 ms after each clear, a release produces one count-0 frame. The chip only
++ * answers while its rail is on (GPIO2 LOW) unless require-power is off.
++ *
++ * PCF8563: 16 BCD registers; time = seed (host wall clock at start) + guest
++ * virtual time; writes to the time registers move the seed.
++ *
++ * CW2017 (freeink BatteryMonitor): VERSION 0x00 = 0x0D (running), VCELL
++ * 0x02/0x03 (14-bit, mV = (raw*5+8)>>4), SOC 0x04, MODE 0x08, SOC_ALERT 0x0B
++ * (bit 7 = profile loaded), BATINFO 0x10..0x5F pre-loaded with the OEM table
++ * so the firmware finds the profile resident.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/irq.h"
++#include "hw/qdev-properties.h"
++#include "hw/misc/x4pro_i2c_devs.h"
++
++/* ===================== GT911 ============================================= */
++
++static const uint8_t gt911_id[11] = { '9', '1', '1', 0, 0x60, 0x10, 0xE0, 0x01, 0x20, 0x03, 0x00 };
++/* 0x8140..0x8143 product id, 0x8144..45 firmware version 0x1060, 0x8146..47 x res 480,
++ * 0x8148..49 y res 800, 0x814A vendor id */
++
++static void gt911_update_int(X4ProGt911State *s)
++{
++    qemu_set_irq(s->irq_out, s->frame_ready ? 0 : 1);
++}
++
++static void gt911_frame_timer(void *opaque)
++{
++    X4ProGt911State *s = X4PRO_GT911(opaque);
++    if (s->count > 0 || s->home) {
++        s->frame_ready = true;
++        s->frames++;
++        gt911_update_int(s);
++    }
++}
++
++void x4pro_gt911_set_touch(X4ProGt911State *s, const Gt911Point *pts, int count, bool home)
++{
++    if (count > GT911_MAX_POINTS) count = GT911_MAX_POINTS;
++    memcpy(s->pts, pts, count * sizeof(*pts));
++    s->count = count;
++    s->home = home;
++    s->frame_ready = true;      /* every change is a new frame, including the release */
++    s->frames++;
++    gt911_update_int(s);
++}
++
++static int gt911_event(I2CSlave *i2c, enum i2c_event event)
++{
++    X4ProGt911State *s = X4PRO_GT911(i2c);
++    switch (event) {
++    case I2C_START_SEND:
++        s->byte_index = 0;
++        /* fallthrough */
++    case I2C_START_RECV:
++        if (s->require_power && s->powered && !s->powered(s->powered_opaque)) {
++            s->start_nacks++;
++            if (s->start_nacks == 1) {
++                qemu_log_mask(LOG_GUEST_ERROR, "x4pro.gt911: addressed while GPIO2 is not LOW (rail off)\n");
++            }
++            return 1;   /* NACK: unpowered chip */
++        }
++        break;
++    default:
++        break;
++    }
++    return 0;
++}
++
++static int gt911_send(I2CSlave *i2c, uint8_t data)
++{
++    X4ProGt911State *s = X4PRO_GT911(i2c);
++    if (s->byte_index == 0) {
++        s->ptr = data << 8;
++    } else if (s->byte_index == 1) {
++        s->ptr |= data;
++    } else {
++        uint16_t r = s->ptr++;
++        if (r == 0x814E) {
++            s->clears++;
++            s->frame_ready = false;
++            gt911_update_int(s);
++            if (s->count > 0 || s->home) {
++                timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 10 * 1000000);
++            }
++        } else if (r >= GT911_CONFIG_BASE && r < GT911_CONFIG_BASE + GT911_CONFIG_LEN) {
++            s->config[r - GT911_CONFIG_BASE] = data;
++        }
++    }
++    s->byte_index++;
++    return 0;
++}
++
++static uint8_t gt911_recv(I2CSlave *i2c)
++{
++    X4ProGt911State *s = X4PRO_GT911(i2c);
++    uint16_t r = s->ptr++;
++    s->reads++;
++    if (r == 0x814E) {
++        return (s->frame_ready ? 0x80 : 0) | (s->home ? 0x10 : 0) | (s->count & 0x0F);
++    }
++    if (r >= 0x8150 && r < 0x8150 + 8 * GT911_MAX_POINTS) {
++        int i = (r - 0x8150) / 8, k = (r - 0x8150) % 8;
++        if (i >= s->count) return 0;
++        const Gt911Point *p = &s->pts[i];
++        switch (k) {
++        case 0: return p->x & 0xFF;
++        case 1: return p->x >> 8;
++        case 2: return p->y & 0xFF;
++        case 3: return p->y >> 8;
++        case 4: return p->size & 0xFF;
++        case 5: return p->size >> 8;
++        case 6: return 0;
++        case 7: return p->id;
++        }
++    }
++    if (r >= 0x8140 && r < 0x8140 + sizeof(gt911_id)) {
++        return gt911_id[r - 0x8140];
++    }
++    if (r >= GT911_CONFIG_BASE && r < GT911_CONFIG_BASE + GT911_CONFIG_LEN) {
++        return s->config[r - GT911_CONFIG_BASE];
++    }
++    return 0;
++}
++
++static void gt911_reset_hold(Object *obj, ResetType type)
++{
++    X4ProGt911State *s = X4PRO_GT911(obj);
++    s->ptr = 0;
++    s->byte_index = 0;
++    /* touch state set by the tooling survives a guest reset */
++    gt911_update_int(s);
++}
++
++static void gt911_realize(DeviceState *dev, Error **errp)
++{
++    X4ProGt911State *s = X4PRO_GT911(dev);
++    s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, gt911_frame_timer, s);
++    /* a plausible self-loaded config: version 'A', 480x800, 5 touches */
++    memset(s->config, 0, sizeof(s->config));
++    s->config[0] = 0x41;
++    s->config[1] = 480 & 0xFF; s->config[2] = 480 >> 8;
++    s->config[3] = 800 & 0xFF; s->config[4] = 800 >> 8;
++    s->config[5] = 5;
++}
++
++static void gt911_init(Object *obj)
++{
++    X4ProGt911State *s = X4PRO_GT911(obj);
++    qdev_init_gpio_out_named(DEVICE(obj), &s->irq_out, "int", 1);
++}
++
++static Property gt911_properties[] = {
++    DEFINE_PROP_BOOL("require-power", X4ProGt911State, require_power, true),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void gt911_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    k->event = gt911_event;
++    k->send = gt911_send;
++    k->recv = gt911_recv;
++    dc->realize = gt911_realize;
++    rc->phases.hold = gt911_reset_hold;
++    device_class_set_props(dc, gt911_properties);
++}
++
++static const TypeInfo gt911_info = {
++    .name = TYPE_X4PRO_GT911,
++    .parent = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(X4ProGt911State),
++    .instance_init = gt911_init,
++    .class_init = gt911_class_init,
++};
++
++/* ===================== PCF8563 / BM8563 =================================== */
++
++static uint8_t to_bcd(int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
++static int from_bcd(uint8_t v) { return ((v >> 4) & 0xF) * 10 + (v & 0xF); }
++
++static void pcf_refresh_time(X4ProPcf8563State *s)
++{
++    int64_t now_vt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    time_t t = s->base_epoch + (now_vt - s->base_vt_ns) / 1000000000LL;
++    struct tm tm;
++    gmtime_r(&t, &tm);
++    s->regs[2] = to_bcd(tm.tm_sec);              /* VL bit 7 = 0: clock valid */
++    s->regs[3] = to_bcd(tm.tm_min);
++    s->regs[4] = to_bcd(tm.tm_hour);
++    s->regs[5] = to_bcd(tm.tm_mday);
++    s->regs[6] = (uint8_t)tm.tm_wday;
++    s->regs[7] = to_bcd(tm.tm_mon + 1);          /* century bit 7 = 0 (20xx) */
++    s->regs[8] = to_bcd(tm.tm_year % 100);
++}
++
++static void pcf_apply_time(X4ProPcf8563State *s)
++{
++    struct tm tm = {0};
++    tm.tm_sec = from_bcd(s->regs[2] & 0x7F);
++    tm.tm_min = from_bcd(s->regs[3] & 0x7F);
++    tm.tm_hour = from_bcd(s->regs[4] & 0x3F);
++    tm.tm_mday = from_bcd(s->regs[5] & 0x3F);
++    tm.tm_mon = from_bcd(s->regs[7] & 0x1F) - 1;
++    tm.tm_year = 100 + from_bcd(s->regs[8]);
++    s->base_epoch = timegm(&tm);
++    s->base_vt_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++}
++
++static int pcf_event(I2CSlave *i2c, enum i2c_event event)
++{
++    X4ProPcf8563State *s = X4PRO_PCF8563(i2c);
++    if (event == I2C_START_SEND) {
++        s->byte_index = 0;
++    } else if (event == I2C_START_RECV) {
++        pcf_refresh_time(s);
++    }
++    return 0;
++}
++
++static int pcf_send(I2CSlave *i2c, uint8_t data)
++{
++    X4ProPcf8563State *s = X4PRO_PCF8563(i2c);
++    if (s->byte_index == 0) {
++        s->ptr = data & 0x0F;
++    } else {
++        uint8_t r = s->ptr;
++        s->regs[r] = data;
++        s->ptr = (r + 1) & 0x0F;
++        s->writes++;
++        if (r == 8) {          /* the year is the last time register written */
++            pcf_apply_time(s);
++        }
++    }
++    s->byte_index++;
++    return 0;
++}
++
++static uint8_t pcf_recv(I2CSlave *i2c)
++{
++    X4ProPcf8563State *s = X4PRO_PCF8563(i2c);
++    uint8_t v = s->regs[s->ptr];
++    s->ptr = (s->ptr + 1) & 0x0F;
++    s->reads++;
++    return v;
++}
++
++static void pcf_realize(DeviceState *dev, Error **errp)
++{
++    X4ProPcf8563State *s = X4PRO_PCF8563(dev);
++    memset(s->regs, 0, sizeof(s->regs));
++    s->base_epoch = time(NULL);
++    s->base_vt_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    pcf_refresh_time(s);
++}
++
++static void pcf_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
++    k->event = pcf_event;
++    k->send = pcf_send;
++    k->recv = pcf_recv;
++    dc->realize = pcf_realize;
++}
++
++static const TypeInfo pcf_info = {
++    .name = TYPE_X4PRO_PCF8563,
++    .parent = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(X4ProPcf8563State),
++    .class_init = pcf_class_init,
++};
++
++/* ===================== CW2017 ============================================ */
++
++/* The OEM BATINFO profile (freeink BatteryMonitor.cpp, recovered from app1 @ DROM 0x3c5d8d00). */
++static const uint8_t cw2017_batinfo[80] = {
++    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0xbf, 0xb5, 0xb4, 0xa4, 0x9c, 0xeb, 0xe2,
++    0xdf, 0xe5, 0xca, 0xa0, 0x8a, 0x62, 0x53, 0x48, 0x40, 0x3a, 0x32, 0xb1, 0xae, 0xda, 0xb5, 0xff,
++    0xff, 0xff, 0xe8, 0xdb, 0xd9, 0xd6, 0xd4, 0xd2, 0xd0, 0xcb, 0xc3, 0xbc, 0x9e, 0x87, 0x7b, 0x71,
++    0x72, 0x7c, 0x8c, 0xa3, 0xb7, 0xc8, 0xa5, 0x4f, 0x00, 0x00, 0xab, 0x02, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23,
++};
++
++void x4pro_cw2017_set_battery(X4ProCw2017State *s, int soc, int mv)
++{
++    if (soc >= 0) s->soc = soc > 100 ? 100 : soc;
++    if (mv >= 0) s->mv = mv;
++    uint32_t raw = (s->mv * 16 + 2) / 5;   /* inverse of mV = (raw*5 + 8) >> 4 */
++    s->regs[0x02] = (raw >> 8) & 0x3F;
++    s->regs[0x03] = raw & 0xFF;
++    s->regs[0x04] = s->soc;
++    s->regs[0x05] = 0;
++}
++
++static int cw_event(I2CSlave *i2c, enum i2c_event event)
++{
++    X4ProCw2017State *s = X4PRO_CW2017(i2c);
++    if (event == I2C_START_SEND) {
++        s->byte_index = 0;
++    }
++    return 0;
++}
++
++static int cw_send(I2CSlave *i2c, uint8_t data)
++{
++    X4ProCw2017State *s = X4PRO_CW2017(i2c);
++    if (s->byte_index == 0) {
++        s->ptr = data;
++    } else {
++        uint8_t r = s->ptr++;
++        if (r < sizeof(s->regs)) {
++            if (r >= 0x10) s->batinfo_writes++;
++            if (r == 0x08) {
++                /* MODE: restart dance F0 -> 30 -> 00; stay "running" throughout */
++                s->regs[r] = data;
++            } else if (r == 0x00 || r == 0x02 || r == 0x03 || r == 0x04 || r == 0x05) {
++                /* read-only */
++            } else {
++                s->regs[r] = data;
++            }
++            s->writes++;
++        }
++    }
++    s->byte_index++;
++    return 0;
++}
++
++static uint8_t cw_recv(I2CSlave *i2c)
++{
++    X4ProCw2017State *s = X4PRO_CW2017(i2c);
++    uint8_t r = s->ptr++;
++    s->reads++;
++    return r < sizeof(s->regs) ? s->regs[r] : 0;
++}
++
++static void cw_realize(DeviceState *dev, Error **errp)
++{
++    X4ProCw2017State *s = X4PRO_CW2017(dev);
++    memset(s->regs, 0, sizeof(s->regs));
++    s->regs[0x00] = 0x0D;          /* VERSION: running */
++    s->regs[0x08] = 0x00;          /* MODE: normal */
++    s->regs[0x0B] = 0x80;          /* SOC_ALERT: profile loaded / update enabled */
++    memcpy(&s->regs[0x10], cw2017_batinfo, sizeof(cw2017_batinfo));
++    x4pro_cw2017_set_battery(s, s->soc, s->mv);
++}
++
++static Property cw_properties[] = {
++    DEFINE_PROP_UINT32("soc", X4ProCw2017State, soc, 63),
++    DEFINE_PROP_UINT32("mv", X4ProCw2017State, mv, 3910),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void cw_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
++    k->event = cw_event;
++    k->send = cw_send;
++    k->recv = cw_recv;
++    dc->realize = cw_realize;
++    device_class_set_props(dc, cw_properties);
++}
++
++static const TypeInfo cw_info = {
++    .name = TYPE_X4PRO_CW2017,
++    .parent = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(X4ProCw2017State),
++    .class_init = cw_class_init,
++};
++
++static void x4pro_i2c_devs_register_types(void)
++{
++    type_register_static(&gt911_info);
++    type_register_static(&pcf_info);
++    type_register_static(&cw_info);
++}
++
++type_init(x4pro_i2c_devs_register_types)
+diff --git a/hw/misc/x4pro_sleep.c b/hw/misc/x4pro_sleep.c
+new file mode 100644
+index 0000000..908e5b3
+--- /dev/null
++++ b/hw/misc/x4pro_sleep.c
+@@ -0,0 +1,229 @@
++/*
++ * Deep sleep as a modelled reset (docs/hardware.md "Power and sleep").
++ *
++ * ESP-IDF's rtc_sleep_start(): WAKEUP_STATE.WAKEUP_ENA = triggers, INT_CLR,
++ * STATE0.SLEEP_EN = 1, then spin on INT_RAW & (SLP_REJECT | SLP_WAKEUP).
++ * Deep sleep is recognised by DIG_PWC.DG_WRAP_PD_EN (the digital domain is
++ * powered down): the VM is paused. A wake source (an RTC IO selected in
++ * EXT_WAKEUP1 reaching the EXT1 level, driven by the board's GPIO model)
++ * records EXT_WAKEUP1_STATUS and SLP_WAKEUP_CAUSE = EXT1, sets both CPUs'
++ * reset cause to DEEPSLEEP (5), requests a system reset and resumes the VM,
++ * so the ROM prints rst:0x5 (DSLEEP) and the app sees ESP_SLEEP_WAKEUP_EXT1.
++ * Light sleep (no digital power-down) returns at once with SLP_WAKEUP set.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "sysemu/runstate.h"
++#include "sysemu/sysemu.h"
++#include "exec/memory.h"
++#include "hw/misc/x4pro_sleep.h"
++
++#define R_STATE0            0x18
++#define R_WAKEUP_STATE      0x3C
++#define R_INT_ENA           0x40
++#define R_INT_RAW           0x44
++#define R_INT_ST            0x48
++#define R_INT_CLR           0x4C
++#define R_EXT_WAKEUP_CONF   0x64
++#define R_SLP_REJECT_CONF   0x68
++#define R_DIG_PWC           0x90
++#define R_EXT_WAKEUP1       0xE0
++#define R_EXT_WAKEUP1_STATUS 0xE4
++#define R_SLP_WAKEUP_CAUSE  0x130
++#define REGION_SIZE         0x200
++
++#define STATE0_SLEEP_EN     (1u << 31)
++#define INT_SLP_WAKEUP      (1u << 0)
++#define INT_SLP_REJECT      (1u << 1)
++#define DIG_PWC_DG_WRAP_PD_EN (1u << 31)
++#define EXT_WAKEUP1_SEL_MASK 0x3FFFFFu
++#define EXT_WAKEUP1_STATUS_CLR (1u << 22)
++#define EXT_WAKEUP_CONF_EXT1_LV (1u << 31)
++#define RTC_EXT1_TRIG_EN    (1u << 1)     /* soc/rtc.h: wakeup trigger bit for EXT1 */
++
++static bool x4pro_sleep_ext1_condition(X4ProSleepState *s)
++{
++    uint32_t sel = s->ext_wakeup1 & EXT_WAKEUP1_SEL_MASK;
++    bool any_high = s->ext_wakeup_conf & EXT_WAKEUP_CONF_EXT1_LV;
++    uint32_t lv = s->gpio_levels & sel;
++    if (!sel) {
++        return false;
++    }
++    return any_high ? (lv != 0) : ((lv ^ sel) != 0);   /* any selected pin low */
++}
++
++void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io)
++{
++    if (!s->sleeping) {
++        return;
++    }
++    s->sleeping = false;
++    s->wake_count++;
++    s->ext_wakeup1_status = (rtc_io >= 0) ? (1u << rtc_io) : 0;
++    s->wakeup_cause = RTC_EXT1_TRIG_EN;
++    if (s->deep) {
++        for (int i = 0; i < ESP32S3_CPU_COUNT; i++) {
++            s->rtc->reset_cause[i] = ESP32_DEEPSLEEP_RESET;
++        }
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++        if (!runstate_is_running()) {
++            vm_start();
++        }
++    } else {
++        s->int_raw |= INT_SLP_WAKEUP;
++    }
++}
++
++/* GPIO levels of pins 0..21, from the board's GPIO model */
++static void x4pro_sleep_gpio_in(void *opaque, int n, int level)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(opaque);
++    if (level) {
++        s->gpio_levels |= 1u << n;
++    } else {
++        s->gpio_levels &= ~(1u << n);
++    }
++    if (s->sleeping && (s->wakeup_state >> 15 & RTC_EXT1_TRIG_EN) && x4pro_sleep_ext1_condition(s)) {
++        x4pro_sleep_wake(s, n);
++    }
++}
++
++static void x4pro_sleep_enter(X4ProSleepState *s)
++{
++    s->deep = (s->dig_pwc & DIG_PWC_DG_WRAP_PD_EN) != 0;
++    s->sleep_count++;
++    s->sleep_entered_us = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000;
++    s->ext_wakeup1_status = 0;
++    s->wakeup_cause = 0;
++    if (!s->deep) {
++        /* light sleep: nothing to wait for in this model; wake immediately */
++        s->light_sleeps++;
++        s->int_raw |= INT_SLP_WAKEUP;
++        s->wakeup_cause = (s->wakeup_state >> 15) & 0x8;   /* pretend the timer fired if armed */
++        return;
++    }
++    s->sleeping = true;
++    /* a wake source already active (button held) wakes at once */
++    if ((s->wakeup_state >> 15 & RTC_EXT1_TRIG_EN) && x4pro_sleep_ext1_condition(s)) {
++        uint32_t sel = s->ext_wakeup1 & EXT_WAKEUP1_SEL_MASK;
++        int pin = ctz32(sel);
++        x4pro_sleep_wake(s, pin);
++        return;
++    }
++    qemu_log_mask(LOG_GUEST_ERROR, "x4pro.sleep: deep sleep entered (ext1 sel=0x%x, %s); VM paused until a wake source fires\n",
++                  s->ext_wakeup1 & EXT_WAKEUP1_SEL_MASK,
++                  (s->ext_wakeup_conf & EXT_WAKEUP_CONF_EXT1_LV) ? "any-high" : "any-low");
++    qemu_system_vmstop_request_prepare();
++    qemu_system_vmstop_request(RUN_STATE_PAUSED);
++}
++
++static uint64_t x4pro_sleep_read(void *opaque, hwaddr addr, unsigned int size)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(opaque);
++    uint64_t v = 0;
++    switch (addr) {
++    case R_STATE0:            return 0;
++    case R_WAKEUP_STATE:      return s->wakeup_state;
++    case R_INT_ENA:           return s->int_ena;
++    case R_INT_RAW:           return s->int_raw;
++    case R_INT_ST:            return s->int_raw & s->int_ena;
++    case R_EXT_WAKEUP_CONF:   return s->ext_wakeup_conf;
++    case R_SLP_REJECT_CONF:   return s->slp_reject_conf;
++    case R_DIG_PWC:           return s->dig_pwc;
++    case R_EXT_WAKEUP1:       return s->ext_wakeup1 & EXT_WAKEUP1_SEL_MASK;
++    case R_EXT_WAKEUP1_STATUS: return s->ext_wakeup1_status;
++    case R_SLP_WAKEUP_CAUSE:  return s->wakeup_cause;
++    default:
++        memory_region_dispatch_read(s->lower, addr, &v, size_memop(size) | MO_LE, MEMTXATTRS_UNSPECIFIED);
++        return v;
++    }
++}
++
++static void x4pro_sleep_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(opaque);
++    uint32_t v = value;
++    switch (addr) {
++    case R_STATE0:
++        if (v & STATE0_SLEEP_EN) {
++            x4pro_sleep_enter(s);
++        }
++        return;
++    case R_WAKEUP_STATE:    s->wakeup_state = v; return;
++    case R_INT_ENA:         s->int_ena = v; return;
++    case R_INT_RAW:         return;
++    case R_INT_CLR:         s->int_raw &= ~v; return;
++    case R_EXT_WAKEUP_CONF: s->ext_wakeup_conf = v; return;
++    case R_SLP_REJECT_CONF: s->slp_reject_conf = v; return;
++    case R_DIG_PWC:         s->dig_pwc = v; return;
++    case R_EXT_WAKEUP1:
++        s->ext_wakeup1 = v & EXT_WAKEUP1_SEL_MASK;
++        if (v & EXT_WAKEUP1_STATUS_CLR) {
++            s->ext_wakeup1_status = 0;
++        }
++        return;
++    default:
++        memory_region_dispatch_write(s->lower, addr, value, size_memop(size) | MO_LE, MEMTXATTRS_UNSPECIFIED);
++        return;
++    }
++}
++
++static const MemoryRegionOps x4pro_sleep_ops = {
++    .read = x4pro_sleep_read,
++    .write = x4pro_sleep_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void x4pro_sleep_reset_hold(Object *obj, ResetType type)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(obj);
++    /* wake status/cause survive the reset that a wake causes; sleep config does not */
++    s->wakeup_state = 0;
++    s->int_ena = 0;
++    s->int_raw = 0;
++    s->ext_wakeup_conf = 0;
++    s->slp_reject_conf = 0;
++    s->dig_pwc = 0;
++    s->ext_wakeup1 = 0;
++    s->sleeping = false;
++}
++
++static void x4pro_sleep_init(Object *obj)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &x4pro_sleep_ops, s, TYPE_X4PRO_SLEEP, REGION_SIZE);
++    sysbus_init_mmio(sbd, &s->iomem);
++    qdev_init_gpio_in_named(DEVICE(obj), x4pro_sleep_gpio_in, "gpio-in", 22);
++}
++
++static void x4pro_sleep_class_init(ObjectClass *klass, void *data)
++{
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = x4pro_sleep_reset_hold;
++}
++
++static const TypeInfo x4pro_sleep_info = {
++    .name = TYPE_X4PRO_SLEEP,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(X4ProSleepState),
++    .instance_init = x4pro_sleep_init,
++    .class_init = x4pro_sleep_class_init,
++};
++
++static void x4pro_sleep_register_types(void)
++{
++    type_register_static(&x4pro_sleep_info);
++}
++
++type_init(x4pro_sleep_register_types)
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 1f50a6b..97bff31 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -26,6 +26,15 @@
+ #include "hw/ssi/esp32s3_gpspi.h"
+ #include "hw/display/x4pro_epd.h"
+ #include "monitor/qdev.h"
++#include "hw/i2c/esp32s3_i2c.h"
++#include "hw/misc/x4pro_i2c_devs.h"
++#include "hw/misc/esp32s3_ledc.h"
++#include "hw/misc/x4pro_sleep.h"
++#include "qapi/qmp/qjson.h"
++#include "qapi/qmp/qdict.h"
++#include "qapi/qmp/qlist.h"
++#include "qapi/qmp/qnum.h"
++#include "qapi/qmp/qbool.h"
+ #include "qapi/visitor.h"
+ 
+ #define TYPE_ESP32S3_MACHINE MACHINE_TYPE_NAME("esp32s3")
+@@ -54,8 +63,6 @@ typedef struct IoLogRegion {
+ static IoLogRegion iolog_regions[] = {
+     { "rtcio",     DR_REG_RTCIO_BASE,           0x400  },
+     { "iomux",     DR_REG_IO_MUX_BASE,          0x1000 },
+-    { "i2c0",      DR_REG_I2C_EXT_BASE,         0x1000 },
+-    { "ledc",      DR_REG_LEDC_BASE,            0x1000 },
+     { "spi3",      DR_REG_SPI3_BASE,            0x1000 },
+     { "usb_wrap",  DR_REG_USB_WRAP_BASE,        0x1000 },
+     { "rmt",       DR_REG_RMT_BASE,             0x1000 },
+@@ -125,15 +132,28 @@ static void x4pro_add_iolog(MachineState *machine, MemoryRegion *sys_mem)
+ #define PIN_CHG_STAT   21
+ #define PIN_RAIL       1
+ 
+-/* ---- input device: buttons (and later touch) as QOM properties ----------- */
++/* The GT911 rail is on while GPIO2 is driven LOW (with GPIO1 HIGH). */
++static int x4pro_touch_powered(void *opaque)
++{
++    ESP32S3GpioFullState *g = opaque;
++    return esp32s3_gpio_full_is_output(g, PIN_TP_PWR) && esp32s3_gpio_full_get_level(g, PIN_TP_PWR) == 0 &&
++           esp32s3_gpio_full_get_level(g, PIN_RAIL) == 1;
++}
++
++/* ---- input device: buttons, touch and Home pad as QOM properties --------- */
+ #define TYPE_X4PRO_INPUT "x4pro.input"
+ OBJECT_DECLARE_SIMPLE_TYPE(X4ProInputState, X4PRO_INPUT)
+ 
+ struct X4ProInputState {
+     DeviceState parent_obj;
+     ESP32S3GpioFullState *gpio;
++    X4ProGt911State *gt911;
+     bool btn[3];            /* left, right, power: true = pressed */
+     bool charging;
++    bool home;
++    char *touch_json;       /* last accepted touch set, GT911 raw frame */
++    int touch_count;
++    Gt911Point touch_pts[GT911_MAX_POINTS];
+ };
+ 
+ static const int btn_pin[3] = { PIN_BTN_LEFT, PIN_BTN_RIGHT, PIN_BTN_POWER };
+@@ -189,12 +209,81 @@ static void x4pro_input_set_charging(Object *obj, Visitor *v, const char *name,
+     x4pro_input_apply(s);
+ }
+ 
++/* "touch": JSON array of {"x":..,"y":..[,"size":..]} in the GT911's raw (portrait) frame;
++ * "[]" releases. "home": the capacitive Home pad. */
++static void x4pro_input_get_touch(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    char *val = g_strdup(s->touch_json ? s->touch_json : "[]");
++    visit_type_str(v, name, &val, errp);
++    g_free(val);
++}
++
++static void x4pro_input_set_touch(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    char *val = NULL;
++    if (!visit_type_str(v, name, &val, errp)) {
++        return;
++    }
++    QObject *qo = qobject_from_json(val, errp);
++    if (!qo) {
++        g_free(val);
++        return;
++    }
++    QList *list = qobject_to(QList, qo);
++    if (!list) {
++        error_setg(errp, "touch: expected a JSON array");
++        qobject_unref(qo); g_free(val);
++        return;
++    }
++    int n = 0;
++    const QListEntry *e;
++    for (e = qlist_first(list); e && n < GT911_MAX_POINTS; e = qlist_next(e)) {
++        QDict *d = qobject_to(QDict, qlist_entry_obj(e));
++        if (!d) continue;
++        s->touch_pts[n].x = qdict_get_try_int(d, "x", 0);
++        s->touch_pts[n].y = qdict_get_try_int(d, "y", 0);
++        s->touch_pts[n].size = qdict_get_try_int(d, "size", 20);
++        s->touch_pts[n].id = qdict_get_try_int(d, "id", n);
++        n++;
++    }
++    s->touch_count = n;
++    g_free(s->touch_json);
++    s->touch_json = val;
++    qobject_unref(qo);
++    if (s->gt911) {
++        x4pro_gt911_set_touch(s->gt911, s->touch_pts, s->touch_count, s->home);
++    }
++}
++
++static void x4pro_input_get_home(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    visit_type_bool(v, name, &s->home, errp);
++}
++
++static void x4pro_input_set_home(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProInputState *s = X4PRO_INPUT(obj);
++    bool val;
++    if (!visit_type_bool(v, name, &val, errp)) {
++        return;
++    }
++    s->home = val;
++    if (s->gt911) {
++        x4pro_gt911_set_touch(s->gt911, s->touch_pts, s->touch_count, s->home);
++    }
++}
++
+ static void x4pro_input_init(Object *obj)
+ {
+     for (intptr_t i = 0; i < 3; i++) {
+         object_property_add(obj, btn_name[i], "bool", x4pro_input_get_btn, x4pro_input_set_btn, NULL, (void *)i);
+     }
+     object_property_add(obj, "charging", "bool", x4pro_input_get_charging, x4pro_input_set_charging, NULL, NULL);
++    object_property_add(obj, "touch", "string", x4pro_input_get_touch, x4pro_input_set_touch, NULL, NULL);
++    object_property_add(obj, "home", "bool", x4pro_input_get_home, x4pro_input_set_home, NULL, NULL);
+ }
+ 
+ static const TypeInfo x4pro_input_info = {
+@@ -215,6 +304,12 @@ struct X4ProBoardState {
+     X4ProEpdState *epd;
+     ESP32S3UsjState *usj;
+     X4ProInputState *input;
++    ESP32S3I2CState *i2c0;
++    X4ProGt911State *gt911;
++    X4ProCw2017State *cw2017;
++    X4ProPcf8563State *rtc;
++    ESP32S3LedcState *ledc;
++    X4ProSleepState *sleep;
+ };
+ 
+ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+@@ -263,6 +358,44 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+         g_string_append_printf(j, "\"buttons\":{\"left\":%s,\"right\":%s,\"power\":%s},\"charging\":%s,",
+             b->input->btn[0] ? "true" : "false", b->input->btn[1] ? "true" : "false",
+             b->input->btn[2] ? "true" : "false", b->input->charging ? "true" : "false");
++        g_string_append_printf(j, "\"touch\":{\"count\":%d,\"home\":%s,\"points\":[", b->input->touch_count,
++                               b->input->home ? "true" : "false");
++        for (int i = 0; i < b->input->touch_count; i++) {
++            g_string_append_printf(j, "%s{\"x\":%u,\"y\":%u}", i ? "," : "", b->input->touch_pts[i].x, b->input->touch_pts[i].y);
++        }
++        g_string_append(j, "]},");
++    }
++    if (b->gt911) {
++        g_string_append_printf(j, "\"gt911\":{\"frame_ready\":%s,\"frames\":%" PRIu64 ",\"clears\":%" PRIu64 ",\"start_nacks\":%" PRIu64 "},",
++            b->gt911->frame_ready ? "true" : "false", b->gt911->frames, b->gt911->clears, b->gt911->start_nacks);
++    }
++    if (b->i2c0) {
++        g_string_append_printf(j, "\"i2c0\":{\"transactions\":%" PRIu64 ",\"nacks\":%" PRIu64 ",\"last_addr\":\"0x%02x\"},",
++            b->i2c0->transactions, b->i2c0->nacks, b->i2c0->last_addr);
++    }
++    if (b->cw2017) {
++        g_string_append_printf(j, "\"battery\":{\"soc\":%u,\"mv\":%u,\"batinfo_writes\":%" PRIu64 "},",
++            b->cw2017->soc, b->cw2017->mv, b->cw2017->batinfo_writes);
++    }
++    if (b->rtc) {
++        g_string_append_printf(j, "\"rtc\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 "},", b->rtc->reads, b->rtc->writes);
++    }
++    if (b->ledc && b->gpio) {
++        g_string_append(j, "\"ledc\":{\"channels\":[");
++        for (int ch = 0; ch < ESP32S3_LEDC_CHANNELS; ch++) {
++            int gpio = -1;
++            for (int p = 0; p < ESP32S3_GPIO_PINS; p++) {
++                if ((b->gpio->func_out_sel[p] & 0x1FF) == 73 + ch) { gpio = p; break; }   /* LEDC_LS_SIG_OUT0_IDX = 73 */
++            }
++            g_string_append_printf(j, "%s{\"ch\":%d,\"gpio\":%d,\"duty_permille\":%d,\"freq_hz\":%u}", ch ? "," : "",
++                                   ch, gpio, esp32s3_ledc_duty_permille(b->ledc, ch), esp32s3_ledc_freq_hz(b->ledc, ch));
++        }
++        g_string_append_printf(j, "],\"updates\":%" PRIu64 "},", b->ledc->duty_updates);
++    }
++    if (b->sleep) {
++        g_string_append_printf(j, "\"sleep\":{\"sleeping\":%s,\"deep\":%s,\"count\":%" PRIu64 ",\"wakes\":%" PRIu64 ",\"light_sleeps\":%" PRIu64 ",\"entered_us\":%" PRId64 ",\"ext1_sel\":\"0x%x\",\"ext1_status\":\"0x%x\",\"wakeup_cause\":\"0x%x\"},",
++            b->sleep->sleeping ? "true" : "false", b->sleep->deep ? "true" : "false", b->sleep->sleep_count, b->sleep->wake_count,
++            b->sleep->light_sleeps, b->sleep->sleep_entered_us, b->sleep->ext_wakeup1, b->sleep->ext_wakeup1_status, b->sleep->wakeup_cause);
+     }
+     if (j->str[j->len - 1] == ',') {
+         g_string_truncate(j, j->len - 1);
+@@ -292,10 +425,38 @@ static void x4pro_board_set_fast_epd(Object *obj, Visitor *v, const char *name,
+     }
+ }
+ 
++static void x4pro_board_get_batt(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProBoardState *b = X4PRO_BOARD(obj);
++    int64_t val = 0;
++    if (b->cw2017) {
++        val = opaque ? b->cw2017->mv : b->cw2017->soc;
++    }
++    visit_type_int(v, name, &val, errp);
++}
++
++static void x4pro_board_set_batt(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    X4ProBoardState *b = X4PRO_BOARD(obj);
++    int64_t val;
++    if (!visit_type_int(v, name, &val, errp)) {
++        return;
++    }
++    if (b->cw2017) {
++        if (opaque) {
++            x4pro_cw2017_set_battery(b->cw2017, -1, val);
++        } else {
++            x4pro_cw2017_set_battery(b->cw2017, val, -1);
++        }
++    }
++}
++
+ static void x4pro_board_init(Object *obj)
+ {
+     object_property_add(obj, "state", "string", x4pro_board_get_state, NULL, NULL, NULL);
+     object_property_add(obj, "fast-epd", "bool", x4pro_board_get_fast_epd, x4pro_board_set_fast_epd, NULL, NULL);
++    object_property_add(obj, "battery-soc", "int", x4pro_board_get_batt, x4pro_board_set_batt, NULL, NULL);
++    object_property_add(obj, "battery-mv", "int", x4pro_board_get_batt, x4pro_board_set_batt, NULL, (void *)1);
+ }
+ 
+ static const TypeInfo x4pro_board_info = {
+@@ -400,12 +561,73 @@ static void x4pro_machine_init(MachineState *machine)
+         qdev_connect_gpio_out_named(dev, X4PRO_EPD_GPIO_LINE, 0, qdev_get_gpio_in_named(g, ESP32S3_GPIO_PIN_IN, PIN_EPD_MOSI));
+     }
+ 
++    /* I2C0 at 0x60013000 with the GT911 (0x5D), BM8563 (0x51) and CW2017 (0x63) */
++    ESP32S3I2CState *i2c0;
++    X4ProGt911State *gt911;
++    X4ProCw2017State *cw2017;
++    X4ProPcf8563State *rtc;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_I2C);
++        object_property_add_child(OBJECT(machine), "x4pro-i2c0", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C_EXT_BASE, mr, 2);
++        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(intmatrix, ETS_I2C_EXT0_INTR_SOURCE));
++        i2c0 = ESP32S3_I2C(dev);
++
++        I2CSlave *tp = i2c_slave_new(TYPE_X4PRO_GT911, 0x5D);
++        gt911 = X4PRO_GT911(tp);
++        gt911->powered = x4pro_touch_powered;
++        gt911->powered_opaque = gpio;
++        i2c_slave_realize_and_unref(tp, i2c0->bus, &error_fatal);
++        qdev_connect_gpio_out_named(DEVICE(tp), "int", 0,
++                                    qdev_get_gpio_in_named(DEVICE(gpio), ESP32S3_GPIO_PIN_IN, PIN_TP_INT));
++
++        rtc = X4PRO_PCF8563(i2c_slave_create_simple(i2c0->bus, TYPE_X4PRO_PCF8563, 0x51));
++        cw2017 = X4PRO_CW2017(i2c_slave_create_simple(i2c0->bus, TYPE_X4PRO_CW2017, 0x63));
++        input->gt911 = gt911;
++    }
++
++    /* LEDC at 0x60019000 (frontlight PWM) */
++    ESP32S3LedcState *ledc;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_LEDC);
++        object_property_add_child(OBJECT(machine), "x4pro-ledc", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_LEDC_BASE, mr, 2);
++        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(intmatrix, ETS_LEDC_INTR_SOURCE));
++        ledc = ESP32S3_LEDC(dev);
++    }
++
++    /* Deep-sleep overlay on RTC_CNTL, woken by the power button (GPIO3 = RTC IO 3) */
++    X4ProSleepState *sleep;
++    {
++        Object *rtc_obj = object_resolve_path("/machine/soc/rtc_cntl", NULL);
++        DeviceState *dev = qdev_new(TYPE_X4PRO_SLEEP);
++        object_property_add_child(OBJECT(machine), "x4pro-sleep", OBJECT(dev));
++        sleep = X4PRO_SLEEP(dev);
++        sleep->rtc = ESP32S3_RTC_CNTL(rtc_obj);
++        sleep->lower = sysbus_mmio_get_region(SYS_BUS_DEVICE(rtc_obj), 0);
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_RTCCNTL_BASE, mr, 2);
++        for (int p = 0; p < 22; p++) {
++            if (p == PIN_EPD_CS || p == PIN_EPD_DC || p == PIN_EPD_RST || p == PIN_EPD_SCLK || p == PIN_EPD_MOSI) {
++                continue;   /* already routed to the panel; RTC IOs used for wake are the buttons */
++            }
++            qdev_connect_gpio_out_named(DEVICE(gpio), ESP32S3_GPIO_PIN_OUT, p, qdev_get_gpio_in_named(dev, "gpio-in", p));
++        }
++    }
++
+     /* Board state object: /machine/x4pro-board */
+     {
+         DeviceState *dev = qdev_new(TYPE_X4PRO_BOARD);
+         object_property_add_child(OBJECT(machine), "x4pro-board", OBJECT(dev));
+         X4ProBoardState *b = X4PRO_BOARD(dev);
+         b->gpio = gpio; b->spi2 = spi2; b->epd = epd; b->usj = usj_state; b->input = input;
++        b->i2c0 = i2c0; b->gt911 = gt911; b->cw2017 = cw2017; b->rtc = rtc;
++        b->ledc = ledc; b->sleep = sleep;
+         qdev_realize_and_unref(dev, NULL, &error_fatal);
+     }
+ 
+diff --git a/include/hw/i2c/esp32s3_i2c.h b/include/hw/i2c/esp32s3_i2c.h
+new file mode 100644
+index 0000000..3900dc3
+--- /dev/null
++++ b/include/hw/i2c/esp32s3_i2c.h
+@@ -0,0 +1,38 @@
++/*
++ * ESP32-S3 I2C controller (master mode, FIFO path) on a QEMU I2CBus.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++#include "hw/i2c/i2c.h"
++
++#define TYPE_ESP32S3_I2C "esp32s3.i2c"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3I2CState, ESP32S3_I2C)
++
++#define ESP32S3_I2C_FIFO_LEN 32
++#define ESP32S3_I2C_CMD_COUNT 8
++
++struct ESP32S3I2CState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++    I2CBus *bus;
++
++    uint32_t ctr;
++    uint32_t fifo_conf;
++    uint32_t int_raw;
++    uint32_t int_ena;
++    uint32_t comd[ESP32S3_I2C_CMD_COUNT];
++    uint32_t timing[0x40];      /* SCL/SDA/TO/FILTER/CLK_CONF registers: stored, not modelled */
++    uint8_t txfifo[ESP32S3_I2C_FIFO_LEN];
++    uint8_t rxfifo[ESP32S3_I2C_FIFO_LEN];
++    uint32_t tx_len, rx_len, rx_pos;
++    bool bus_open;               /* a START was issued and no STOP yet */
++
++    char *trace_path;
++    FILE *trace;
++    uint64_t transactions;
++    uint64_t nacks;
++    uint8_t last_addr;
++};
+diff --git a/include/hw/misc/esp32s3_ledc.h b/include/hw/misc/esp32s3_ledc.h
+new file mode 100644
+index 0000000..8d29bb4
+--- /dev/null
++++ b/include/hw/misc/esp32s3_ledc.h
+@@ -0,0 +1,31 @@
++/*
++ * ESP32-S3 LEDC (LED PWM) controller: low-speed channels 0..7, timers 0..3.
++ * Only duty/resolution are modelled; the result is an observable duty per channel.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++
++#define TYPE_ESP32S3_LEDC "esp32s3.ledc"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3LedcState, ESP32S3_LEDC)
++
++#define ESP32S3_LEDC_CHANNELS 8
++#define ESP32S3_LEDC_TIMERS 4
++
++struct ESP32S3LedcState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++    uint32_t ch_conf0[ESP32S3_LEDC_CHANNELS];
++    uint32_t ch_hpoint[ESP32S3_LEDC_CHANNELS];
++    uint32_t ch_duty[ESP32S3_LEDC_CHANNELS];    /* DUTY register value (duty << 4) */
++    uint32_t ch_conf1[ESP32S3_LEDC_CHANNELS];
++    uint32_t timer_conf[ESP32S3_LEDC_TIMERS];
++    uint32_t int_raw, int_ena, conf;
++    uint64_t duty_updates;
++};
++
++/* duty in permille (0..1000) of the channel's current setting; -1 if the output is disabled */
++int esp32s3_ledc_duty_permille(ESP32S3LedcState *s, int ch);
++uint32_t esp32s3_ledc_freq_hz(ESP32S3LedcState *s, int ch);
+diff --git a/include/hw/misc/x4pro_i2c_devs.h b/include/hw/misc/x4pro_i2c_devs.h
+new file mode 100644
+index 0000000..8d9c85e
+--- /dev/null
++++ b/include/hw/misc/x4pro_i2c_devs.h
+@@ -0,0 +1,68 @@
++/*
++ * X4 Pro I2C peripherals: GT911 touch (0x5D), BM8563/PCF8563 RTC (0x51),
++ * CW2017 fuel gauge (0x63).
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/i2c/i2c.h"
++#include "qemu/timer.h"
++
++/* ---- GT911 ---------------------------------------------------------------- */
++#define TYPE_X4PRO_GT911 "x4pro.gt911"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProGt911State, X4PRO_GT911)
++
++#define GT911_MAX_POINTS 5
++#define GT911_CONFIG_BASE 0x8047
++#define GT911_CONFIG_LEN  0xBA       /* 0x8047..0x8100 */
++
++typedef struct { uint16_t x, y, size; uint8_t id; } Gt911Point;
++
++struct X4ProGt911State {
++    I2CSlave parent_obj;
++    qemu_irq irq_out;             /* INT line: 0 = frame pending */
++    QEMUTimer *frame_timer;
++    uint16_t ptr;
++    int byte_index;
++    uint8_t config[GT911_CONFIG_LEN];
++    Gt911Point pts[GT911_MAX_POINTS];
++    int count;
++    bool home;
++    bool frame_ready;
++    uint64_t frames, reads, clears, start_nacks;
++    bool require_power;
++    int (*powered)(void *opaque);   /* board callback: is the touch rail on? */
++    void *powered_opaque;
++};
++
++void x4pro_gt911_set_touch(X4ProGt911State *s, const Gt911Point *pts, int count, bool home);
++
++/* ---- PCF8563 / BM8563 ----------------------------------------------------- */
++#define TYPE_X4PRO_PCF8563 "x4pro.pcf8563"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProPcf8563State, X4PRO_PCF8563)
++
++struct X4ProPcf8563State {
++    I2CSlave parent_obj;
++    uint8_t regs[16];
++    uint8_t ptr;
++    int byte_index;
++    int64_t base_epoch;           /* seconds: wall time corresponding to guest virtual time base_vt */
++    int64_t base_vt_ns;
++    uint64_t reads, writes;
++};
++
++/* ---- CW2017 --------------------------------------------------------------- */
++#define TYPE_X4PRO_CW2017 "x4pro.cw2017"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProCw2017State, X4PRO_CW2017)
++
++struct X4ProCw2017State {
++    I2CSlave parent_obj;
++    uint8_t regs[0x60];
++    uint8_t ptr;
++    int byte_index;
++    uint32_t soc;                 /* percent */
++    uint32_t mv;                  /* millivolts */
++    uint64_t reads, writes, batinfo_writes;
++};
++
++void x4pro_cw2017_set_battery(X4ProCw2017State *s, int soc, int mv);
+diff --git a/include/hw/misc/x4pro_sleep.h b/include/hw/misc/x4pro_sleep.h
+new file mode 100644
+index 0000000..1f56811
+--- /dev/null
++++ b/include/hw/misc/x4pro_sleep.h
+@@ -0,0 +1,37 @@
++/*
++ * Deep-sleep model for the ESP32-S3 RTC_CNTL block: overlays the sleep-related
++ * registers on top of Espressif's rtc_cntl (which ignores them) and forwards
++ * everything else to it.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++#include "hw/misc/esp32s3_rtc_cntl.h"
++
++#define TYPE_X4PRO_SLEEP "x4pro.sleep"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProSleepState, X4PRO_SLEEP)
++
++struct X4ProSleepState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    MemoryRegion *lower;          /* the stock rtc_cntl register region */
++    Esp32s3RtcCntlState *rtc;
++
++    uint32_t wakeup_state;        /* +0x3C */
++    uint32_t int_ena, int_raw;    /* +0x40, +0x44 */
++    uint32_t ext_wakeup_conf;     /* +0x64: bit 31 EXT1 level (1 = any high, 0 = any low) */
++    uint32_t slp_reject_conf;     /* +0x68 */
++    uint32_t dig_pwc;             /* +0x90: bit 31 DG_WRAP_PD_EN => deep sleep */
++    uint32_t ext_wakeup1;         /* +0xE0: bits 0..21 RTC IO select */
++    uint32_t ext_wakeup1_status;  /* +0xE4 */
++    uint32_t wakeup_cause;        /* +0x130 */
++
++    bool sleeping;
++    bool deep;
++    uint64_t sleep_count, wake_count, light_sleeps;
++    int64_t sleep_entered_us;
++    uint32_t gpio_levels;         /* pins 0..21 as last reported on "gpio-in" */
++};
++
++void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io);
+-- 
+2.50.1 (Apple Git-155)
+
