@@ -4,7 +4,7 @@ QEMU    := qemu/build/qemu-system-xtensa
 NPROC   := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 QEMU_REF ?= febae182e132e4055529be423a818225ebddaa3a
 
-.PHONY: setup build test qemu firmware models clean-run help
+.PHONY: setup build test qemu firmware models clean-run run help
 
 help:
 	@echo "make setup   - venv, clone qemu (esp-develop @ $(QEMU_REF)) + apply patches, clone firmware"
@@ -49,6 +49,17 @@ build: qemu models firmware
 test: models
 	$(MAKE) -C models test
 	$(PY) -m pytest -q tests
+
+# One-command edit-to-pixels loop: build the firmware, assemble the image, boot, wait, screenshot.
+NAME ?= dev0
+SD   ?= images/sd-device.img
+run: firmware
+	$(PY) tools/mkflash.py images/flash.bin --build firmware/.pio/build/x4pro
+	-$(PY) tools/x4emu --name $(NAME) stop
+	$(PY) tools/x4emu --name $(NAME) run --flash images/flash.bin $(if $(wildcard $(SD)),--sd $(SD),) --fast-epd
+	$(PY) tools/x4emu --name $(NAME) wait-text "Entering activity" --timeout 90
+	$(PY) tools/x4emu --name $(NAME) wait-quiet --seconds 2 --timeout 60
+	$(PY) tools/x4emu --name $(NAME) screenshot images/last-run.png
 
 clean-run:
 	rm -rf .x4emu

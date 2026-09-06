@@ -226,32 +226,51 @@ boots the stock image and walks one screen; `docs/log.md` explains the blocker t
 - [ ] Generic S3 models proposed upstream; board file and panel cores stay here.
 - [ ] `docs/audit.md`/`hardware.md` still the single source of truth, every claim with evidence.
 
-## 9. Goal D — agent ergonomics (iterate faster on custom firmware)
+## 9. Goal D — agent ergonomics, as milestones (the agent iterates on firmware through these)
 
-- **MCP server** (`tools/x4emu_mcp.py`, registered by `.mcp.json` at the repo root; start Claude
-  Code in `/Users/mini/x4pro-emu` so it loads): the whole CLI as typed tools, screenshots returned
-  inline (`emu_screenshot`), state as JSON (`emu_state`), device tools (`device_status`,
-  `device_console`, `device_fetch_screenshots`, guarded `device_flash_crosspoint` /
-  `device_restore_stock` that only act with `confirm=True`), and build steps (`build_firmware`,
-  `build_flash_image`, `build_sd_image`). It shells out to the CLI, so the CLI stays the single
-  implementation and pytest keeps using it. Extend it rather than adding Bash recipes.
-- **Design custom firmware emulator-first**, and give it a debug console from day one: a serial
-  command set over USB Serial/JTAG (`screenshot` → base64 BMP, `state`, `tap x y`, `key`,
-  `light`, `sleep`) makes the *device* scriptable exactly like the emulator, so one pytest can run
-  against both (`--target emu|device`) and diff screenshots without the chord + File Transfer
-  detour. `x4emu` already has the RX path for sending console input (wire `console-send`).
-- **Hot reflash without restarting QEMU**: Espressif's QEMU accepts `esptool` over
-  `socket://localhost:5555` (see the README in `docs/device/ref/`); add `x4emu flash-app app.bin`
-  that writes 0x10000 through it and resets, and a `make run` target (build → mkflash → run →
-  wait → screenshot) so an edit-to-pixels loop is one command.
-- **Build speed**: CrossPoint's x4pro env compiles wolfSSL etc. (~9 min cold, ~50 s warm); a custom
-  firmware should keep a lean pioarduino env, enable `build_cache_dir`, and skip WiFi/TLS libs it
-  does not use. Keep firmware ELFs next to images so `x4emu gdb` has symbols.
-- **Fast time**: `--fast-epd` (2 ms refreshes) for logic tests, real timings for UX checks; add
-  `--speed N` (icount shift) and a `wait-guest-ms` helper for time-based UI (auto-sleep, toasts).
-- **What the emulator guarantees a custom firmware today** (design against this list):
-  USB Serial/JTAG console both ways; GPIO 0..48 with edge/level interrupts; SPI2 to the panel;
-  UC8279/UC8179/SSD1677 with the real probe answers and device timings; I2C0 with GT911, BM8563,
-  CW2017 (BATINFO resident); LEDC frontlight; SDMMC 1-bit card (MBR/FAT32 image); deep sleep with
-  EXT1 wake on GPIO3; efuse/MAC of the desk unit. Not there: WiFi/BLE, USB OTG, SAR ADC (§3.2),
-  RMT, I2S, touch sensor pads, ULP.
+Done in this phase: the MCP server (28+ tools, screenshots inline), `make run` (build → image →
+boot → wait → screenshot), `x4emu flash-app` (swap the app in the live image, keep NVS/SD,
+relaunch), `x4emu console-send` (bidirectional USB Serial/JTAG: the chardev is now a unix socket
+with a logfile). Next:
+
+**D1. Firmware debug console (in the custom firmware, from day one).** A line protocol over the
+USB Serial/JTAG so the *device* is scriptable exactly like the emulator. Proposed grammar, one
+command per line, replies prefixed so they never collide with logs:
+```
+X4> screenshot            -> X4< SHOT 800 480 1 <base64 of the 1-bpp panel frame, rows top-down>
+X4> state                 -> X4< STATE {"activity":"Home","battery":63,"charging":false,...}
+X4> tap 345 350           -> X4< OK        (synthetic touch in landscape panel pixels)
+X4> key right 120         -> X4< OK        (synthetic button press, ms)
+X4> home 120              -> X4< OK
+X4> light 60 50           -> X4< OK        (brightness %, warmth %)
+X4> sleep                 -> X4< OK        (then the port drops)
+X4> version               -> X4< VER <name> <git> <build time>
+```
+Emulator side: `x4emu console-send` and `emu_console_send` already inject the request; add
+`x4emu console-expect PREFIX --timeout S` to collect the reply from console.log and a
+`tools/x4target.py` with the same API for the device port. Acceptance: one pytest,
+parametrised `--target emu|device`, drives Home → Browse Files → back and diffs `screenshot`
+replies against `tests/golden/`; on the device it runs without touching the card or the chord.
+
+**D2. `make run` on the custom firmware** with a lean pioarduino env (no wolfSSL/WiFi unless
+used; `build_cache_dir`), ELF kept next to the image for `x4emu gdb`, warm build under 30 s.
+Acceptance: edit a string in the firmware → `make run` → new pixels in under 60 s.
+
+**D3. Time control.** `x4emu run --speed N` (icount shift) and `x4emu wait-guest-ms N`
+(virtual-clock wait, not host sleep) for time-driven UI: auto-sleep, toasts, battery polls.
+Acceptance: a test triggers CrossPoint's inactivity auto-sleep in a few host seconds.
+
+**D4. Parity harness.** The same input script runs on emulator and device (D1), screenshots are
+diffed pairwise, and every difference is either 0 or explained in the test's assertion message
+(battery %, clock). Acceptance: the M3/M5 device comparisons become an automated job the owner
+starts by plugging in the device.
+
+**D5. Fidelity gaps that block custom firmware first.** SAR ADC (§3.2 step 1), then RMT/I2S if the
+firmware uses them, then USB OTG device mode (large, optional).
+
+What the emulator guarantees a custom firmware today (design against this list): USB Serial/JTAG
+console both ways; GPIO 0..48 with edge/level interrupts; SPI2 to the panel; UC8279/UC8179/SSD1677
+with the real probe answers and device timings; I2C0 with GT911, BM8563, CW2017 (BATINFO
+resident); LEDC frontlight; SDMMC 1-bit card (MBR/FAT32 image); deep sleep with EXT1 wake on
+GPIO3; efuse/MAC of the desk unit. Not there: WiFi/BLE, USB OTG, SAR ADC, RMT, I2S, touch
+sensor pads, ULP.

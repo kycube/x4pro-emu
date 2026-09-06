@@ -74,7 +74,7 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 `claude mcp add x4emu -- .venv/bin/python tools/x4emu_mcp.py`). Tools mirror the CLI: `emu_run`,
 `emu_wait_text`, `emu_wait_quiet`, `emu_tap`/`emu_press`/`emu_hold`/`emu_chord`/`emu_home`,
 `emu_screenshot` (image inline, optional diff), `emu_state`, `emu_console`, `emu_trace_tail`,
-`emu_battery`, `emu_light`, `emu_qmp`; `build_firmware`, `build_flash_image`, `build_sd_image`;
+`emu_battery`, `emu_light`, `emu_qmp`, `emu_console_send`, `emu_flash_app`; `build_firmware`, `build_flash_image`, `build_sd_image`;
 `device_status`, `device_console`, `device_fetch_screenshots`, and the guarded
 `device_flash_crosspoint` / `device_restore_stock` (plan only unless `confirm=true`).
 
@@ -92,6 +92,8 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 | `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
 | `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms]` / `home [--ms]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad |
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
+| `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
+| `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |
 | `mem read ADDR LEN` / `gdb` / `qmp JSON` | human-monitor `xp`; launches `xtensa-esp-elf-gdb` on :1234 (run with `--gdb`); raw QMP |
 
 Tips: CrossPoint ignores input while it is painting, so use `--quiet 2` or `wait-quiet` before an

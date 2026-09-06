@@ -105,7 +105,7 @@ def cmd_run(a):
            '-global', 'driver=nvram.esp32s3.efuse,property=drive,value=efuse',
            '-display', 'none', '-monitor', 'none',
            '-serial', f'file:{os.path.join(d, "uart0.log")}',
-           '-chardev', f'file,id=usbcon,path={os.path.join(d, "console.log")}',
+           '-chardev', f'socket,id=usbcon,path={os.path.join(d, "console.sock")},server=on,wait=off,logfile={os.path.join(d, "console.log")}',
            '-global', 'driver=esp32s3.usj,property=chardev,value=usbcon',
            '-qmp', f'unix:{os.path.join(d, "qmp.sock")},server,nowait',
            '-d', a.debug, '-D', os.path.join(d, 'qemu.log')]
@@ -131,6 +131,13 @@ def cmd_run(a):
     json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd}, open(os.path.join(d, 'run.json'), 'w'), indent=1)
     if a.dry_run:
         print(' '.join(shlex.quote(c) for c in cmd)); return
+    launch(a.name, cmd)
+
+def launch(name, cmd):
+    d = idir(name)
+    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'console.sock'):
+        try: os.remove(os.path.join(d, f))
+        except FileNotFoundError: pass
     err = open(os.path.join(d, 'stderr.log'), 'wb')
     p = subprocess.Popen(cmd, stdout=err, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True, cwd=ROOT)
     open(os.path.join(d, 'pid'), 'w').write(str(p.pid))
@@ -141,7 +148,7 @@ def cmd_run(a):
         if os.path.exists(os.path.join(d, 'qmp.sock')):
             try:
                 q = QMP(os.path.join(d, 'qmp.sock')); st = q.cmd('query-status'); q.close()
-                print(f'{a.name}: pid {p.pid}, qmp ok, status {st["status"]}, console {os.path.join(d, "console.log")}')
+                print(f'{name}: pid {p.pid}, qmp ok, status {st["status"]}, console {os.path.join(d, "console.log")}')
                 return
             except (OSError, EOFError):
                 pass
@@ -206,6 +213,40 @@ def cmd_log(a):
                     sys.stdout.write(d.decode('utf-8', 'replace')); sys.stdout.flush()
                 else:
                     time.sleep(0.1)
+
+def cmd_console_send(a):
+    """Send text into the guest's USB Serial/JTAG console (RX path of the USJ model)."""
+    p = os.path.join(idir(a.name), 'console.sock')
+    data = a.text.encode() + (b'\n' if a.newline else b'')
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(3); s.connect(p)
+    s.sendall(data); s.close()
+    print(f'sent {len(data)} bytes')
+
+def cmd_flash_app(a):
+    """Replace the app (and optionally bootloader/partition table) inside the instance's flash
+    image, keeping NVS/otadata/SD state, and relaunch with the same command line."""
+    d = idir(a.name)
+    rj = os.path.join(d, 'run.json')
+    if not os.path.exists(rj):
+        sys.exit('no run.json for this instance; use `run` first')
+    info = json.load(open(rj))
+    flash = info['flash']
+    parts = []
+    if a.build:
+        b = a.build
+        parts += [(0x0, os.path.join(b, 'bootloader.bin')), (0x8000, os.path.join(b, 'partitions.bin')), (0x10000, os.path.join(b, 'firmware.bin'))]
+    if a.app:
+        parts.append((0x10000, a.app))
+    if not parts:
+        sys.exit('give --app APP.bin and/or --build DIR')
+    if pid_alive(a.name):
+        cmd_stop(a)
+    with open(flash, 'r+b') as f:
+        for off, path in parts:
+            blob = open(path, 'rb').read()
+            f.seek(off); f.write(blob)
+            print(f'  {off:#09x} {len(blob):9d}  {path}')
+    launch(a.name, info['cmd'])
 
 def cmd_wait_text(a):
     p = os.path.join(idir(a.name), a.file)
@@ -404,6 +445,8 @@ def main():
     sp.add_parser('state').set_defaults(fn=cmd_state)
     p = sp.add_parser('log'); p.add_argument('--follow', action='store_true'); p.add_argument('--since', type=int)
     p.add_argument('--timeout', type=float, default=30); p.add_argument('--file', default='console.log'); p.set_defaults(fn=cmd_log)
+    p = sp.add_parser('console-send'); p.add_argument('text'); p.add_argument('--no-newline', dest='newline', action='store_false'); p.set_defaults(fn=cmd_console_send)
+    p = sp.add_parser('flash-app'); p.add_argument('--app'); p.add_argument('--build'); p.set_defaults(fn=cmd_flash_app)
     p = sp.add_parser('wait-text'); p.add_argument('text'); p.add_argument('--timeout', type=float, default=30)
     p.add_argument('--file', default='console.log'); p.set_defaults(fn=cmd_wait_text)
     p = sp.add_parser('screenshot'); p.add_argument('out'); p.add_argument('--diff'); p.set_defaults(fn=cmd_screenshot)

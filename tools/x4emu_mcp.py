@@ -126,6 +126,22 @@ def emu_wait_quiet(name: str = 'dev0', seconds: float = 2, timeout: float = 60) 
     """Wait until the panel has been idle (no refresh, BUSY low) for `seconds`."""
     return _x4(name, 'wait-quiet', '--seconds', seconds, '--timeout', timeout, timeout=timeout + 10)
 
+@server.tool()
+def emu_console_send(name: str = 'dev0', text: str = '', newline: bool = True) -> str:
+    """Send text into the guest's USB Serial/JTAG console (for firmware debug consoles)."""
+    args = ['console-send', text] + ([] if newline else ['--no-newline'])
+    return _x4(name, *args)
+
+@server.tool()
+def emu_flash_app(name: str = 'dev0', app: str | None = None, build_dir: str | None = None) -> str:
+    """Swap the app (0x10000) and/or bootloader+partition table from a build dir inside the running
+    instance's flash image, keeping NVS/otadata and the SD card, then relaunch with the same
+    command line. The edit-to-pixels loop: build_firmware -> emu_flash_app -> emu_wait_text."""
+    args = ['flash-app']
+    if app: args += ['--app', app]
+    if build_dir: args += ['--build', build_dir]
+    return _x4(name, *args)
+
 # ---------------------------------------------------------------- input
 @server.tool()
 def emu_press(name: str = 'dev0', button: str = 'right', ms: int = 120, wait: float = 10, quiet: float = 1) -> str:
