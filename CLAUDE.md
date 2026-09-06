@@ -118,4 +118,7 @@ Every write-capable command prints its plan and re-reads the device before writi
 
 ESP32-S3 rev v0.2, 8 MB octal PSRAM, MAC 98:c3:77:be:ea:30. Panel **UC8279** (probe
 `VER=00 0F 68 00 00 FLG=13`, LUT_VER 0x68), which is the emulator's default. SD card 15.7 GB FAT32
-(files copied to `images/device/sd-files/`). See `docs/hardware.md` and `docs/device/`.
+(files copied to `images/device/sd-files/`, including CrossPoint's `.crosspoint/` state). Oracles from
+the device: its home-screen screenshot (`tests/golden/device-home-screenshot-3824.bmp`, reproduced with
+0 pixels different), its panel command stream (`models/fixtures/`), its boot and wake logs
+(`docs/device/`). See `docs/hardware.md` and `docs/device/`.

@@ -331,9 +331,9 @@ commands 0x5A/0x77/0x7A and 0x90/0xAB. Parked for M6.
 | M0 environment, audit, first contact | done | — |
 | M1 it boots (USB Serial/JTAG console) | done | real-device boot log comparison done for CrossPoint (`docs/device/boot-crosspoint-1.6.0.log`) |
 | M2 first pixel (GPIO, SPI2, panel) | done | UC8179 answers are from the SDK doc, not measured (no such unit) |
-| M3 home screen with the device's SD contents | done except the device-screenshot diff | needs the owner to take CrossPoint's screenshot chord on the device and expose the card over USB, then `x4emu screenshot --diff` against the BMP |
+| M3 home screen with the device's SD contents | done | device screenshot reproduced with 0 pixels different (`tests/test_device_screenshot.py`) |
 | M4 touch, I2C bus, battery, RTC | done | GT911 product ID / raw touch frame not read from the real chip (its ID registers are only reachable through a dev build) |
-| M5 frontlight PWM, deep sleep | done | device wake-log comparison pending: the device auto-slept and only its power button wakes it |
+| M5 frontlight PWM, deep sleep | done | wake log compared with the device: same sequence and timings |
 | M6 stock firmware, other panels | stock runs to its idle loop after a power wake; variants tested in the emulator | stock's blocker (SAR ADC / SD-FATFS / an interrupt wait) not identified; UC8179 unverified on hardware |
 
 Device state at the end of the session: app0 = CrossPoint 1.6.0-x4pro with the EpdBus trace
@@ -377,3 +377,23 @@ on UART0 or read them in the emulator (`Power button held 405ms, sleeping` → S
   the UC8279 plane-to-glass mapping (gate offset 120, bit order, row order) shows exactly what the
   firmware drew. `tests/test_screenshot_chord.py` keeps it that way; `x4emu screenshot --diff`
   accepts a device BMP directly.
+
+## 2026-09-06 — M3 closed: device screenshot vs emulator, explained line by line
+
+The owner took CrossPoint's screenshot chord on the device's home screen and exposed the card
+(`docs/device/screenshots/screenshot-3824.bmp`, 480x800 1-bit; landscape rendering and diff mask
+next to it). Against the emulator's home screen (same firmware build, the card's files mirrored
+into `images/sd-device.img`):
+
+| Region | Device | Emulator as booted | Cause | After `x4emu battery --soc 100 --charging on` |
+|---|---|---|---|---|
+| status bar, digits | `100%` | `63%` | CW2017 default SoC in the model vs the real gauge | identical |
+| status bar, icon | charging bolt | plain battery | GPIO21 charger STAT: high on the device (USB power), low in the model by default | identical |
+| everything else (menu, highlight, icons, texts) | — | — | pixel-identical | identical |
+
+Result: 151 pixels (0.039 %) as booted, **0 pixels** once the battery state matches
+(`tests/test_device_screenshot.py`). An earlier golden showed CrossPoint's button legend
+(Down / Up / Select) at the right edge; that golden predated the GT911 model, when
+`gpio.hasTouch()` was false and `UITheme::getMetrics()` kept `buttonHintsHeight`. With the touch
+controller present the emulator hides the legend exactly like the device. The device's
+`.crosspoint/settings.json` and `state.json` are kept in `docs/device/` (reader preferences only).
