@@ -599,3 +599,75 @@ Lessons: when touch, I2C and every 3-second poll stop together, check the tick b
 dispatcher loop with `PS.INTLEVEL=1` and only higher-level interrupts still run; `x4emu mem read` on the
 matrix map (0x600C2000 + 4·source) names the culprit; "instant" completion in a model is wrong whenever
 the driver reads progress back. QMP `pmemsave` takes absolute paths, the HMP wrapper does not.
+
+### Session 4, delegated work (Opus 5 agents under review)
+
+- **CI** (`.github/workflows/ci.yml`, `Makefile` `PYTEST_ARGS`): Ubuntu 24.04, checkout with submodules,
+  the apt list from CLAUDE.md in noble package names, pioarduino's PlatformIO core fork v6.1.19 with the
+  extra pip pins the CrossPoint repo's own CI uses, `git config` for `git am`, the QEMU *tree* cached
+  (source + build, keyed on `QEMU_REF` and the hash of `qemu-patches/*.patch`, no `restore-keys`: a
+  near-miss would restore a `.x4pro-patched` marker hiding a different series), `~/.platformio` cached,
+  caches saved before the tests, `make test PYTEST_ARGS="--basetemp=…"` so screenshots and `.x4emu/*/`
+  logs are uploaded even when red. Verified locally: YAML, `bash -n` on every step, dry runs, the collect
+  script against a fake workspace, package names on packages.ubuntu.com. Not verifiable here: the Linux
+  build itself, runner speed against the tests' 90 s boot timeouts, and goldens from a firmware built
+  without the gitignored `platformio.local.ini` (no EpdBus trace, another version string). Enable
+  Actions on the repository once. Local hazard found on the way: `qemu/.x4pro-patched` is an mtime rule
+  against `qemu/.git`, so a commit in the clone (patch export) makes `make setup` want to re-run `git am`;
+  `touch qemu/.x4pro-patched` after exporting a patch.
+- **`x4emu` package + `--json`** (`x4emu/{cli,commands,qmp,paths,output}.py`, `pyproject.toml`,
+  `docs/x4emu.md`, `tools/x4emu` reduced to a shim that imports the package from the checkout and pins
+  `X4EMU_ROOT`): `pipx install .` gives the `x4emu` console script; the checkout is found from
+  `$X4EMU_ROOT`, else by walking up from the cwd to a directory with `tools/x4emu` and `qemu-patches/`,
+  else the checkout containing the package. `--json` (global, before the subcommand) prints one object
+  per command, errors as `{"error": …}` with the old exit codes; the human output is byte-for-byte the
+  old one (the MCP server and the tests parse it). Verified with a CrossPoint boot through 27 commands in
+  both modes and `make test` 16/16 after the switch.
+- **The stock's light controls** (Opus agent, third of the squad): a pull-down panel over any page, opened
+  by a slow drag from the portrait top edge (`x4emu swipe 5 240 300 240 --ms 600`), closed by a tap on
+  the dimmed page. Brightness in 10 % steps (each moves the lit channel by 10 % of duty), nine colour
+  presets Cool 4 … Warm 4 that mix the cool channel in as warm drops (Balanced = 119/99 ‰), Boost / Full
+  Refresh / Sleep Lock / Light buttons; every change is a hardware fade and lands in NVS `lightBri`,
+  `lightCT`, `lightOn`. `test_stock_light_controls_follow_the_sliders` with goldens `stock-light.png`
+  and `stock-light-adjusted.png`, stable over three runs. Also learnt: a short power press is sleep in
+  the stock ("Get Started" wallpaper, then deep sleep), a double click opens Cloud Download; a tap can be
+  dropped right after a registered one (the test retries a dropped tap). Goal A's acceptance is complete;
+  the device oracle (squad S2) is what remains.
+- **Squads.** The owner asked that the work be organised as coordinator + agent squads from here, with
+  lower models where appropriate; the protocol and the remaining plan cut into squads S1–S7 are
+  `docs/NEXT_PHASE.md` §10.
+
+### Session 4, later: the stock's "stalls" were its clock schedule; SPI transfers take their time
+
+After the squad's suite run showed two new stock failures (a Home screen with an "External font failed
+to load. Using built-in font." toast, and a reading-menu back tap that drew nothing), the panel traces
+of both ended in an update's first half: PTOUT, PTIN, PTL, DTM1 48,000 bytes, then nothing. A DRAM +
+PSRAM dump (`tools/tcbwalk.py --region`, new) showed every task alive: the UI task in its 2-tick event
+loop, `epd_flush` in `ulTaskNotifyTake` with no job, both cores idle, SPI2 in the driver's idle state.
+Two wrong theories cost an hour each — first that the GP-SPI model's instant completion lost a handshake
+(the model now charges the real transfer time, which is right anyway: docs/hardware.md), then that the
+missing external font on the card image derailed a render (the tests now boot a card built from the full
+device files, which is right anyway: `stock_card` fixture). The truth came from a timeline: the "stalled"
+updates completed at 21:13:00 and 21:14:00 exactly. **The stock pre-sends the frame it just showed as the
+next update's old plane right after every refresh, and sends the new plane + DRF when the repaint is due
+— immediately for a UI event, at the next minute for the status-bar clock.** A trace ending in DTM1 is
+its idle state. Consequences: (1) "boot to three refreshes" waited for the first minute tick, 0..60 s,
+which was the whole boot-time variance and the reason taps in tests landed at odd moments;
+`boot_to_home` and `test_stock_boots_to_home…` now take refresh 2 (Home) plus an idle panel; (2) my
+stall hunter's detector (no DRF within 6 s of a DTM1) flagged normal behaviour — its captures are not
+evidence of anything; (3) the reading-menu back tap that "drew nothing" within 20 s is still not
+explained (the tap was read; `tap` did not yet hold until read at the time), and the font toast needs the
+card without the font, so both are covered by the fixture and CLI changes rather than understood.
+GP-SPI timing: `hw/ssi/esp32s3_gpspi.c` keeps USR set and CS asserted for `bits / f_spi` with f_spi from
+the CLOCK register (80 MHz / ((PRE+1)(N+1)) or the system clock), raises TRANS_DONE from a timer;
+`state.spi2` gains `busy` and `transfer_ms` (a stock boot to Home: 307 ms of SPI). QEMU patch 0012.
+First version timed every transfer and broke `test_boot_to_home_and_press_right` deterministically:
+CrossPoint's Arduino SPIClass writes a frame as 940 polled 64-byte chunks, each now waiting for a QEMU
+timer with ~1 ms slack, so a 12 ms frame took 1.5 s and the test's button press fell into that busy
+window (CrossPoint polls no input while writing the panel). Transfers under 1 ms complete at once again.
+`tools/tcbwalk.py --region FILE:BASE` reads task stacks that live in PSRAM (`pmemsave 0x3C6C0000 0x200000`).
+
+**State at the end of session 4:** `make test` 17/17 (12 CrossPoint + 5 stock, 4 min 25 s) on QEMU with
+patches 0001–0012, the stock tests on the full device card. Squad S1 started (two Opus agents:
+`--boot-hold-power`, `nvsedit set-str/erase/redact`); their results, if not merged here, are described in
+`docs/NEXT_PHASE.md` §0.5 for the next session to review. Nothing committed in the main repo (owner's call).

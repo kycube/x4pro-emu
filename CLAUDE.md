@@ -4,8 +4,9 @@ Linux/macOS-hosted emulator for unmodified Xteink X4 Pro firmware images, driven
 buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots to its home screen,
 opens books, pages, sleeps and wakes in it; the stock `xteink_app` 7.2.4 boots to its home screen,
 paints, lights the frontlight, takes touch, and its WiFi start comes up and stops itself (no radio).
-Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`** (stock screens vs
-device photos, world-class checklist).
+Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`**, §0 (resume) and §10 (the
+work runs as squads: the coordinator forms agents per milestone, Opus 5 for well-specified tasks, Fable 5.1
+for symbol-less firmware reading and new models).
 
 ## What is NOT emulated (how it shows up for a firmware developer)
 
@@ -29,7 +30,9 @@ device photos, world-class checklist).
   WiFi start (14 s) ends in `wifi:force witi stop` at +7.5 s and a deinit at +17.5 s without stalling
   the UI (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0` skips it). It fades the frontlight out 60 s
   after the last input and back on the next touch (LEDC hardware fade, walked in guest time; `state.ledc`
-  shows `fading`/`target_permille`). Emulator-only console line:
+  shows `fading`/`target_permille`). Its light panel is a pull-down from the portrait top edge
+  (`x4emu swipe 5 240 300 240 --ms 600`; brightness and colour-temperature steps, Light button; `x4emu
+  light` follows). Emulator-only console line:
   `phy: error: pll_cal exceeds 2ms!!!` (x6, RF PLL lock flag unanswered). RTC IO pads, RMT, I2S,
   APB_SARADC DMA mode, USB OTG stay unmodelled; SAR oneshots and the temperature sensor answer fixed values.
 
@@ -39,7 +42,8 @@ device photos, world-class checklist).
 qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (gitignored; make setup)
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
-tools/         x4emu CLI, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py, appdis.py, tcbwalk.py
+x4emu/         the CLI as a package (pipx install . → `x4emu`; docs/x4emu.md); tools/x4emu is its in-repo shim
+tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py, appdis.py, tcbwalk.py
 tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants)
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
 docs/          hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures)
@@ -59,6 +63,10 @@ make test       # models unit tests + fixture replay + pytest end-to-end (no dev
 
 Homebrew/apt packages: git build-essential ninja meson pkg-config glib pixman libgcrypt libslirp
 libpng mtools dosfstools python3 platformio (`pio`). On macOS also `coreutils` (gtimeout) is handy.
+CI: `.github/workflows/ci.yml` runs exactly `make setup && make build && make test` on Ubuntu 24.04
+(cached QEMU tree and PlatformIO packages; screenshots and `.x4emu/*/` logs uploaded as artifacts).
+The stock tests skip there (the device dump never leaves `images/`); `make test PYTEST_ARGS=…` passes
+extra pytest flags.
 Everything Python runs from `.venv/bin/python` (`-m esptool`, `-m espefuse`, `-m pytest`).
 QEMU: `cd qemu/build && ../configure --target-list=xtensa-softmmu --enable-gcrypt --enable-slirp
 --enable-png --disable-user --disable-capstone --disable-vnc --disable-gtk --disable-sdl
@@ -79,10 +87,13 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 (`--flash images/device/flash-….bin`).
 
 Stock firmware: `tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin` (optionally
-`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0` to skip its 18 s WiFi start), then
-`x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img`. Its boot-preflight
-rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it and Home follows in
-~5 s (`tests/test_stock.py` does exactly this on scratch copies: the stock writes both images).
+`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0` to skip its 18 s WiFi start), a card built
+from the device's files (`tools/mksd.py images/sd-full.img --src images/device/sd-files`: the stock's external
+font and cache plans live there; `images/sd-device.img` lacks them), then `x4emu --name stock run --flash
+images/stock.bin --sd images/sd-full.img`. Its boot-preflight rejects a cold boot and deep-sleeps;
+`x4emu --name stock press power` wakes it and Home (refresh 2) follows in ~5 s. Refresh 3 is the status-bar
+clock, completed at the next minute: the stock pre-sends the old plane after every refresh, so a trace ending
+in DTM1 is idle, and "wait for three refreshes" takes 0..60 s (`tests/test_stock.py` boots scratch copies).
 
 ## MCP server (preferred for agents)
 
@@ -94,13 +105,16 @@ rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it a
 `device_status`, `device_console`, `device_fetch_screenshots`, and the guarded
 `device_flash_crosspoint` / `device_restore_stock` (plan only unless `confirm=true`).
 
-## CLI reference (`tools/x4emu --name NAME …`, default name dev0)
+## CLI reference (`tools/x4emu [--json] --name NAME …`, default name dev0)
+
+`--json` before the subcommand makes every command print one JSON object (errors as `{"error": …}` with
+the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 
 | Command | Effect |
 |---|---|
 | `run --flash F [--sd IMG] [--efuse F] [--panel ssd1677\|uc8179\|uc8279] [--fast-epd] [--gdb] [--trace-epd F] [--trace-i2c F] [--icount N] [--no-usb-host]` | start QEMU detached; `.x4emu/NAME/` holds qmp.sock, console.log (USB Serial/JTAG), uart0.log, qemu.log, pid, run.json |
 | `stop` / `reset` / `status` | quit; system_reset; pid + run state (+ "deep sleep" when paused by the sleep model) |
-| `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2/i2c0 counters, buttons, touch, gt911, battery, rtc, ledc channels, sleep, ana_i2c (analog-master transactions), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), iolog_hot (unmodelled registers polled past the log cap) |
+| `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2 (`busy`, `transfer_ms`)/i2c0 counters, buttons, touch, gt911 (`frames`, `clears`), battery, rtc, ledc channels (`fading`, `target_permille`), sleep, ana_i2c (analog-master transactions), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), iolog_hot (unmodelled registers polled past the log cap) |
 | `log [--follow] [--since N] [--file uart0.log]` / `wait-text TEXT [--timeout S]` | console access; never blocks past the timeout |
 | `screenshot OUT.png [--diff OTHER.png]` | QMP screendump of the panel console (`device=epd`); `--diff` prints % pixels differing and exits 1 when they differ; a 480x800 device BMP is un-rotated automatically |
 | `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |

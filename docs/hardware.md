@@ -110,7 +110,16 @@ reads VER (0x70) once through the same host in half-duplex. Init after three RST
 full window (`90 00 00 03 1F 00 78 02 57 01` = x 0..799, y 120..599), DTM1 48,000 bytes (the old plane,
 always in full), PTOUT, PTIN, PTL of the changed window, DTM2 with that window's bytes only, PTOUT,
 `50 D7`, `E0 02`, `E5 5A`, `03 20`, `E1 02`, sometimes the full PTL again, PTIN, `00 17 4D`, DRF (fast);
-toasts and the status bar use small windows (a clock repaint sends 112 bytes). The frontlight defaults to the warm channel (GPIO9, LEDC) at ~25 %.
+toasts and the status bar use small windows (a clock repaint sends 112 bytes). **The two halves of an
+update are not sent together**: right after every DRF (once BUSY clears) the stock pre-sends the frame
+it just showed as the next update's old plane (PTOUT, PTIN, PTL, DTM1 48,000 bytes), and the new plane +
+DRF follow when a repaint is due — at once for a UI event, or at the next change of the minute for the
+status-bar clock. So the third refresh after a wake (the clock) comes 0..60 s after Home, and a panel
+trace that ends in a DTM1 is the idle state, not a stall (docs/log.md 2026-09-06, session 4). SPI2 runs
+at 10 MHz (CLOCK 0x70c7): a 48,000-byte plane takes 38 ms, a 60,000-byte one 48 ms; the emulator's GP-SPI
+model charges that time for transfers of a millisecond or more (`state.spi2.transfer_ms`, `busy`); shorter
+ones (CrossPoint's 64-byte polled chunks) complete at once, since QEMU timers carry about a millisecond
+of slack that would stretch a 940-chunk frame to over a second. The frontlight defaults to the warm channel (GPIO9, LEDC) at ~25 %.
 
 ### UC8279 / UC8179 (X4 Pro variants)
 
@@ -170,6 +179,18 @@ DUTY_SCALE 1, DUTY_CYCLE 24, DUTY_NUM 255, DUTY_INC 0, DUTY_START 1 (255 steps �
 245 ms), DUTY_CHNG_END interrupt enabled for the fading channel. The emulator walks such a fade in guest
 time (`state.ledc.channels[].fading/target_permille`, `state.ledc.fades`); `DUTY_R` follows it, which
 `ledc_fade_isr` relies on to know the fade reached its target (docs/log.md 2026-09-06, session 4).
+
+The stock's light controls are a **pull-down panel** (`BrightnessLayer`) opened over any page by a slow
+drag from the portrait top edge (`x4emu swipe 5 240 300 240 --ms 600`; it covers landscape columns
+0..369 and dims the page behind; a tap on the dimmed page closes it). Brightness 0..100 % in 10 % steps
+(`−` at landscape (130, 433), `+` at (130, 45)): each step moves the lit channel by 10 % of duty
+(100 % = 249 ‰ warm). Colour temperature is nine presets, Cool 4 … Cool 1, Balanced, Warm 1 … Warm 4
+(`−` (245, 433), `+` (245, 45)); from Warm 4 the cool channel mixes in as warm drops (Warm 3 → 28/175,
+Warm 2 → 59/149, Warm 1 → 87/125, Balanced → 119/99 ‰ cool/warm, roughly constant total). Buttons:
+Boost (307, 419), Full Refresh (307, 299), Sleep Lock (307, 179), Light (307, 60) — Light switches the
+frontlight off and on. Every change is a hardware fade. NVS `user_config/lightBri`, `lightCT` (0..100)
+and `lightOn` follow the panel. A short power press is sleep in the stock (a "Get Started" lock
+wallpaper, then deep sleep), not the light toggle CrossPoint has.
 
 ## I2C bus 39/38 device map
 

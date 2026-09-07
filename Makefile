@@ -46,9 +46,13 @@ models:
 
 build: qemu models firmware
 
+# PYTEST_ARGS: extra pytest flags (empty by default, so `make test` is unchanged).
+# CI passes --basetemp=... so the PNGs the tests write land in a known directory.
+PYTEST_ARGS ?=
+
 test: models
 	$(MAKE) -C models test
-	$(PY) -m pytest -q tests
+	$(PY) -m pytest -q $(PYTEST_ARGS) tests
 
 # One-command edit-to-pixels loop: build the firmware, assemble the image, boot, wait, screenshot.
 NAME ?= dev0

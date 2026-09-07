@@ -1,0 +1,187 @@
+name: CI
+
+# Clean-checkout path of the emulator on Linux: make setup (venv + QEMU clone + qemu-patches/),
+# make build (QEMU, models, CrossPoint x4pro), make test (model unit tests + pytest end-to-end).
+#
+# What runs here vs. on the maintainer's Mac:
+#  - tests/test_stock.py skips: its fixture calls pytest.skip('device dump / SD image not
+#    available') when images/device/flash-2026-09-06-a.bin and images/sd-device.img are missing,
+#    and images/ is gitignored (the dump holds the owner's WiFi credentials, so it never leaves
+#    the desk). Only the CrossPoint cases run here.
+#  - models/fixtures/*.log is gitignored too, so `make -C models test` runs the unit tests and
+#    finds no fixture to replay (its loop skips a non-matching glob).
+#  - the CrossPoint tests need this job's QEMU build and firmware/.pio/build/x4pro/firmware.bin;
+#    tests/conftest.py skips them if either is absent, so a build failure must fail the build
+#    step, not turn into a silently green test run.
+#  - firmware/platformio.local.ini is gitignored, so CI builds [env:x4pro] straight from
+#    platformio.ini (no -DFREEINK_EPD_TRACE=1 and a different CROSSPOINT_VERSION string than the
+#    local build). PlatformIO globs `extra_configs`, so the missing file is not an error.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # pioarduino's PlatformIO core fork, as used by the CrossPoint repo's own CI: the
+      # platform-espressif32 55.x zip pinned in firmware/platformio.ini expects it.
+      PIO_CORE: https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+      PIO_CORE_VERSION: v6.1.19
+      CI_TMP: ${{ github.workspace }}/ci-tmp
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # firmware/ is a submodule and carries freeink-sdk as one of its own.
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # CLAUDE.md's "Build" list, in Ubuntu 24.04 names. glib/pixman are QEMU's hard
+          # requirements; gcrypt/slirp/png back --enable-gcrypt/--enable-slirp/--enable-png in the
+          # Makefile's configure line; mtools + dosfstools are what tools/mksd.py shells out to
+          # (mkfs.vfat --offset needs dosfstools >= 4.2, which noble has).
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            git \
+            ninja-build \
+            meson \
+            pkg-config \
+            python3-venv \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            libgcrypt20-dev \
+            libslirp-dev \
+            libpng-dev \
+            mtools \
+            dosfstools \
+            rsync
+
+      - name: Configure git identity
+        # `make setup` applies qemu-patches/ with `git am`, which refuses to commit without one.
+        run: |
+          git config --global user.name  "x4pro-emu CI"
+          git config --global user.email "ci@x4pro-emu.invalid"
+
+      - name: Resolve the pinned QEMU ref
+        id: qemu
+        run: echo "ref=$(sed -n 's/^QEMU_REF *?*= *//p' Makefile | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore QEMU cache
+        id: qemu-cache
+        uses: actions/cache/restore@v4
+        with:
+          # The clone *and* qemu/build: ninja is incremental, but only against the sources it
+          # recorded; a fresh clone would be newer than every cached object and rebuild the lot.
+          path: qemu
+          # No restore-keys on purpose: a near-miss would restore a tree whose .x4pro-patched
+          # marker hides a *different* patch series from `make setup`, producing a wrong binary.
+          key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
+
+      - name: Re-mark the cached QEMU tree as patched
+        if: steps.qemu-cache.outputs.cache-hit == 'true'
+        # `qemu/.x4pro-patched: qemu/.git` is an mtime rule; anything that touched qemu/.git during
+        # the cached build would make `make setup` re-run `git am` on an already-patched tree.
+        run: touch qemu/.x4pro-patched
+
+      - name: Restore PlatformIO cache
+        id: pio-cache
+        uses: actions/cache/restore@v4
+        with:
+          # Toolchain and framework packages only. The firmware build output is not cached.
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-
+
+      - name: Install PlatformIO core
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -U "$PIO_CORE"
+          # platform-espressif32's builder imports these unconditionally and its own penv
+          # bootstrap does not install them reliably on the hosted runners (same pin as the
+          # CrossPoint repo's CI).
+          python -m pip install -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
+            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
+            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
+            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
+          pio --version
+
+      - name: make setup
+        run: make setup
+
+      - name: make build
+        run: make build
+
+      - name: Save QEMU cache
+        # Saved here rather than at job end so a red test run still leaves a usable QEMU cache.
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: qemu
+          key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
+
+      - name: Save PlatformIO cache
+        if: steps.pio-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-${{ hashFiles('firmware/platformio.ini') }}
+
+      - name: make test
+        # PYTEST_ARGS is empty by default; here it pins pytest's tmp_path under the workspace so
+        # the screenshots the tests write can be collected below.
+        run: make test PYTEST_ARGS="--basetemp=$CI_TMP"
+
+      - name: Collect screenshots and emulator logs
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p ci-artifacts/logs
+          # Screenshots, goldens diffed against them and EPD traces from pytest's basetemp. Copied
+          # by pattern, not wholesale: the same directories hold the 16 MB flash and 64 MB SD
+          # images each test builds.
+          if [ -d "$CI_TMP" ]; then
+            rsync -am \
+              --include='*/' --include='*.png' --include='*.bmp' --include='*.jsonl' \
+              --exclude='*' "$CI_TMP/" ci-artifacts/screenshots/
+          fi
+          # One .x4emu/<instance>/ per test; the console and QEMU logs are what a failure is read
+          # from. Copied out of the dot-directory so upload-artifact does not treat them as hidden.
+          for d in .x4emu/*/; do
+            [ -d "$d" ] || continue
+            n=$(basename "$d")
+            mkdir -p "ci-artifacts/logs/$n"
+            for f in console.log uart0.log qemu.log run.json; do
+              if [ -f "$d$f" ]; then cp "$d$f" "ci-artifacts/logs/$n/$f"; fi
+            done
+          done
+          du -sh ci-artifacts || true
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-and-logs
+          path: ci-artifacts
+          if-no-files-found: warn
+          retention-days: 14

@@ -7,33 +7,57 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 
 ## 0. Resume here (end of session 4, 2026-09-06; session 4's changes are in the working tree — see the end of this section)
 
-1. `cd /Users/mini/x4pro-emu && make test` — 16 cases (12 CrossPoint + 4 stock), about 4 minutes, all green
+**Work is organised as squads from now on: read §10 before starting anything.** The coordinator
+(this session's model tier) forms the next squad from §10.3, delegating to Opus 5 where the brief has
+a mechanical acceptance check and keeping symbol-less firmware reading and new models on Fable 5.1.
+
+1. `cd /Users/mini/x4pro-emu && make test` — 17 cases (12 CrossPoint + 5 stock), about 6 minutes, all green
    at the end of session 4. Needs the built QEMU (`qemu/build/qemu-system-xtensa`, rebuilt in session 4
    with patch 0011), the CrossPoint build (`firmware/.pio/build/x4pro`) and the gitignored `images/`
    (device dump, `sd-device.img`, ROM ELF); all present on this Mac. If `qemu/` were ever missing:
    `make setup && make build` (`qemu/.x4pro-patched` marks an applied series; the tree carries patches
-   0001–0011 as commits on branch `x4pro`).
+   0001–0012 as commits on branch `x4pro`). After exporting a patch, `touch qemu/.x4pro-patched`.
 2. **Session 4 in one line:** the handoff's "14/14 green" was 12/14 here; the cause was an emulator bug,
    not touch — the stock fades its frontlight out 60 s after the last input, the LEDC model finished the
    fade "instantly" without moving the duty, ESP-IDF's fade ISR re-armed it forever and core 0 never left
    the level-1 dispatcher (tick dead, every periodic task frozen). Fixed in patch 0011 (fades walk the duty
    in guest time). Full story and the debugging path: `docs/log.md`, last entry. Tool that found it:
-   `tools/tcbwalk.py` (FreeRTOS task walk over a `pmemsave` dump; `--frame PC,A0,SP` for a live CPU).
+   `tools/tcbwalk.py` (FreeRTOS task walk over a `pmemsave` dump; `--frame PC,A0,SP` for a live CPU;
+   `--region psram.bin:0x3C6C0000` for task stacks in PSRAM).
+   **Two facts every stock test must respect** (found the hard way, see the log's last entry): the stock
+   pre-sends the old plane after every refresh and completes the status-bar clock refresh at the next
+   minute, so "Home" is refresh 2 + an idle panel and a trace ending in DTM1 is idle, not stuck; and the
+   stock tests boot a card built from `images/device/sd-files` (its external font and cache boot plans),
+   never the bare `sd-device.img`. Patch 0012 makes GP-SPI transfers take their real time (10 MHz for the
+   stock's planes).
 3. Stock screens (§3.2 step 4) are walked by `tests/test_stock.py::test_stock_screens_walk` with goldens
-   `tests/golden/stock-*.png`: nav menu, All Files, EPUB page 1/2, reading menu, Settings. **Open:** the
-   brightness/warmth UI is not on the Settings page and neither a swipe nor the Right button scrolls it;
-   try the reading menu's "More" (landscape ≈ (770, 60) with the menu open), a status-bar pull-down, and the
-   power-button double click — `x4emu light` must follow. The stock ignores the GT911 Home pad frames
-   (CrossPoint's `x4emu home` does nothing there; it may want the key value byte at 0x8177).
+   `tests/golden/stock-*.png`: nav menu, All Files, EPUB page 1/2, reading menu, Settings. The light
+   controls are a pull-down panel from the portrait top edge (`x4emu swipe 5 240 300 240 --ms 600`;
+   coordinates in `docs/hardware.md` "Frontlight" and in `test_stock_light_controls_follow_the_sliders`,
+   which proves `x4emu light` and NVS follow every step). **Goal A's acceptance is complete.** Still
+   open: the stock ignores the GT911 Home pad frames (it may want the key value byte at 0x8177), and its
+   `DisplaySettings` page has not been reached.
 4. §3.2 step 5 has a new option: the stock has **Screen Capture** (Settings → Developer) writing
    `/sdcard/screenshots/screenshot_%s.xic`; decode `.xic` (start with `strings`/the `XTCache` files, or
    compare a capture's size with 800×480/8) and the device oracle needs no photo. The device was not
    touched in session 4; §1's device state still holds.
-5. Session 4's edits are uncommitted in the main repo (the QEMU clone has commit 5422572 on `x4pro`, and
-   `qemu-patches/0011-…` is exported): `qemu-patches/0011`, `tools/x4emu` (`home --ms 250 --quiet`),
-   `tools/tcbwalk.py`, `tests/test_stock.py` (+3 tests, EPUB on the scratch card, `golden_check`),
-   `tests/test_device_screenshot.py`, `tests/test_touch_reader.py`, six goldens, `docs/log.md`,
-   `docs/hardware.md`, `docs/audit.md`, `CLAUDE.md`, this file. Review `git status` and commit.
+5. **Squad S1 was started at the end of session 4** (two Opus agents, see §10): (a) `x4emu run
+   --boot-hold-power MS` (cold boot with the power button held so the stock skips its deep-sleep detour;
+   owner of `x4emu/commands.py`, `x4emu/cli.py`, `docs/x4emu.md`, the boot path in `tests/test_stock.py`);
+   (b) `tools/nvsedit.py set-str / erase / redact` with `tests/test_nvsedit.py` (a credential-free stock
+   image). If their files show in `git status`, review the diffs, run `make test`, and merge their reports
+   into `docs/log.md` before anything else. Still open in S1: the RTC IO stored-value overlay (a QEMU
+   change: never rebuild while a suite runs), the PLL lock flag 0x62/0x0c, the GT911 key byte for the
+   stock's Home pad. Then S2 (§10.3).
+6. Commit `c3e908a` (owner, 20:18) holds the first half of session 4: patch 0011 (LEDC fades), `tcbwalk.py`,
+   the tap/Home changes in `tools/x4emu`, the stock screen tests and their six goldens, the docs to that
+   point. **Uncommitted** (the QEMU clone has commit cdc5268 on `x4pro`, `qemu-patches/0012` is exported):
+   patch 0012 (GP-SPI timing) and the renumbered series, the `x4emu/` package + `pyproject.toml` +
+   `docs/x4emu.md` (`tools/x4emu` is now a shim), `.github/workflows/ci.yml` + `Makefile`, `tcbwalk.py
+   --region`, `tests/test_stock.py` (the `stock_card` fixture on the full device card, Home = refresh 2,
+   the auto-dim and light tests, two light goldens), `tools/nvsedit.py` and `tests/test_nvsedit.py` if the
+   S1 agent finished, `docs/log.md`, `docs/hardware.md`, `docs/audit.md`, `CLAUDE.md`, this file.
+   Review `git status` and commit.
 
 ## 1. Where things stand (2026-09-06)
 
@@ -132,8 +156,9 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
    0x60040000) stays a logger until a firmware uses continuous mode.
 Next, in the order that serves the owner's goal (a usable stock in the emulator) best:
 
-4. **Stock screens beyond Home** — done for menu / All Files / reader / reading menu / Settings
-   (session 4, goldens + `test_stock_screens_walk`); **open: the brightness/warmth UI** (see §0.3). Menu (`x4emu tap 88 38` repaints it; find its items by
+4. ~~**Stock screens beyond Home**~~ **done** (session 4: menu / All Files / reader / reading menu /
+   Settings in `test_stock_screens_walk`; the light pull-down with brightness, colour temperature and
+   the Light button in `test_stock_light_controls_follow_the_sliders`, `x4emu light` and NVS follow). Menu (`x4emu tap 88 38` repaints it; find its items by
    tapping and diffing screenshots), All Files (the device card holds no books: build an SD image with
    an EPUB, `tests/mkepub.py` + `tools/mksd.py --src`), Settings (brightness/warmth sliders → `x4emu
    light` must follow; that is the open acceptance item), one reader page. One golden per screen under
@@ -162,10 +187,11 @@ Next, in the order that serves the owner's goal (a usable stock in the emulator)
     the plan to advance the virtual clock by the timer wake if it ever does.
 11. **APB_SARADC continuous mode** (0x60040000, DMA) only when a firmware uses it (the logger will show).
 
-Acceptance for Goal A (updated): Home renders ✓; touch navigates it ✓ (menu); WiFi fails fast instead
-of hanging ✓ (`force witi stop` +7.5 s, deinit +17.5 s, UI alive; `test_stock_wifi_fails_fast`); a
-pytest boots the stock and walks one screen ✓ (`tests/test_stock.py`). Open: the frontlight duty
-follows its slider (step 4, Settings → `x4emu light`); a stock screen matches a device oracle (step 5).
+Acceptance for Goal A (updated, session 4): Home renders ✓; touch navigates it ✓ (menu, All Files,
+reader, reading menu, Settings); WiFi fails fast instead of hanging ✓ (`test_stock_wifi_fails_fast`);
+pytests boot the stock and walk its screens ✓; the frontlight duty follows its sliders ✓
+(`test_stock_light_controls_follow_the_sliders`); the 60 s auto-dim no longer freezes the emulator ✓.
+Open: a stock screen matches a device oracle (step 5 / squad S2).
 
 ## 4. Goal B — fidelity ("world class" model quality)
 
@@ -195,14 +221,16 @@ follows its slider (step 4, Settings → `x4emu light`); a stock screen matches 
 
 ## 5. Goal C — developer experience
 
-- `x4emu` as a package (`pipx install .`), `--json` on every command, `x4emu shell` REPL,
-  `x4emu record/replay`, `x4emu watch` (live PNG refresh on each panel update).
+- ~~`x4emu` as a package (`pipx install .`), `--json` on every command~~ done (session 4: `x4emu/` package,
+  `tools/x4emu` shim, `docs/x4emu.md`); still open: `x4emu shell` REPL, `x4emu record/replay`,
+  `x4emu watch` (live PNG refresh on each panel update), and letting `tools/x4emu_mcp.py` import the
+  package instead of shelling out to the shim.
 - Optional SDL window (`configure --enable-sdl`) and a documented `-display sdl` mode; keep
   headless as the default.
-- CI: GitHub Actions on Ubuntu 24.04 that builds QEMU (cached), builds CrossPoint with pioarduino
-  (cached `~/.platformio`), runs `make test`, and uploads screenshots as artifacts. The clean-checkout
-  path (`make setup && make build && make test`) has only been exercised on macOS; verify on Linux
-  (the `Makefile` already uses `sysctl`/`nproc` fallbacks; `gtimeout` is macOS-only sugar).
+- CI: `.github/workflows/ci.yml` exists (session 4: cached QEMU tree + `~/.platformio`, `make test`
+  with `PYTEST_ARGS`, artifacts) but has **never run**: enable Actions, push, and fix what the first
+  Linux run shows (candidates: apt names, pioarduino core pins, the 90 s boot timeouts on a slow runner,
+  goldens from a firmware built without `platformio.local.ini`). Only then tick the checklist item.
 - Docs site or a `docs/README.md` index; keep `CLAUDE.md` under two screens.
 - Golden-image tests for every screen we can reach, each paired with a device oracle where one
   exists (the chord in CrossPoint; a photo for stock until it has a screenshot function).
@@ -287,7 +315,7 @@ follows its slider (step 4, Settings → `x4emu light`); a stock screen matches 
 - [ ] Deterministic replay of an input script yields identical screenshots run to run.
 - [ ] Waveform-aware grayscale validated against device photos.
 - [ ] `make setup && make build && make test` verified on Ubuntu 24.04 in CI and on macOS.
-- [ ] `x4emu` installable, JSON everywhere, documented in one page.
+- [x] `x4emu` installable, JSON everywhere, documented in one page (`docs/x4emu.md`, session 4).
 - [ ] Generic S3 models proposed upstream; board file and panel cores stay here.
 - [ ] `docs/audit.md`/`hardware.md` still the single source of truth, every claim with evidence.
 
@@ -345,3 +373,73 @@ initialises (PHY calibration against the analog-master, SENS and radio-stub mode
 way ESP-IDF fails without air, so a firmware's WiFi path runs and errors instead of hanging; SAR ADC
 oneshots and the temperature sensor with fixed values. Not there: a radio, BLE (untested), USB OTG,
 APB_SARADC DMA mode, RMT, I2S, touch sensor pads, ULP.
+
+## 10. How the work is run from here: squads
+
+The owner's instruction (session 4): the session runs on Fable 5.1 as the **coordinator** and forms
+**squads** of agents per milestone, delegating to lower models where the coordinator deems it
+appropriate. Session 4 ran the first squad (CI, packaging, brightness) this way; the protocol below is
+what worked, and the remaining plan is cut into squads in the order to run them.
+
+### 10.1 Model tiers (who does what)
+
+- **Coordinator, Fable 5.1 (this session).** Reads `CLAUDE.md`, §0 and the last `docs/log.md` entry,
+  picks the next squad, writes each agent's brief, reviews every diff, runs the final `make test`,
+  writes the log entry and updates this file and `CLAUDE.md`. Keeps for itself, or gives to a Fable
+  subagent: anything that reads the stock app without symbols (`.xic`, the GT911 key byte, the PLL
+  flag, any "spins forever"), any new peripheral model whose behaviour must be inferred (APB_SARADC
+  DMA, RMT, I2S, USB OTG), Espressif-model bugs, waveform grayscale, the debug-console protocol and
+  parity-harness design, and any task whose acceptance test does not yet exist.
+- **Opus 5 agents.** Well-specified work with a mechanical acceptance check: CI iteration, packaging
+  and CLI features (`record/replay`, `watch`, `shell`, JSON shapes), tests and goldens for behaviour the
+  coordinator has already seen, UI hunts with a coordinate map, `nvsedit` features, stored-value
+  register overlays (RTC IO), timing tables from device logs, docs pages, upstream patch preparation.
+  Session 4 evidence: three Opus agents delivered CI, the package with `--json` (16/16 after the
+  switch) and the brightness search in parallel, each within its brief.
+- **Sonnet / Haiku.** Not for model or firmware work in this repository; at most doc reformatting.
+
+### 10.2 Protocol (what made the first squad work)
+
+1. **Disjoint file ownership.** Each brief names the files the agent may create or edit; two agents
+   never share a file. Shared docs (`CLAUDE.md`, `docs/log.md`, `docs/NEXT_PHASE.md`, `hardware.md`,
+   `audit.md`) belong to the coordinator: agents put findings in their final report or in a new page
+   of their own (`docs/x4emu.md` was one), and the coordinator merges.
+2. **Shared tree, not worktrees.** `qemu/`, `images/`, `.venv/` and the firmware build are gitignored
+   build products; a git worktree would not have them. Agents run side by side in the checkout with
+   unique instance-name prefixes (`x4emu --name <prefix>…`) and their own scratch subdirectory.
+3. **Never:** `git commit`/`push`, `tools/device.py`, writes under `images/`, edits to another agent's
+   files. A tool another agent is rewriting (session 4: `tools/x4emu`) must stay working at every
+   moment; the rewriter develops beside it and switches only after its own verification.
+4. **Every brief carries:** the files to read first; the facts the coordinator already knows
+   (coordinates, register semantics, what was tried); deliverables; the verification the agent must run
+   itself (a boot, a test run twice, `make test` if it touched shared code); a time box; the report
+   format (under 350 words: what was done, what was verified, what could not be, what was left out).
+5. **The coordinator closes the squad:** reviews diffs, spot-checks a claim or two (session 4: the JSON
+   error path, the CI marker hazard), runs `make test` with everything together, writes the log entry.
+
+Brief template (copy, fill the brackets):
+```
+You are working in /Users/mini/x4pro-emu (paths must not contain spaces; Python is .venv/bin/python).
+Read CLAUDE.md, then [files]. Facts you can rely on: [coordinates, register semantics, prior attempts].
+TASK: [one paragraph]. Deliverables: [numbered, with file names]. Verification (required): [commands,
+"run the test twice", "make test at the end"]. Constraints: edit only [files]; instance names start
+with "[prefix]"; scratch under [dir]; no commits, no tools/device.py, nothing under images/, do not
+edit CLAUDE.md or docs/*.md except [own page]. Time box: [N] minutes. Final report under 350 words:
+[what to include].
+```
+
+### 10.3 The remaining plan as squads (run in this order)
+
+| Squad | Agents (model) | Acceptance |
+|---|---|---|
+| **S1 stock-close** | Opus: `x4emu run --boot-hold-power MS` (§3.2.7) + `boot_to_home` uses it · Opus: `nvsedit.py set-str/erase` and a credential-free stock image recipe (§3.2.8) · Opus: RTC IO stored-value overlay (§3.2.9) · **Fable**: PLL lock flag 0x62/0x0c (§3.2.6) and the GT911 key byte the stock wants for the Home pad | `make test` green; `state.iolog_hot` has no `rtcio` entries; the six `pll_cal` lines are gone; a stock image without SSID/password boots to Home |
+| **S2 oracle** | **Fable**: decode the stock's `.xic` Screen Capture (Developer settings) from a capture made in the emulator · Opus (after S2-Fable): `tools/xic2png.py` + a test that a capture equals the panel · owner: photos only if `.xic` fails | one stock screen diffed against a device capture with every difference explained |
+| **S3 ci-green** | Opus: iterate on the first Linux Actions run until green (apt names, pio pins, runner timeouts, goldens without `platformio.local.ini`) | the workflow badge is green on `main`; checklist item ticked |
+| **S4 determinism** | Opus: `x4emu run --deterministic` (icount + fixed RTC seed, no host time) · Opus: `x4emu record/replay` of timestamped input scripts · Opus: `x4emu watch` and `x4emu shell` | two replays of one script yield identical screenshots, asserted by a test |
+| **S5 fidelity** | **Fable**: waveform-level grayscale design and core (§4) · Opus: core tests for edge windows and data-entry modes 0..7 · Opus: per-opcode BUSY timing table from `docs/device/*.log` · Opus: `dwc_sdmmc` DEBUG-to-trace patch | grayscale validated against a device photo of AA text; `qemu.log` free of `dwc_sdmmc_` lines |
+| **S6 custom-firmware** (§9 D1–D4) | **Fable**: the `X4>` console protocol design in the custom firmware · Opus: `x4emu console-expect`, `tools/x4target.py`, the `--target emu\|device` pytest · **Fable**: the parity harness and its "explain every difference" assertions · Opus: `--speed` / `wait-guest-ms` (D3) | one script runs on emulator and device and the diff is 0 or explained |
+| **S7 upstream** | Opus: split the generic S3 models (GPIO, GP-SPI, I2C, LEDC, USJ, cache DONE, intmatrix/GDMA/SPI fixes) into espressif/qemu-style patches with tests and cover letters · **Fable**: review before submission | patches apply to `esp-develop` HEAD and pass `make test` here |
+
+Run one squad per coordinator turn; two if their files are disjoint (S3 pairs with anything). After
+each squad: `make test`, a dated `docs/log.md` entry, §0 of this file updated, and a commit left for
+the owner to review unless the owner asked for commits.

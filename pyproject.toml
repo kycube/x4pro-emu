@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x4emu"
+version = "0.1.0"
+description = "Drive the Xteink X4 Pro emulator (QEMU, ESP32-S3) from a shell: buttons, touch, console, panel screenshots, JSON state"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["pillow"]        # screenshot --diff only
+
+[project.scripts]
+x4emu = "x4emu.cli:main"
+
+[tool.setuptools]
+# Only the CLI package: the repository also holds qemu/, firmware/, models/, tests/ and tools/,
+# none of which are importable modules.
+packages = ["x4emu"]

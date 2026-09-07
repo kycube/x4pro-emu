@@ -3,7 +3,7 @@
 
   x4emu --name N qmp '{"execute":"pmemsave","arguments":{"val":1070170112,"size":491520,"filename":"/abs/dram.bin"}}'
   tools/tcbwalk.py dram.bin [--base 0x3FC88000] [--rom images/rom/esp32s3_rev0_rom.nm]
-                   [--app images/device/stock-app0-7.2.4.bin] [--frames 24]
+                   [--app images/device/stock-app0-7.2.4.bin] [--frames 24] [--region psram.bin:0x3C6C0000]
 
 TCBs are found by their two list items owning themselves (pvOwner at TCB+16 and TCB+36 == TCB); the
 layout is ESP-IDF's FreeRTOS: pxTopOfStack +0, xStateListItem +4, xEventListItem +24 (value, next,
@@ -27,12 +27,18 @@ def main():
     ap.add_argument('--rom'); ap.add_argument('--app'); ap.add_argument('--frames', type=int, default=24)
     ap.add_argument('--task', help='only this task name')
     ap.add_argument('--frame', help='PC,A0,SP of a live CPU (info registers): backtrace that frame through the dump instead of the tasks')
+    ap.add_argument('--region', action='append', default=[], help='FILE:BASE of another dump (e.g. PSRAM task stacks: pmemsave 0x3C6C0000 0x200000), repeatable')
     a = ap.parse_args()
     d = open(a.dump, 'rb').read(); base = a.base; end = base + len(d)
+    regions = [(base, d)]
+    for r in a.region:
+        f, b = r.rsplit(':', 1)
+        regions.append((int(b, 0), open(f, 'rb').read()))
 
     def u32(addr):
-        if base <= addr <= end - 4:
-            return struct.unpack_from('<I', d, addr - base)[0]
+        for rb, rd in regions:
+            if rb <= addr <= rb + len(rd) - 4:
+                return struct.unpack_from('<I', rd, addr - rb)[0]
         return None
 
     # symbols

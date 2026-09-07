@@ -1,0 +1,202 @@
+From cdc52682a886d7cebf8d06b440ecf1ed2cd3b999 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 21:20:15 -0500
+Subject: [PATCH 12/12] xteink-x4pro: GP-SPI transfers take their time at the
+ CLOCK register's rate
+
+A transfer used to complete inside the CMD.USR write. Now the bytes still reach
+the SSI bus at once, but USR stays set and CS asserted until a timer fires after
+the bits' duration at 80 MHz / ((CLKDIV_PRE+1)(CLKCNT_N+1)) (or the system
+clock), and only then TRANS_DONE is raised. The stock Xteink app clocks its
+48,000-byte planes at 10 MHz, 38 ms each; the board state reports busy and the
+accumulated transfer time.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/ssi/esp32s3_gpspi.c         | 63 ++++++++++++++++++++++++++++++----
+ hw/xtensa/xteink_x4pro.c       |  5 +--
+ include/hw/ssi/esp32s3_gpspi.h |  6 ++++
+ 3 files changed, 65 insertions(+), 9 deletions(-)
+
+diff --git a/hw/ssi/esp32s3_gpspi.c b/hw/ssi/esp32s3_gpspi.c
+index a5ef6f0..c6ed20d 100644
+--- a/hw/ssi/esp32s3_gpspi.c
++++ b/hw/ssi/esp32s3_gpspi.c
+@@ -7,8 +7,13 @@
+  * out onto the SSIBus and, if USR_MISO is set, store what comes back into W0..),
+  * and the GDMA one ESP-IDF's spi_master driver uses (DMA_CONF.DMA_TX_ENA /
+  * DMA_RX_ENA: the bytes come from / go to the GDMA channel bound to this host
+- * through its descriptor lists). Both end with USR cleared and TRANS_DONE raised.
+- * Clock, timing and mode registers are stored but ignored. The peripheral's own
++ * through its descriptor lists). The bytes reach the SSIBus at once, but the transfer
++ * takes its real time when that is a millisecond or more: USR stays set and CS asserted until a
++ * timer fires after the bits' duration at the CLOCK register's rate (80 MHz / ((PRE+1)(N+1)), or
++ * the system clock), and only then TRANS_DONE is raised; shorter transfers complete at once. Firmware orders itself around that time (the stock
++ * Xteink app hands a 48 KB plane to the panel task and races its next frame against the
++ * 38 ms it takes at 10 MHz; an instant completion lost that handshake now and then:
++ * docs/log.md 2026-09-06, session 4). Mode registers are stored but ignored. The peripheral's own
+  * CS outputs are provided but the X4 Pro firmware drives its chip select with a
+  * plain GPIO.
+  *
+@@ -17,6 +22,7 @@
+ #include "qemu/osdep.h"
+ #include "qemu/log.h"
+ #include "qemu/module.h"
++#include "qemu/timer.h"
+ #include "qapi/error.h"
+ #include "hw/hw.h"
+ #include "hw/irq.h"
+@@ -80,12 +86,38 @@ static void gpspi_cs_set(ESP32S3GpSpiState *s, int active)
+     }
+ }
+ 
++/* SPI bit rate from CLOCK: CLK_EQU_SYSCLK (bit 31) or 80 MHz / ((CLKDIV_PRE+1) * (CLKCNT_N+1)) */
++static uint64_t gpspi_clock_hz(ESP32S3GpSpiState *s)
++{
++    if (s->clock & (1u << 31)) {
++        return 80000000;
++    }
++    uint32_t pre = (s->clock >> 18) & 0xF, n = (s->clock >> 12) & 0x3F;
++    return 80000000 / ((pre + 1) * (n + 1));
++}
++
++static void gpspi_done_cb(void *opaque)
++{
++    ESP32S3GpSpiState *s = opaque;
++    gpspi_cs_set(s, 0);
++    s->busy = false;
++    s->transfers++;
++    s->dma_int_raw |= INT_TRANS_DONE;
++    gpspi_update_irq(s);
++}
++
+ static void gpspi_do_user_transfer(ESP32S3GpSpiState *s)
+ {
++    uint64_t bits_total = 0;
++    if (s->busy) {
++        qemu_log_mask(LOG_GUEST_ERROR, "esp32s3.gpspi: CMD.USR while a transfer is in flight (ignored)\n");
++        return;
++    }
+     gpspi_cs_set(s, 1);
+     if (s->user & USER_COMMAND) {
+         int bits = ((s->user2 >> 28) & 0xF) + 1;
+         uint32_t cmd = s->user2 & 0xFFFF;
++        bits_total += bits;
+         for (int b = 0; b < (bits + 7) / 8; b++) {
+             ssi_transfer(s->spi, (cmd >> (8 * b)) & 0xFF);   /* LSB-first byte order as the hw sends */
+             s->bytes_out++;
+@@ -95,16 +127,21 @@ static void gpspi_do_user_transfer(ESP32S3GpSpiState *s)
+         int bits = ((s->user1 >> 27) & 0x1F) + 1;
+         int bytes = (bits + 7) / 8;
+         uint32_t addr = s->addr;
++        bits_total += bits;
+         for (int b = bytes - 1; b >= 0; b--) {
+             ssi_transfer(s->spi, (addr >> (8 * b)) & 0xFF);
+             s->bytes_out++;
+         }
+     }
++    if (s->user & USER_DUMMY) {
++        bits_total += (s->user1 & 0xFF) + 1;
++    }
+     bool mosi = s->user & USER_MOSI;
+     bool miso = s->user & USER_MISO;
+     if (mosi || miso) {
+         int bits = (s->ms_dlen & 0x3FFFF) + 1;
+         int bytes = (bits + 7) / 8;
++        bits_total += bits;
+         bool dma_tx = mosi && (s->dma_conf & DMA_CONF_TX_ENA) && s->gdma;
+         bool dma_rx = miso && (s->dma_conf & DMA_CONF_RX_ENA) && s->gdma;
+         uint8_t *fifo = (uint8_t *)s->data_buf;
+@@ -153,10 +190,19 @@ static void gpspi_do_user_transfer(ESP32S3GpSpiState *s)
+         g_free(txbuf);
+         g_free(rxbuf);
+     }
+-    gpspi_cs_set(s, 0);
+-    s->transfers++;
+-    s->dma_int_raw |= INT_TRANS_DONE;
+-    gpspi_update_irq(s);
++    /* The transfer completes after its real duration: USR reads 1 and CS stays low until then.
++     * Below one millisecond it completes at once instead: QEMU timers fire with about a millisecond
++     * of slack, which would stretch the Arduino SPIClass's 64-byte polled chunks (CrossPoint writes a
++     * 60,000-byte frame as 940 of them) from 12 ms to over a second; the stock's 48,000-byte DMA
++     * planes (38 ms at 10 MHz) are what the timing is for. */
++    uint64_t ns = bits_total * 1000000000ULL / gpspi_clock_hz(s);
++    s->transfer_ns += ns;
++    if (ns < 1000000) {
++        gpspi_done_cb(s);
++        return;
++    }
++    s->busy = true;
++    timer_mod_ns(&s->done_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (int64_t)ns);
+ }
+ 
+ static uint64_t gpspi_read(void *opaque, hwaddr addr, unsigned int size)
+@@ -164,7 +210,7 @@ static uint64_t gpspi_read(void *opaque, hwaddr addr, unsigned int size)
+     ESP32S3GpSpiState *s = ESP32S3_GPSPI(opaque);
+     uint32_t r = 0;
+     switch (addr) {
+-    case R_CMD:        r = 0; break;                 /* USR and UPDATE self-clear at once */
++    case R_CMD:        r = s->busy ? CMD_USR : 0; break;   /* USR while a transfer is in flight; UPDATE self-clears at once */
+     case R_ADDR:       r = s->addr; break;
+     case R_CTRL:       r = s->ctrl; break;
+     case R_CLOCK:      r = s->clock; break;
+@@ -244,6 +290,8 @@ static const MemoryRegionOps gpspi_ops = {
+ static void gpspi_reset_hold(Object *obj, ResetType type)
+ {
+     ESP32S3GpSpiState *s = ESP32S3_GPSPI(obj);
++    timer_del(&s->done_timer);
++    s->busy = false;
+     s->addr = 0;
+     s->ctrl = 0x3C0000;
+     s->clock = 0x80003043;
+@@ -265,6 +313,7 @@ static void gpspi_reset_hold(Object *obj, ResetType type)
+ static void gpspi_init(Object *obj)
+ {
+     ESP32S3GpSpiState *s = ESP32S3_GPSPI(obj);
++    timer_init_ns(&s->done_timer, QEMU_CLOCK_VIRTUAL, gpspi_done_cb, s);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+     memory_region_init_io(&s->iomem, obj, &gpspi_ops, s, TYPE_ESP32S3_GPSPI, 0x1000);
+     sysbus_init_mmio(sbd, &s->iomem);
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 67c7f10..3d34c3c 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -423,8 +423,9 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+     }
+     if (b->spi2) {
+         g_string_append_printf(j, "\"spi2\":{\"transfers\":%" PRIu64 ",\"bytes\":%" PRIu64
+-            ",\"dma_tx_bytes\":%" PRIu64 ",\"dma_rx_bytes\":%" PRIu64 ",\"dma_errors\":%" PRIu64 "},",
+-            b->spi2->transfers, b->spi2->bytes_out, b->spi2->dma_tx_bytes, b->spi2->dma_rx_bytes, b->spi2->dma_errors);
++            ",\"dma_tx_bytes\":%" PRIu64 ",\"dma_rx_bytes\":%" PRIu64 ",\"dma_errors\":%" PRIu64 ",\"busy\":%s,\"transfer_ms\":%" PRIu64 "},",
++            b->spi2->transfers, b->spi2->bytes_out, b->spi2->dma_tx_bytes, b->spi2->dma_rx_bytes, b->spi2->dma_errors,
++            b->spi2->busy ? "true" : "false", b->spi2->transfer_ns / 1000000);
+     }
+     if (b->input) {
+         g_string_append_printf(j, "\"buttons\":{\"left\":%s,\"right\":%s,\"power\":%s},\"charging\":%s,",
+diff --git a/include/hw/ssi/esp32s3_gpspi.h b/include/hw/ssi/esp32s3_gpspi.h
+index 8553aaa..6d00495 100644
+--- a/include/hw/ssi/esp32s3_gpspi.h
++++ b/include/hw/ssi/esp32s3_gpspi.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include "hw/sysbus.h"
++#include "qemu/timer.h"
+ #include "hw/ssi/ssi.h"
+ #include "hw/dma/esp_gdma.h"
+ 
+@@ -42,6 +43,11 @@ struct ESP32S3GpSpiState {
+     uint32_t clk_gate;
+     uint32_t data_buf[ESP32S3_GPSPI_BUF_WORDS];
+ 
++    /* a transfer in flight: USR reads 1, CS stays asserted, TRANS_DONE comes when done_timer
++     * fires after the bits' time at the CLOCK register's rate (the data already reached the bus) */
++    QEMUTimer done_timer;
++    bool busy;
++    uint64_t transfer_ns;    /* total time transfers took, for state/stats */
+     uint64_t transfers;
+     uint64_t bytes_out;
+     uint64_t dma_tx_bytes;
+-- 
+2.50.1 (Apple Git-155)
+

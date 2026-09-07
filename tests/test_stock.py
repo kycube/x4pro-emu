@@ -1,12 +1,18 @@
 """Stock xteink_app 7.2.4 (ESP-IDF 6.0.1) on the emulator.
 
 Needs the raw 16 MB device dump (images/device/flash-2026-09-06-a.bin, gitignored: it holds the
-owner's WiFi credentials) and the device's SD contents (images/sd-device.img). Skips otherwise.
+owner's WiFi credentials) and the device card's files (images/device/sd-files: the stock's external
+system font, cache boot plans and state; the `stock_card` fixture builds a card image from them once
+per session). Skips otherwise.
 The fixture boots a scratch copy of the dump; `net_en` selects the NVS user_config/net_en value
 (tools/nvsedit.py): 0 keeps the stock off the radio, 1 (the device's setting) starts WiFi at 14 s.
 
-What the stock does here (docs/log.md 2026-09-06): boot-preflight rejects a plain power-on and deep
-sleeps; a power press wakes it; it mounts the card, loads NVS, initialises the UC8279 through
+What the stock does here (docs/log.md 2026-09-06): boot-preflight rejects a plain power-on (it wants
+the power button held for its "effective" 600 ms when it samples GPIO3 at ~530 ms) and deep sleeps.
+`x4emu run --boot-hold-power` holds the button from reset instead, so the preflight accepts the cold
+boot (`hold=600ms decision=0 reason=11`) and the deep-sleep/wake detour is gone; a power press after
+the deep sleep is the other way in (`test_stock_boots_to_home_lights_and_reacts_to_touch` no longer
+takes it either). It then mounts the card, loads NVS, initialises the UC8279 through
 ESP-IDF's interrupt+GDMA spi_master driver, paints its home screen ("Bookshelf") and lights the warm
 frontlight channel. With WiFi enabled the PHY calibrates against the analog-master I2C block, the SENS
 temperature sensor and the radio register stub, the driver prints "wifi:mode : sta" as on the device,
@@ -26,7 +32,6 @@ import json, os, shutil, subprocess, sys, time, pytest
 from conftest import x4emu, ROOT, PY
 
 DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')
-SD = os.path.join(ROOT, 'images', 'sd-device.img')
 GOLDEN = os.path.join(ROOT, 'tests', 'golden', 'stock-home.png')
 STATUS_BAR_COLS = 60     # landscape columns 0..59 hold the portrait status bar (clock, battery)
 PANEL_W = 800
@@ -46,12 +51,33 @@ def wait_for(fn, timeout, what):
     raise AssertionError(f'timeout waiting for {what}')
 
 
+SD_FILES = os.path.join(ROOT, 'images', 'device', 'sd-files')
+
+
+@pytest.fixture(scope='session')
+def stock_card(tmp_path_factory):
+    """The device's card as `tools/mksd.py` builds it from images/device/sd-files (its XTData system
+    font, XTCache boot plans, .crosspoint state) plus tests/mkepub.py's book at the root: 256 MiB,
+    built once per session; every test boots its own copy (the stock writes to the card)."""
+    if not os.path.isdir(SD_FILES):
+        pytest.skip('images/device/sd-files not available')
+    d = tmp_path_factory.mktemp('card')
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mkepub import make_epub
+    make_epub(str(d / 'Test Book.epub'))
+    img = d / 'sd-device-full.img'
+    subprocess.run([PY, os.path.join(ROOT, 'tools', 'mksd.py'), str(img), '--size', '256M', '--src', SD_FILES], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['mcopy', '-i', f'{img}@@1048576', '-o', str(d / 'Test Book.epub'), '::/'], check=True)
+    return str(img)
+
+
 @pytest.fixture
-def stock(tmp_path, request):
-    """A scratch copy of the dump (user_config/net_en = request.param, default 0) and of the device's
-    card image, plus `tests/mkepub.py`'s book at the card root (the device card holds no books)."""
-    if not (os.path.exists(DUMP) and os.path.exists(SD)):
-        pytest.skip('device dump / SD image not available')
+def stock(tmp_path, request, stock_card):
+    """A scratch copy of the dump (user_config/net_en = request.param, default 0) and of the full
+    device card with the test book on it, booted with the power button held from reset
+    (`--boot-hold-power`) so the boot-preflight accepts the cold boot; see `boot_to_home`."""
+    if not os.path.exists(DUMP):
+        pytest.skip('device dump not available')
     net_en = getattr(request, 'param', 0)
     name = 'pytest-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')   # '=' breaks -qmp unix:PATH
     flash = tmp_path / 'stock.bin'
@@ -59,13 +85,10 @@ def stock(tmp_path, request):
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8', 'user_config', 'net_en', str(net_en)],
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(SD, sd)          # the stock writes to the card at boot
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from mkepub import make_epub
-    make_epub(str(tmp_path / 'Test Book.epub'))
-    subprocess.run(['mcopy', '-i', f'{sd}@@1048576', '-o', str(tmp_path / 'Test Book.epub'), '::/'], check=True)
+    shutil.copyfile(stock_card, sd)
     x4emu(name, 'stop', check=False)
-    x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--trace-epd', str(tmp_path / 'epd.jsonl'))
+    x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--trace-epd', str(tmp_path / 'epd.jsonl'),
+          '--boot-hold-power')
     yield name, tmp_path
     x4emu(name, 'stop', check=False)
 
@@ -96,9 +119,10 @@ def test_stock_boots_to_home_lights_and_reacts_to_touch(stock):
     wait_for(lambda: 'deep sleep' in x4emu(name, 'status').stdout, 60, 'preflight deep sleep')
     x4emu(name, 'press', 'power')
     x4emu(name, 'wait-text', 'main_task: Returned from app_main()', '--timeout', '60')
-    # 2. panel init + home paint through spi_master + GDMA (three refreshes: full, then partial windows)
-    st = wait_for(lambda: (s := state(name))['refresh_count'] >= 3 and s, 90, 'three refreshes')
-    assert st['spi2']['dma_tx_bytes'] > 300000, st['spi2']      # >= 3 planes of 60,000 bytes over DMA
+    # 2. panel init + home paint through spi_master + GDMA: refresh 1 (init, three 60,000-byte planes)
+    #    and 2 (Home); the third is the clock at the next minute (see boot_to_home)
+    st = wait_for(lambda: (s := state(name))['refresh_count'] >= 2 and s, 90, 'home paint')
+    assert st['spi2']['dma_tx_bytes'] > 280000, st['spi2']      # >= 4 planes of 60,000 / 48,000 bytes over DMA
     assert st['spi2']['dma_errors'] == 0, st['spi2']
     assert st['epd_unknown_cmds'] == 0, st
     x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '30')
@@ -124,11 +148,17 @@ def test_stock_boots_to_home_lights_and_reacts_to_touch(stock):
 
 
 def boot_to_home(name):
-    """Preflight deep sleep, power press, home painted; returns the state after the paint."""
+    """Preflight deep sleep, power press, Home painted (refresh 2: the panel init's full refresh is 1,
+    Home's plane is 2) and the panel idle. Refresh 3 is the status-bar clock, which the stock completes
+    at the next wall-clock minute: it pre-sends the old plane right after every refresh and sends the
+    new plane + DRF when the minute changes (or at once for a UI event), so waiting for a third
+    refresh takes 0..60 s. Returns the state after the paint."""
     wait_for(lambda: 'deep sleep' in x4emu(name, 'status').stdout, 60, 'preflight deep sleep')
     x4emu(name, 'press', 'power')
     x4emu(name, 'wait-text', 'main_task: Returned from app_main()', '--timeout', '60')
-    return wait_for(lambda: (s := state(name))['refresh_count'] >= 2 and s, 90, 'home paint')
+    st = wait_for(lambda: (s := state(name))['refresh_count'] >= 2 and s, 90, 'home paint')
+    x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '30')
+    return st
 
 
 def hot_polls(st):
@@ -254,5 +284,118 @@ def test_stock_screens_walk(stock):
     tap(name, 500, 150); settle(name, 2)
     x4emu(name, 'screenshot', str(tmp / 'settings.png'))
     golden_check(tmp / 'settings.png', 'stock-settings.png')
+    st = state(name)
+    assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']
+
+
+# --- the frontlight controls (the stock's pull-down "BrightnessLayer") ---------------------------
+# Landscape panel pixels of the portrait control panel; portrait (px, py) is landscape (py, 479-px).
+LIGHT_PULL = (5, 240, 300, 240)      # portrait (240, 5) -> (240, 300): a slow pull from the top edge
+BRI_MINUS, BRI_PLUS = (130, 433), (130, 45)       # portrait (46, 130) / (434, 130)
+CT_MINUS, CT_PLUS = (245, 433), (245, 45)         # portrait (46, 245) / (434, 245)
+LIGHT_BTN = (307, 60)                # the "Light" sun icon, portrait (419, 307)
+BACKDROP = (600, 240)                # the dimmed page behind the panel: a tap there closes it
+
+
+def light_duty(name, timeout=20):
+    """(cool GPIO8, warm GPIO9) LEDC duty in permille, read once neither channel is fading."""
+    def settled():
+        ch = {c['gpio']: c for c in state(name)['ledc']['channels'] if c['gpio'] in (8, 9)}
+        if ch[8]['fading'] or ch[9]['fading']:
+            return None
+        return (ch[8]['duty_permille'], ch[9]['duty_permille'])
+    return wait_for(settled, timeout, 'the LEDC fade to finish')
+
+
+def light_step(name, x, y, want, tries=3, timeout=8):
+    """Tap a -/+ button of a slider until the frontlight reads `want`. A tap the firmware dropped is
+    repeated; one it took is never repeated (the value is already there), so no step is doubled."""
+    for _ in range(tries):
+        tap(name, x, y)
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            got = light_duty(name)
+            if got == want:
+                return got
+            time.sleep(0.3)
+    raise AssertionError(f'tap ({x},{y}) never brought the frontlight to {want}; last {light_duty(name)}')
+
+
+def nvs_u8(flash, key, ns='user_config'):
+    """The u8 `tools/nvsedit.py IMAGE list` reports for NS/KEY, or None (the last copy wins)."""
+    out = subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'list'],
+                         capture_output=True, text=True, check=True).stdout
+    hits = [ln.rsplit('= ', 1)[1].strip() for ln in out.splitlines() if f'{ns}/{key} (u8) = ' in ln]
+    return int(hits[-1]) if hits else None
+
+
+def test_stock_light_controls_follow_the_sliders(stock):
+    """The stock's frontlight UI is a pull-down panel (the app's "BrightnessLayer"), not a Settings
+    page: a slow drag from the portrait top edge downwards opens it over any page.
+
+    Path: Home -> swipe landscape (5, 240) -> (300, 240) with --ms 600 (portrait (240, 5) -> (240,
+    300), i.e. straight down from the status bar). The panel covers the top ~370 portrait rows
+    (landscape columns 0..369) and dims the page behind it. It holds, top to bottom in portrait:
+      "Brightness %d%%" + a slider    -- "-" at landscape (130, 433), "+" at (130, 45), track
+                                         between landscape y 389 (min) and 124 (max)
+      "Color Temp <preset>" + slider  -- "-" at landscape (245, 433), "+" at (245, 45); the presets
+                                         are Cool 4..Cool 1, Balanced, Warm 1..Warm 4
+      four buttons: Boost (307, 419), Full Refresh (307, 299), Sleep Lock (307, 179),
+                    Light (307, 60)  -- "Light" toggles the frontlight off/on (crossed-out sun)
+    A tap on the dimmed page, landscape (600, 240), closes the panel; swiping back up does not.
+
+    The dump's NVS has user_config/lightBri = 100 and lightCT = 100, so the panel opens at
+    "Brightness 100%" / "Color Temp Warm 4" with the warm channel (GPIO9) alone at 249 permille.
+    Each "-" on brightness is 10 % of the duty; each "-" on colour temperature moves one preset,
+    mixing the cool channel (GPIO8) in and the warm one out. Both are written back to NVS at once
+    (lightBri, lightCT, lightOn), which `tools/nvsedit.py` reads out of the live flash image."""
+    name, tmp = stock
+    boot_to_home(name)
+    settle(name, 2, 30)
+
+    # 1. pull the panel down and check it against the golden (status bar masked: clock, battery)
+    x4emu(name, 'swipe', *map(str, LIGHT_PULL), '--ms', '600')
+    settle(name, 1.5)
+    shot = tmp / 'light.png'
+    x4emu(name, 'screenshot', str(shot))
+    golden_check(shot, 'stock-light.png')
+
+    # 2. as opened: 100 % / Warm 4 = the warm channel alone (the pull re-lit it if it had auto-dimmed)
+    def lit():
+        v = light_duty(name)
+        return v if v != (0, 0) else None
+    assert wait_for(lit, 20, 'the frontlight to be on') == (0, 249)
+
+    # 3. brightness "-" twice: 100 % -> 90 % -> 80 % of the duty, colour mix unchanged
+    ladder = [light_step(name, *BRI_MINUS, want=(0, 224)), light_step(name, *BRI_MINUS, want=(0, 199))]
+    # 4. colour temperature "-" four times: Warm 4 -> Balanced, cool up and warm down at every step
+    for want in ((28, 175), (59, 149), (87, 125), (119, 99)):
+        ladder.append(light_step(name, *CT_MINUS, want=want))
+    assert [c for c, _ in ladder] == sorted(c for c, _ in ladder), ladder      # cool rises
+    assert [w for _, w in ladder] == sorted((w for _, w in ladder), reverse=True), ladder
+    settle(name, 1.5)
+    shot2 = tmp / 'light-adjusted.png'
+    x4emu(name, 'screenshot', str(shot2))
+    golden_check(shot2, 'stock-light-adjusted.png')      # "Brightness 80%", "Color Temp Balanced"
+    assert masked_diff(shot, shot2) > 500, 'the panel did not redraw its labels and handles'
+
+    # 5. the stock stores both in NVS user_config straight away
+    flash = tmp / 'stock.bin'
+    wait_for(lambda: nvs_u8(flash, 'lightBri') == 80, 20, 'lightBri = 80 in NVS')
+    assert nvs_u8(flash, 'lightCT') == 50, nvs_u8(flash, 'lightCT')            # 100 = Warm 4, 50 = Balanced
+
+    # 6. the "Light" button switches the frontlight off and on again (and persists lightOn)
+    off = light_step(name, *LIGHT_BTN, want=(0, 0))
+    assert off == (0, 0)
+    wait_for(lambda: nvs_u8(flash, 'lightOn') == 0, 20, 'lightOn = 0 in NVS')
+    assert light_step(name, *LIGHT_BTN, want=(119, 99)) == (119, 99), 'the light did not come back'
+    wait_for(lambda: nvs_u8(flash, 'lightOn') == 1, 20, 'lightOn = 1 in NVS')
+
+    # 7. a tap on the dimmed page closes the panel and Home is back, pixel for pixel
+    tap(name, *BACKDROP)
+    settle(name, 2)
+    back = tmp / 'light-closed.png'
+    x4emu(name, 'screenshot', str(back))
+    assert masked_diff(back, GOLDEN) == 0, 'Home did not come back after closing the light panel'
     st = state(name)
     assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']
