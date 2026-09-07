@@ -40,6 +40,18 @@ The session-7 entries of `docs/log.md` say what each tier delivered.
    committed on `main`; the owner pushes (GitHub Desktop; no push credential here; watch the CI run time
    now that the suite has 66 cases — CI runs only the CrossPoint half).
 4. **Next steps, in order:**
+   0. **The device is being updated to stock 7.5.4** (released 2026-09-03; the owner runs the device's own
+      Upgrade menu over WiFi, which writes app1 and switches otadata). First device step next session, with
+      the device on the pogo adapter and awake: `tools/device.py backup` (two 16 MB reads, SHA-256 equal) →
+      `images/device/flash-<date>-{a,b}.bin`, `docs/device/flash-backup-sha256.txt` updated, CLAUDE.md's
+      device state and §1 corrected; extract the 7.5.4 app (`tools/mkflash.py --raw` / the slot otadata
+      points at), boot it in the emulator (expect new unmodelled registers in `state.iolog_hot`), run
+      `tools/ghidra_stock.py analyze` on it (make the tool take the image path / a version tag), and
+      re-locate every 7.2.4 address in `docs/stock-firmware.md` by its strings and patterns (an Opus job:
+      the developer stub, gate A, the Lua row patch, the string packs, the `.xtf` loader's CRC check, the
+      wallpaper keys); make `stockdev.py`, `stockpatch.py`, `stockstrings.py` version-aware (a table per
+      version keyed by the app's ELF SHA-256 / version string, refusing unknown images). Keep 7.2.4 as the
+      fallback if 7.5.4 closes a door (signed containers, a removed Lua host).
    a. Commit the Lua tooling (item 2). Then a one-screen demo the owner can judge: a Lua "home" or status
       page drawn the way they like (fonts through `ctx.fonts`, the confirmed `g`/`ctx` API in
       `docs/lua-apps.md`), screenshots to the owner.
