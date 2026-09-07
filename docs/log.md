@@ -943,3 +943,110 @@ byte-for-byte; `install`, `info`, `new` scaffold with the confirmed API), `tests
 stock lists and runs the hello app, three goldens), `docs/lua-apps.md`. 27 fast tests + 1 emulator test green
 (twice by the agent, once by the coordinator). Stock oddities: `ctx.log.*` reaches nothing; `g:clear()` without an
 argument paints black; the Lua Apps page is titled "Extensions" with the bookshelf footer.
+
+## 2026-09-07 — Session 8: the re-baseline on stock 7.5.4 (four agents)
+
+The device's OTA had made every number in `docs/stock-firmware.md` and in the three stock tools refer to a
+firmware the device no longer runs, so the whole session was the re-baseline §0.4.0 of NEXT_PHASE asked for.
+Four agents in parallel (one Fable on the symbol-less reading, three Opus on the mechanical work), disjoint
+files, coordinator review + `make test` at the end.
+
+**The headline: 7.5.4 keeps the Lua host, and still takes unsigned apps.** `/sdcard/XTApps` has 46 code
+xrefs in the new image, `index.lua` 28, `%s/%.190s/app.xtapp` 1, `sys.battery`/`sys.status` 4 each, and the
+whole route was walked in the emulator on the patched 7.5.4: a **"Mini Apps"** row (7.2.4's "Lua Apps",
+renamed) opens the app list, the unsigned 313-byte container of `tests/data/hello-app` is listed, and its
+`index.lua` paints. Nothing in the update signed-locked it; 7.2.4 is not needed as a fallback.
+
+**What moved (docs/stock-7.5.4.md).** Every VA: DROM 0x3c380020 → 0x3c340020, IROM 244 KB smaller. The
+developer stub 0x4eabe0 → **0x4edad4**, gate A 0x4f516a → **0x4f951a**. `lua-apps-row` moved *in kind*: the
+7.5.4 nav-menu builder no longer appends slot 3 behind `presenter+172`; the slot predicate gates it on
+`presenter+176`, so the patch is `l8ui a2,a8,176` → `movi a2,1` at **0x4f9522**, next door to gate A. The
+label pack grew to 269 groups and its ids shifted from 5 up ("Lua Apps"→"Mini Apps", "USB Mode"→"USB",
+"Cloud Sync"→"Cloud"); the toast pack changed shape (u32 offsets, 874 groups, `XTZB` tag gone) and was
+**left out of the version file rather than guessed**. All three patch sites are boot-verified; with all
+three applied the eighth row (Settings) falls off the panel. `tools/ghidra_stock.py` now takes
+`--image`/`--version` (`images/ghidra/stock-<version>/`); the default run reproduced 7.2.4's exports exactly.
+
+**The tools became version-aware.** `tools/stockver.py` + `tools/stockver.d/*.json`: an image's
+`esp_app_desc` selects the file (project + version) and its `app_elf_sha256` is the hard check — it survives
+our byte patches, the file hash does not. 7.2.4's numbers moved into JSON verbatim and its three test files
+are untouched and still pass, which is the proof nothing about 7.2.4 shifted. An unknown version is refused
+naming the known ones; a missing entry is refused per item, so 7.5.4's toast pack blocks `stockstrings
+toasts` alone. Round trip on a scratch flash copy: `apply all` → `revert all` → byte-identical.
+
+**The device tool learned otadata.** `tools/device.py` parsed the partition table and assumed app0 boots;
+after the OTA that is false, and `flash-crosspoint` would have written an app the bootloader never starts.
+The table and both otadata sectors are now parsed (seq + CRC-32, highest valid seq, slot = (seq-1) % n):
+`device.py slots [--from-dump]` reports it in plain words (2026-09-07 dump → app1 boots, 7.5.4; 2026-09-06 →
+app0, app1 erased), and the two writers refuse before writing when their target is not the booting slot.
+`_refuse_forbidden_write` is a structural guard on every esptool command the file builds — no `erase-*`, no
+`write-flash` below 0x10000 — so **moving the boot pointer stays the owner's explicit decision**, which is
+what a `flash-stock-patched` will need (NEXT_PHASE §0.4.c). 32 offline cases, skipping cleanly without dumps.
+
+**The Lua API, mapped by drawing it.** The stock gives a Lua app no output at all (no `print`, no `io`,
+`ctx.log` reaches nothing), so `apps/probe/` enumerates the API and paints the result. `g` is a plain table
+of exactly **eight** functions (circle, clear, image, layer, line, rect, size, text), no metatable: the
+registration-table names `stroke`, `color`, `invert`, `draw_with` and every `fill*` are unbound, so **there
+is no filled shape** — a bar is framed or hatched. `g:text`'s `y` is the **top of a ~24 px line box, not the
+baseline** (docs/lua-apps.md said baseline). Callbacks take ctx first: `on_draw(ctx, g)`, `on_tick(ctx, n)`,
+`on_input(ctx, ev)`, and the event is `{type='touch', gesture='tap', x, y, time_ms}` in the portrait frame.
+All eleven `ctx` sub-tables are mapped; `ctx.sys.clock()` returns userdata with hour/minute/second/year/
+month/day/weekday (what makes a clock screen possible), and `ctx.fonts` answers nil for all sixteen built-in
+face names tried — there is no bigger face to select, so the status screens draw their own digits.
+`apps/status-typographic/` and `apps/status-panels/` are the two designs sent to the owner to choose from;
+`tests/test_lua_status.py` pins the RTC through `base-epoch` so weekday and date compare pixel-exact and
+only the live minute, uptime and heap bands are masked (each asserted to carry ink).
+
+**CI: red since the batch push, and it was never the code.** `gh` was installed and the owner logged in
+(Little Snitch had to allow it); `gh run view --log-failed` named it in one line:
+
+    qemu-system-xtensa: -chardev socket,...,path=.../.x4emu/pytest-test_mcp_module_imports_and_calls_in_process/console.sock:
+    UNIX socket path is too long. Path must be less than 108 bytes
+
+`x4emu --name NAME` becomes `.x4emu/NAME/` and part of two UNIX socket paths (sun_path: 104 bytes on macOS,
+108 on Linux). That name measures **93 bytes** under `/Users/mini/x4pro-emu` and **109** under CI's
+`/home/runner/work/x4pro-emu/x4pro-emu` — 20 bytes longer — so the job went red the moment
+`tests/test_cli_polish.py` landed, while the same suite stayed green here (44 passed, 43 skipped, 1 failed,
+171 s). `conftest.instance_name` now builds the name against the checkout it runs in: readable when it fits,
+clamped with an 8-hex tail otherwise; over all 130 collected ids the longest socket path is 103 bytes under
+both roots. CLAUDE.md's "Lessons" already said to keep `--name` short — the tests now obey it instead of
+trusting the checkout path.
+
+Two dead ends worth recording: Docker Hub pulls hang forever on this Mac (the firewall), so a containerised
+Linux reproduction is not available; and the Actions API gives step names, durations and check-run
+annotations without a token but **not** logs or artifacts (401), so the earlier sessions' "poll the API"
+recipe cannot diagnose a failure — only notice one.
+
+**A real flake was found on the way, and fixed.** The last green run was b7f5918; the owner then pushed a batch of ~38
+commits and both runs since (ae50e81, 0029a82) failed in `make test` after 172 s — long enough to have run
+most of the suite. The same set CI runs is green here (43 passed, 2m50s on macOS), and the Actions API gives
+step names and durations but not logs or artifacts without a token. Probed and cleared: the C model tests
+build and run the same on Linux; the `xtfont` build tests that CI reaches pass against a different TTF
+(their font-specific assertion lives in the case that skips without the dump). `gh` is installed; the login
+is the owner's one step (`gh auth login --web`), after which `gh run view --log-failed` ends the guessing.
+**The best lead came from our own full run:** it lost two inputs out of ~130 cases with the signature the
+CLAUDE.md lessons describe — the firmware reads the frame in 0.03 s and never repaints, because both
+firmwares poll touch and the buttons only between rendering passes that take seconds. `test_stock.py` and
+`test_lua_apps.py` already retried for that; the CrossPoint tests did not, and `test_lua_status.back_to_list`
+had a retry loop its own raising `x4emu(...)` could never reach. `conftest.x4emu_input` now repeats an input
+once when — and only when — the failure is "no refresh within", which is safe precisely because nothing
+repainted. That was **not** the red CI (the socket path was), but it is real: five full runs
+of this session lost an input each time, in five different tests, always with the same signature — the
+firmware read the frame within 0.03 s and never repainted, so `--wait` timed out. The desk Mac carries the
+owner's own applications (load average 7 of 14 cores while this was written) and the stock ignores input
+while it paints. Four fixes went in: `conftest.x4emu_input` (a `--wait` input repeated when, and only when,
+nothing repainted), the retry budgets raised from two to three, `test_lua_status.back_to_list` made
+outcome-driven (retrying the Back pad *alone* was the wrong repair — if the first press did raise the
+"Exit app?" dialog, a second dismisses it and the Exit tap lands on the app), and `test_replay` replaying the
+whole journal again from a fresh boot. `conftest.instance_name` also stopped two same-named tests in
+different files (`test_the_importable_api_matches_the_cli`) from sharing one `.x4emu/NAME/`.
+
+**The residual is worth naming honestly:** each individual fix is right, but the pattern says the repair
+belongs one level down. `x4emu`'s `tap/press/home --wait` knows the firmware read the input
+(`state.gt911.clears`) and knows no refresh followed; re-asserting the input there would cure every test at
+once instead of each test carrying its own retry. That is the next emulator-quality item (NEXT_PHASE §0.4).
+
+**State at the end of session 8:** `make test` **130 passed in 9 min 41 s**, and that run was made with the
+owner's desktop under its normal load — the run before the last two fixes lost one. Five full runs across the
+session: 128, 130, 128, 129, 130. Everything committed on `main`, the owner pushes; CI is fixed here and
+unverified on GitHub until that push.

@@ -5,75 +5,77 @@ Goal of the next phase, in the owner's words: run the **stock Xteink firmware** 
 **world class**. This document is the whole context you need; the previous agent's context is gone.
 Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
 
-## 0. Resume here (end of session 7, 2026-09-07)
+## 0. Resume here (end of session 8, 2026-09-07)
 
-**Work is organised as squads: read §10 before starting anything.** Sessions 5–7 ran four to five agents in
-parallel with cost balancing (Fable only for models and symbol-less firmware reading, Opus for C/Python
-work with a mechanical acceptance, Sonnet for tap-path hunts and Python polish against a precise spec).
-The session-7 entries of `docs/log.md` say what each tier delivered.
+**Work is organised as squads: read §10 before starting anything.** Sessions 5–8 ran four to five agents in
+parallel with cost balancing (Fable for models and symbol-less firmware reading, Opus for C/Python work with
+a mechanical acceptance). The session-8 entry of `docs/log.md` says what each agent delivered.
 
-1. `cd /Users/mini/x4pro-emu && make test` — 66 cases, 8 min 27 s, all green at the end of session 7 on QEMU
-   with patches 0001–0018 (the last run had no dropped tap; the stock tests retry one anyway). Needs the
-   built QEMU, the CrossPoint build and the gitignored `images/` (device dump, card mirror, ROM ELF, and now
-   `images/ghidra/` — rebuilt in a minute by `tools/ghidra_stock.py analyze`). `qemu/build-s1/`,
-   `build-s2/` are agents' build directories (`X4EMU_QEMU=…`): the pattern for QEMU work beside other agents.
-2. ~~An Opus agent was still running~~ **landed and committed** (end of session 7): `tools/stockpatch.py`,
-   `tools/xtapp.py`, `tests/test_stockpatch.py`, `tests/test_xtapp.py`, `tests/test_lua_apps.py` (boots the patched
-   7.2.4 stock, opens Lua Apps, runs the hello app; goldens `stock-menu-lua.png`, `stock-lua-apps.png`,
-   `stock-lua-hello.png`), `tests/data/hello-app/`, `docs/lua-apps.md`. Oddities the stock showed: `ctx.log.*`
-   reaches nothing (no console, no card), `g:clear()` with no argument paints the frame black (`g:clear(0)`
-   whitens it), the Lua Apps page titles itself "Extensions" and keeps the bookshelf footer.
-3. **Session 7 in one line:** the owner's goal is modding the stock firmware (visual enhancements + a smarter
-   keyboard); the survey (`docs/stock-firmware.md`) mapped it; data-only tools landed and work —
-   `tools/stockstrings.py` (relabel anything), `tools/xtfont.py` (a converted TrueType font installs and
-   renders; the header's two CRC-32s), the card wallpaper recipe (no patch); Ghidra + openjdk installed
-   with a one-minute headless analysis (`tools/ghidra_stock.py`); **a Lua script runs as a screen on the
-   stock after a 3-byte patch** (nav-menu row for page 0x09) with an unsigned `app.xtapp` container
-   (0x80-byte header + JSON manifest); the grey model became the default (the owner's photo of the glass:
-   one uniform rim per glyph, ~0.45 reflectance → `gray-k` 38); the device's own reader screenshots match
-   the emulator's pages in 0 px outside the clock (`tests/test_device_screenshot.py`); CrossPoint tests
-   now boot private copies of the flash and card (state leaked between tests before). Everything is
-   committed on `main`; the owner pushes (GitHub Desktop; no push credential here; watch the CI run time
-   now that the suite has 66 cases — CI runs only the CrossPoint half).
+1. `cd /Users/mini/x4pro-emu && make test` — see the session-8 log entry for the current count and time; it
+   needs the built QEMU, the CrossPoint build and the gitignored `images/` (device dumps, card mirror, ROM ELF,
+   `images/ghidra/stock-7.2.4/` and now `stock-7.5.4/` — each rebuilt in a minute by
+   `tools/ghidra_stock.py analyze [--version 7.5.4]`). `qemu/build-s1/`, `build-s2/` are agents' build
+   directories (`X4EMU_QEMU=…`): the pattern for QEMU work beside other agents.
+2. **Session 8 in one line:** the re-baseline the OTA forced is **done** — 7.5.4 keeps the Lua host and still
+   takes unsigned apps, its three patch sites are re-located and boot-verified (`docs/stock-7.5.4.md`), the
+   three stock tools read a per-version JSON instead of literals (`tools/stockver.py` + `tools/stockver.d/`),
+   `tools/device.py` parses otadata so it can no longer write a slot the bootloader does not start, and the
+   stock's Lua API is mapped by an app that draws it (`apps/probe/`), which produced two status screens for
+   the owner to choose between (`apps/status-typographic/`, `apps/status-panels/`).
+3. **Facts a next agent should not re-derive.** 7.5.4 = app1 of `images/device/flash-2026-09-07-a.bin`
+   (flash 0x7F0000), extracted as `images/device/stock-app1-7.5.4.bin`; a 7.5.4 *app* offset X is at
+   0x7F0000+X in that flash image, and `stockdev.app_base` finds app0, not app1. In 7.5.4 the extra nav row
+   is labelled **"Mini Apps"**, "USB Mode" is "USB" and "Cloud Sync" is "Cloud"; with all three patches
+   applied the eighth row (Settings) falls off the panel. The Lua drawing API has **eight** methods and **no
+   fill** — bars are framed or hatched — `g:text`'s y is the top of a ~24 px line box, and `ctx.fonts` offers
+   no larger face, so bigger type means shipping a font (`tools/xtfont.py`) or drawing the glyphs.
 4. **Next steps, in order:**
-   0. **The device is being updated to stock 7.5.4** (released 2026-09-03; the owner runs the device's own
-      Upgrade menu over WiFi, which writes app1 and switches otadata). First device step next session, with
-      the device on the pogo adapter and awake: `tools/device.py backup` (two 16 MB reads, SHA-256 equal) →
-      `images/device/flash-<date>-{a,b}.bin`, `docs/device/flash-backup-sha256.txt` updated, CLAUDE.md's
-      device state and §1 corrected; extract the 7.5.4 app (`tools/mkflash.py --raw` / the slot otadata
-      points at), boot it in the emulator (expect new unmodelled registers in `state.iolog_hot`), run
-      `tools/ghidra_stock.py analyze` on it (make the tool take the image path / a version tag), and
-      re-locate every 7.2.4 address in `docs/stock-firmware.md` by its strings and patterns (an Opus job:
-      the developer stub, gate A, the Lua row patch, the string packs, the `.xtf` loader's CRC check, the
-      wallpaper keys); make `stockdev.py`, `stockpatch.py`, `stockstrings.py` version-aware (a table per
-      version keyed by the app's ELF SHA-256 / version string, refusing unknown images). Keep 7.2.4 as the
-      fallback if 7.5.4 closes a door (signed containers, a removed Lua host).
-   a. Commit the Lua tooling (item 2). Then a one-screen demo the owner can judge: a Lua "home" or status
-      page drawn the way they like (fonts through `ctx.fonts`, the confirmed `g`/`ctx` API in
-      `docs/lua-apps.md`), screenshots to the owner.
-   b. **The keyboard (the owner's second wish).** Map the stock's on-screen keyboard with Ghidra: the
-      view/presenter classes (search the typeinfo names for Keyboard/Input/TextField), where it is invoked
-      (WiFi password, Startup Password, search), the key layout table, hit-testing, the key-commit path and
-      the text buffer, how key rows and the field are drawn. Then design the hook: new native code compiled
-      with the pioarduino Xtensa toolchain (`~/.platformio/packages/toolchain-xtensa-esp-elf`) into the app
-      slot's free ~2.4 MB as an extra IROM segment, a trampoline at the key-commit site, a dictionary on the
-      card, a suggestion strip drawn through the app's own text routine; near-miss correction = a
-      key-adjacency-weighted edit distance over the dictionary (the iPhone way, simplified). Fable for the
-      hook design and the segment/trampoline mechanics (an Espressif-image question: the bootloader maps
-      segments from the image header; a new segment means a new header entry and the hash recomputed —
-      `stockdev.refresh_image` handles the hash, the segment table needs code); Opus for the dictionary,
-      the correction algorithm (host-tested in Python first, then C), and the tests.
-   c. **Device deployment path** (needed before anything patched reaches the device): a guarded
-      `tools/device.py flash-stock-patched` writing the patched stock into **app1** with otadata pointing at
-      it as pending-verify (survey §8: app0's otadata is VALID = no auto-rollback), so a bad image rolls
-      back; the emulator test suite as the gate; the owner presses the buttons. Not started.
+   a. **The owner's pick between status screen A (typographic) and B (panels)** — screenshots went to them at
+      the end of session 8. Finish the chosen one (and consider `tools/xtfont.py` for real large digits).
+   b. **The keyboard (the owner's second wish), now against 7.5.4.** Map the stock's on-screen keyboard with
+      `tools/ghidra_stock.py --version 7.5.4`: the `KeyboardLayer{View,Presenter}` pair (the survey's class
+      list, `docs/stock-firmware.md`), where it is invoked (WiFi password, Startup Password, search), the key
+      layout table, hit-testing, the key-commit path and the text buffer. Then design the hook: new native
+      code compiled with the pioarduino Xtensa toolchain
+      (`~/.platformio/packages/toolchain-xtensa-esp-elf`) into the app slot's free space as an extra IROM
+      segment, a trampoline at the key-commit site, a dictionary on the card, a suggestion strip drawn
+      through the app's own text routine; near-miss correction = a key-adjacency-weighted edit distance over
+      the dictionary. Fable for the hook design and the segment/trampoline mechanics (a new segment means a
+      new image-header entry and the hash recomputed — `stockdev.refresh_image` handles the hash, the segment
+      table needs code); Opus for the dictionary, the correction algorithm (host-tested in Python, then C),
+      and the tests.
+   c. **Device deployment path — blocked on one decision by the owner.** `tools/device.py` now knows which
+      slot boots and refuses to write the wrong one, but a patched stock can only reach the device two ways:
+      write the **booting** slot (`--slot app1`, allowed, no rollback if the image is bad — recovery is
+      `restore-stock` over the pogo pins) or write the spare slot and move the boot pointer (otadata), which
+      lives below 0x10000 and is forbidden by CLAUDE.md rule 2 without the owner's explicit go-ahead.
+      Ask in plain words; do not build the otadata writer before the answer.
    d. Lock screen as a Lua app: the standby path reads `lockscrMode` 2 but constructs no presenter
-      (`docs/stock-firmware.md`, "Probed in session 7"); a Ghidra job on the standby coordinator.
-   e. Carried over: the ignored-tap parity question (does the device also drop a tap right after Home? —
-      the parity harness, §9 D4); the 4-level grey `.xic`; the QMP `pmemsave` zero pages; the
-      `esp32s3.gpspi +0x38` and IO_MUX logger noise; S7 upstream (patches 0003/0006/0008/0009/0016 are the
-      candidates).
-
+      (`docs/stock-firmware.md`, "Probed in session 7"); a Ghidra job on the standby coordinator, now in 7.5.4.
+   e. **CI was red from 2026-09-07 and is fixed here, unverified on GitHub**: a UNIX socket path one byte
+      over Linux's 108 (`.x4emu/pytest-test_mcp_module_imports_and_calls_in_process/console.sock` under CI's
+      20-bytes-longer checkout), now clamped by `conftest.instance_name`. **Confirm on the owner's next push**
+      — that is the only thing outstanding. `gh` is installed and logged in as kycube; it needs the Little
+      Snitch allowance and only works outside the command sandbox, so run it with the sandbox disabled.
+      `gh run list -R kycube/x4pro-emu` and `gh run view <id> --log-failed` are the tools; the unauthenticated
+      Actions API gives steps and durations but never logs or artifacts. Docker Hub pulls hang on this Mac, so
+      a containerised Linux reproduction is not available.
+   f. The 7.5.4 **toast pack** (u32 offsets, 874 groups, no `XTZB` tag) has no loadable spec yet:
+      `stockstrings` refuses that pack alone on 7.5.4. Also unanswered: who writes `presenter+176`.
+   g. `docs/stock-firmware.md` is still entirely 7.2.4 — either re-locate more of it in 7.5.4 as the work
+      needs it, or mark its heading so nobody reads its addresses as current.
+   h. **The input-delivery race belongs in `x4emu`, not in every test.** Five full runs in session 8 each
+      lost one input, in five different tests: the firmware reads the GT911 frame in 0.03 s and then never
+      repaints, because both firmwares poll input only between rendering passes that take seconds, and the
+      desk Mac runs the owner's own applications. Session 8 answered it per test (`conftest.x4emu_input`,
+      three tries, `back_to_list` outcome-driven, `test_replay` re-running its journal), which works but is
+      whack-a-mole. `x4emu tap/press/home --wait` already knows both facts it needs — the firmware read the
+      frame (`state.gt911.clears`) and no refresh followed — so re-asserting the input inside the CLI would
+      cure every test at once. Design it carefully: `record`/`replay` journals and the MCP tools share that
+      path, and a retry must never double-deliver an input the firmware did act on.
+   i. Carried over: the ignored-tap parity question (does the device also drop a tap right after Home? — the
+      parity harness, §9 D4); the 4-level grey `.xic`; the QMP `pmemsave` zero pages; the `esp32s3.gpspi
+      +0x38` and IO_MUX logger noise; S7 upstream (patches 0003/0006/0008/0009/0016 are the candidates).
 ## 1. Where things stand (2026-09-06)
 
 - Repo: `/Users/mini/x4pro-emu` (symlink at `/Users/mini/xteink x4/x4pro-emu`; paths with spaces
@@ -104,9 +106,9 @@ The session-7 entries of `docs/log.md` say what each tier delivered.
   (`tests/test_stock.py`, two cases). See §3.
 - Device: ESP32-S3 rev v0.2, 8 MB octal PSRAM, **UC8279** panel (LUT_VER 0x68), 15.7 GB card.
   app0 = stock 7.2.4, **app1 = stock 7.5.4 and booting** (the owner's OTA update of 2026-09-07; otadata entry 1
-  seq 2), bootloader/table untouched; `tools/device.py` still assumes app0 boots (teach it otadata before any
-  device write),
-  verified double backup in `images/device/flash-2026-09-06-{a,b}.bin`. The owner, when present, can
+  seq 2), bootloader/table untouched; `tools/device.py slots` reads that from the device or a dump and both
+  writers refuse a slot that would not boot (session 8),
+  verified double backups in `images/device/flash-2026-09-07-{a,b}.bin` (current) and `flash-2026-09-06-{a,b}.bin`. The owner, when present, can
   press buttons, enter File Transfer (card mounts on the Mac as "NO NAME"), and re-seat the pogo
   adapter; ask in plain words, one step at a time. In deep sleep the USB port vanishes; the stock app switches to a mass-storage
   personality in USB mode.
