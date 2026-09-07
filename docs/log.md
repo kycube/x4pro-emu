@@ -1050,3 +1050,28 @@ once instead of each test carrying its own retry. That is the next emulator-qual
 owner's desktop under its normal load — the run before the last two fixes lost one. Five full runs across the
 session: 128, 130, 128, 129, 130. Everything committed on `main`, the owner pushes; CI is fixed here and
 unverified on GitHub until that push.
+
+**Reading typography planned, not built (2026-09-07, after the close):** the owner asked for a
+Kindle-style font panel — face, style and size with a preview, in the reader's settings — and asked
+for the plan only. `docs/NEXT_PHASE.md` §11 is that plan, and the shape of it is set by two facts
+from `docs/reading-fonts.md`: the reading font list is open (files on the card, no manifest, no
+signature, the file name is the row label) and **the stock has no font-size control at all** — the
+`.xtf` cell is the size. So "size" is a file, not a setting, and most of the value is a generated,
+well-named set of `.xtf` files (§11.3) with no firmware change: the stock's own picker already
+overlays the page and re-renders on selection, which is a live preview by another name. A Lua
+preview screen (§11.4) is contingent on two capability probes; the real panel (§11.5) is a grouping
+problem over the same files and shares the segment-and-trampoline machinery with the keyboard, so
+the two should be one squad. §11.2 lists what must be answered first, starting with where the
+selection is persisted — after a reboot the picker's highlight and the page disagreed.
+
+**Fonts, decided (2026-09-07):** the interface font **stays MiSans Demibold**. Every candidate was
+drawn through the device's own rasteriser at the real 20/24 px cells (`tools/fontcompare.py`) and the
+switch was proven end to end — Georgia Bold built from the owner's TTF, installed on the card,
+chosen in Settings → System Font, the device restarting into it — and MiSans still won: heavier than
+anything shortlisted, the only face covering CJK, drawn for this screen. `docs/fonts.md` records the
+comparison and two counter-intuitive findings: Georgia Bold and Bookerly Bold (the owner's own
+licensed copies) were the strongest candidates, and **Literata was the weakest row on the sheet**
+despite being Google's reading face — its Google Fonts build carries no hinting program at all.
+`fonts/` holds sixteen families and is gitignored except its README: three are the owner's own
+proprietary copies, and MiSans' licence forbids redistribution *and* adaptation, so even an `.xtf`
+built from the device's own font may not be shipped.

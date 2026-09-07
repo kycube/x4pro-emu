@@ -73,7 +73,14 @@ a mechanical acceptance). The session-8 entry of `docs/log.md` says what each ag
       frame (`state.gt911.clears`) and no refresh followed — so re-asserting the input inside the CLI would
       cure every test at once. Design it carefully: `record`/`replay` journals and the MCP tools share that
       path, and a retry must never double-deliver an input the firmware did act on.
-   i. Carried over: the ignored-tap parity question (does the device also drop a tap right after Home? — the
+   i. **Reading typography — a Kindle-like font panel (§11).** The owner asked for the plan, not the
+      build: face / style / size with a preview, in the reader's own settings. The reading font list
+      turned out to be wide open (`docs/reading-fonts.md`) and there is **no size control in the
+      stock at all** — the font file *is* the size — so most of the value lands in §11.3, a generated,
+      well-named set of `.xtf` files on the card, with no firmware change. Read §11 before starting;
+      §11.2 lists what has to be answered first, and the panel itself (§11.5) shares the
+      segment-and-trampoline machinery with the keyboard (b).
+   j. Carried over: the ignored-tap parity question (does the device also drop a tap right after Home? — the
       parity harness, §9 D4); the 4-level grey `.xic`; the QMP `pmemsave` zero pages; the `esp32s3.gpspi
       +0x38` and IO_MUX logger noise; S7 upstream (patches 0003/0006/0008/0009/0016 are the candidates).
 ## 1. Where things stand (2026-09-06)
@@ -478,8 +485,105 @@ edit CLAUDE.md or docs/*.md except [own page]. Time box: [N] minutes. Final repo
 | ~~**S4 determinism**~~ | **done** (sessions 5–6): `--deterministic`, `record/replay`, `watch`, `shell`, the MCP server in-process | met (`tests/test_replay.py`, `tests/test_cli_polish.py`) |
 | **S5 fidelity** | ~~Fable: waveform grey core · Opus: window tests · Opus: `dwc_sdmmc` trace patch~~ done (session 6); the BUSY timing table was skipped (the device logs hold only what the defaults already are); **open**: the grey validation against the glass (owner) and then the default flip + `gray-k`; a follow-up Opus item: the `esp32s3.gpspi +0x38` (SPI_DMA_INT_CLR) unhandled-read noise and an IO_MUX stored-value overlay (525 + 525 logger lines per stock boot) | `qemu.log` free of `dwc_sdmmc_` lines ✓; grayscale validated against the device ☐ |
 | **S6 custom-firmware** (§9 D1–D4) | **Fable**: the `X4>` console protocol design in the custom firmware · Opus: `x4emu console-expect`, `tools/x4target.py`, the `--target emu\|device` pytest · **Fable**: the parity harness and its "explain every difference" assertions · Opus: `--speed` (D3; `wait-guest-ms` done in session 5) | one script runs on emulator and device and the diff is 0 or explained |
+| **S8 typography** (§11) | research first: **Fable** on where the reading-font selection persists and the `.xtf` line-pitch field · Opus on the two Lua capability probes (binary file reads, `g:image`) · then Opus on `tools/readingfonts.py` and a verified set | a book's Font card lists a tidy face/style/size set, every entry renders, and the choice survives a reboot |
 | **S7 upstream** | Opus: split the generic S3 models (GPIO, GP-SPI, I2C, LEDC, USJ, cache DONE, intmatrix/GDMA/SPI fixes) into espressif/qemu-style patches with tests and cover letters · **Fable**: review before submission | patches apply to `esp-develop` HEAD and pass `make test` here |
 
 Run one squad per coordinator turn; two if their files are disjoint (S3 pairs with anything). After
 each squad: `make test`, a dated `docs/log.md` entry, §0 of this file updated, and a commit left for
 the owner to review unless the owner asked for commits.
+
+## 11. Goal E — reading typography: a Kindle-like font panel (the owner's ask, 2026-09-07)
+
+The owner's words: *"build off of how the kindle handles this. We should have a built in preview in
+the settings menu where the user can adjust font face/style/size for reading."* They asked for the
+plan, not the build — **do not start implementing without saying so.**
+
+What Kindle's `Aa` sheet gives, as the target to measure against: a panel over the page; a list of
+faces; a size control; a weight/style control; spacing and margins; and the page behind it
+re-rendering as you change things.
+
+### 11.1 What the device already gives us (all verified, `docs/reading-fonts.md`)
+
+* The reader's font list is **open**: the picker walks `/sdcard/fonts` and `/sdcard/Pushed Fonts`
+  for `*.xtf` and `*.bin`, no manifest, no signature, no install step, ≤ 64 entries, and the row
+  label is the **file name**, truncated after about 14 characters.
+* Selecting a font **re-renders the page immediately, with no restart** — and the picker is an
+  overlay over the page. A crude live preview therefore already exists; it is the real page.
+* There is **no font-size control anywhere**: the `.xtf` cell *is* the size. Cells 24 and 32 both
+  work. So "size" is another file, not a setting — which is the single most important fact for this
+  design, and also the reason the stock's book text is stuck at one cramped size.
+* Reading glyphs are **1-bpp bitmaps**, one file per face × style × size. No scaling, no hinting at
+  runtime, quality fixed at conversion time.
+* A Lua app can own a whole screen (`docs/lua-apps.md`) but has **no reader API and no file write**.
+
+### 11.2 Close these before designing anything
+
+1. **Where the reading-font selection is persisted** (`docs/reading-fonts.md` §8: after a reboot the
+   picker's highlight and the rendered page disagreed). A chooser that does not stick is worthless,
+   and *writing* that setting is what would let anything outside the stock's own panel apply a
+   choice. Ghidra on the picker's commit path, then confirm by diffing NVS / the card before and
+   after a selection. **Blocking for 11.4 and 11.5.**
+2. **Which `.xtf` header field drives line pitch**, and the largest cell the reader accepts. Kindle's
+   panel has a spacing control; ours can only have one if leading is ours to set. Also: are the two
+   header CRC-32s checked on the reading path?
+3. **Two Lua capability probes** (`apps/probe/` is the vehicle): can Lua read a *binary* file
+   (`ctx.data.open_text` / `read_text` across NUL bytes), and what does `g:image` actually take?
+   Together they decide whether 11.4 is possible at all. Cheap: one app, one boot.
+4. **7.5.4**: the strings are present but the reading path was never booted there. The device runs
+   7.5.4, so nothing ships until this is re-verified.
+
+### 11.3 Stage 1 — the set (no code, no risk, most of the value)
+
+The picker is already a face chooser; what it lacks is *organisation*. We control both the contents
+of the list and every label, so a generated, well-named set turns the stock's own panel into a
+face × style × size chooser with no firmware change at all.
+
+* `tools/readingfonts.py`: `build FACE.ttf --sizes 22,26,30 --styles regular,bold,italic`
+  → one `.xtf` per combination, and `install SD.img` / a directory for the device's card.
+  It wraps `xtfont.build_xtf` and needs a `CELL_PROFILE` entry per cell (the session-8 guess for 32
+  was accepted by the firmware; the other cells must be derived and each one **verified by booting**,
+  not assumed).
+* Naming is the UI: ≤ 14 useful characters, sorted the way it should read. `Bookerly 26`,
+  `Bookerly B 26`, `Charis 26`, `Charis 30`. Decide the convention with the owner *before*
+  generating, because renaming later means re-copying the card.
+* Budget: ≤ 64 entries total, so e.g. 4 faces × 2 styles × 4 sizes = 32 leaves room. Watch card
+  space — Latin-only `.xtf` is small, a full `.bin` is 8 MiB.
+* Acceptance: a book, the Font card, a tidy list; every entry renders; the owner picks by eye from
+  screenshots of the same page in each.
+
+### 11.4 Stage 2 — a real preview screen (Lua), only if 11.2.3 says yes
+
+A **Fonts** app on the Mini Apps page that draws *the same paragraph* in every font on the card, so
+faces and sizes are compared side by side instead of by flipping through the picker. This is the
+"preview" half of the owner's ask, and it needs no native code.
+
+It stands or falls on 11.2.3: the app must read the font file itself (both formats are trivially
+parseable — `.bin` is a flat codepoint-indexed grid, `.xtf` is documented in `tools/xtfont.py`) and
+blit glyphs. If `g:image` takes a bitmap this is easy; if the only route is a `g:line` per glyph row
+it is likely too slow for a paragraph and the app should preview a **word or a line**, not a page.
+Measure before designing. It cannot *apply* a choice unless 11.2.1 finds a writable setting.
+
+### 11.5 Stage 3 — the stock's own panel, patched (the real Kindle experience)
+
+The panel the owner actually described: face, style and size as three controls in the reader's Font
+card, with the page behind it updating. The insight that makes it tractable is that **the font engine
+needs no change**: size and style are already separate files, so the panel is a *grouping* problem.
+Parse the labels the list builder produces (`FUN_42145bd0`, 7.2.4), group `Face [Style] NN` by face,
+and present face as the list, style and size as steppers — selecting simply picks the file that the
+three axes name.
+
+* Mechanism: new native code compiled with the pioarduino Xtensa toolchain into the app slot's free
+  space as an extra IROM segment, plus a trampoline at the list builder — **the same machinery the
+  keyboard needs (§0.4.b)**. Do the keyboard first or in the same squad; the segment/trampoline and
+  image-header work is the expensive part and it is shared.
+* Anything drawn goes through the app's own text routine; a preview strip can reuse the reading
+  font's own glyphs, which is exactly what Kindle shows.
+* Acceptance: from a book, one panel changes face, style and size; the page re-renders; the choice
+  survives a reboot (11.2.1); the emulator test suite is the gate before the device.
+
+### 11.6 Order, and what it costs
+
+11.2 (research, one squad — Fable for the firmware reading, Opus for the Lua probes) → 11.3 (one
+Opus agent, a tool plus a verified set) → 11.4 only if the probes allow → 11.5 with, or after, the
+keyboard. Stages 1 and 2 touch nothing but files on the card and are reversible by deleting them;
+stage 3 is a patched app image and follows the device rules in `CLAUDE.md` and §0.4.c.
