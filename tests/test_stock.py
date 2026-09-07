@@ -324,34 +324,28 @@ def test_stock_screens_walk(stock):
     no device oracle yet). Coordinates are landscape panel pixels of the portrait UI: the hamburger
     icon (88, 38), the nav menu entries at x 160/245/330/415/500 (Read, All Files, USB Mode, Cloud
     Sync, Settings), the first file row (250, 320), the page centre (400, 240), the reading menu's
-    back arrow (80, 445). The Home pad does nothing in the stock (docs/NEXT_PHASE.md)."""
+    back arrow (80, 445). The Home pad is Back in the stock (`test_stock_home_pad_acts_as_back`). Every
+    tap that has a golden goes through `step()`: the stock reads a tap now and then and does nothing, or
+    repaints the same screen (a book-row tap that left All Files on screen, session 7), so a screen that
+    is not the expected one is retried once."""
     name, tmp = stock
     boot_to_home(name)
     settle(name, 2, 30)
-    tap(name, 88, 38); settle(name)
-    x4emu(name, 'screenshot', str(tmp / 'menu.png'))
-    golden_check(tmp / 'menu.png', 'stock-menu.png', cols=(STATUS_BAR_COLS, PANEL_W - 60))   # date on the right edge
-    tap(name, 245, 150); settle(name, 2)
-    x4emu(name, 'screenshot', str(tmp / 'all-files.png'))
-    golden_check(tmp / 'all-files.png', 'stock-all-files.png')
-    tap(name, 250, 320, wait=30); settle(name, 3, 120)          # opening the book: several refreshes
-    x4emu(name, 'screenshot', str(tmp / 'reader-page1.png'))
+    step(name, 88, 38, 'stock-menu.png', cols=(STATUS_BAR_COLS, PANEL_W - 60), shot=str(tmp / 'menu.png'))   # date on the right edge
+    step(name, 245, 150, 'stock-all-files.png', quiet=2, shot=str(tmp / 'all-files.png'))
     READER_COLS = (STATUS_BAR_COLS, PANEL_W - 40)     # the reader draws its clock in the portrait footer: the last 40 columns
-    golden_check(tmp / 'reader-page1.png', 'stock-reader-page1.png', cols=READER_COLS)
+    step(name, 250, 320, 'stock-reader-page1.png', cols=READER_COLS, wait=30, quiet=3,
+         shot=str(tmp / 'reader-page1.png'))                    # opening the book: several refreshes
     x4emu(name, 'press', 'right', '--quiet', '1', '--wait', '20'); settle(name, 2)
     x4emu(name, 'screenshot', str(tmp / 'reader-page2.png'))
     golden_check(tmp / 'reader-page2.png', 'stock-reader-page2.png', cols=READER_COLS)
     assert masked_diff(tmp / 'reader-page1.png', tmp / 'reader-page2.png') > 1000, 'page turn drew nothing'
-    tap(name, 400, 240); settle(name, 2)
-    x4emu(name, 'screenshot', str(tmp / 'reading-menu.png'))
-    golden_check(tmp / 'reading-menu.png', 'stock-reading-menu.png')
+    step(name, 400, 240, 'stock-reading-menu.png', quiet=2, shot=str(tmp / 'reading-menu.png'))
     tap(name, 80, 445); settle(name, 2)                          # back: the bookshelf now lists the book
     x4emu(name, 'screenshot', str(tmp / 'bookshelf.png'))
     assert masked_diff(tmp / 'bookshelf.png', GOLDEN) > 1000, 'bookshelf still empty after reading'
-    tap(name, 88, 38); settle(name)
-    tap(name, 500, 150); settle(name, 2)
-    x4emu(name, 'screenshot', str(tmp / 'settings.png'))
-    golden_check(tmp / 'settings.png', 'stock-settings.png')
+    tap(name, 88, 38); settle(name)                              # the menu over the filled bookshelf: no golden
+    step(name, 500, 150, 'stock-settings.png', quiet=2, shot=str(tmp / 'settings.png'))
     st = state(name)
     assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']
 

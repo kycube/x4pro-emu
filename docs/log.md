@@ -890,3 +890,8 @@ should mark every unverified number as such (it mostly did); a probe that reads 
 (what `set_as_lockscreen_app` stores) is worth more than trying values; `appdis.py` + capstone got the
 agents to the gates, but "who calls this presenter" across 5 MB is where a disassembler with a call graph
 is the cheaper tool.
+
+**State at the end of session 7:** `make test` 65 cases in 7 min 50 s (13 CrossPoint, 4 interface, 12 stock,
+36 fast); the full run lost one more stock tap — the book-row tap in `test_stock_screens_walk` produced a
+refresh but left All Files on screen (the walk now verifies every screen against its golden through `step()`
+and retries once; alone it passed three times). Committed on `main`, the owner pushes. Device untouched.

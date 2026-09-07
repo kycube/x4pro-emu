@@ -12,9 +12,10 @@ four to five agents in parallel; session 6 balanced cost as the owner asked (one
 had to be inferred, Opus for the C work, Sonnet for the Python polish against a precise spec) — see the
 session-6 entry of `docs/log.md` for what each tier delivered.
 
-1. `cd /Users/mini/x4pro-emu && make test` — 44 cases (13 CrossPoint, 4 interface, 8 stock, 19 fast), 6 min 53 s, green at the end of
-   session 6 (one stock tap per full-suite run is read by the firmware and ignored — see the log; the stock
-   tests retry such a tap once). Needs the built QEMU
+1. `cd /Users/mini/x4pro-emu && make test` — 65 cases (13 CrossPoint, 4 interface, 12 stock incl. the
+   relabel, font and capture tests, 36 fast), 7 min 50 s, green at the end of session 7 apart from one
+   stock tap per full-suite run that the firmware reads and ignores or answers with the wrong screen — the
+   stock tests retry such a tap once (`tap_repaints`, `tap()`, and `step()` with a golden per screen). Needs the built QEMU
    (`qemu/build/qemu-system-xtensa`, patches 0001–0017), the CrossPoint build and the gitignored `images/`;
    all present on this Mac. If `qemu/` were ever missing: `make setup && make build`. After exporting a
    patch, `touch qemu/.x4pro-patched`. `qemu/build-s1/` and `qemu/build-s2/` are agents' complete build
