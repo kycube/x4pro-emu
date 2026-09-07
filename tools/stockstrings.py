@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Read and relabel the UI string packs of a stock `xteink_app` 7.2.4 image (a data-only edit).
+r"""Read and relabel the UI string packs of a stock `xteink_app` image (a data-only edit).
 
   stockstrings.py list IMAGE [--pack P] [--lang en] [--grep TEXT]   every group of a pack
   stockstrings.py get IMAGE GROUP [--pack P] [--lang en]            one group
@@ -23,7 +23,14 @@ THE PACK FORMAT (docs/stock-firmware.md §6)
     The group index is the label id; an offset is a byte index into `blob` of a NUL-terminated UTF-8
     string. Identical strings share one offset (the packs are fully deduplicated: the label pack's
     936 slots use 752 distinct offsets), so overwriting a string in place changes **every** slot that
-    points at it -- see `set` below. Three packs are handled:
+    points at it -- see `set` below.
+
+    **Where the packs are is per version** (`tools/stockver.py`): the numbers below live in
+    `tools/stockver.d/<version>.json` (`packs`, `lang_count`, `known_groups`), one file per stock
+    version, and an image picks its own by what its `esp_app_desc` says (project + version, with
+    `app_elf_sha256` as the identity of the build). A version with no file -- or one whose file does
+    not carry the pack asked for -- is refused, never guessed. Stock 7.2.4
+    (`tools/stockver.d/7.2.4.json`) as one version among several:
 
     | pack     | header VA (file) | groups | offsets VA | blob VA (size)         | content |
     |----------|------------------|--------|------------|------------------------|---------|
@@ -89,52 +96,52 @@ SAFETY
 
 `parse_pack`, `read_pack`, `set_string`, `compact_pack` and `restore_pack` are importable; each takes
 a `bytearray` of the whole image and returns a report dict, and each raises `StockStringsError` on
-anything that is not a stock 7.2.4 pack.
+anything that is not a stock pack of a version `tools/stockver.d/` describes.
 """
 import argparse, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import stockver                                                                 # noqa: E402
+from stockver import PackSpec                                                   # noqa: E402,F401
 from stockdev import (app_base, image_layout, refresh_image, verify_image,      # noqa: E402
                       StockDevError)
 
-LANGS = ('zh-CN', 'en', 'zh-TW', 'ja')          # lang_ids 0..3
-LANG_COUNT = 4
+LANG_NAMES = ('zh-CN', 'en', 'zh-TW', 'ja')     # lang_ids 0..3, in the packs' own order
 U16_MAX = 0xFFFF
 
 
 class StockStringsError(ValueError):
-    """The image is not a stock 7.2.4 app, or a pack is not where/what it should be."""
+    """The image is not a stock app of a known version, or a pack is not where/what its version
+    file says it should be."""
 
 
-class PackSpec:
-    """Where a pack lives and how big it must be (a fingerprint of stock 7.2.4).
+def version_of(data, base=None):
+    """(base, stockver.Version) for an image, with this tool's wording on a refusal."""
+    try:
+        return stockver.identify(data, base)
+    except stockver.UnknownVersion as e:
+        ref = stockver.baseline()
+        tail = (f' -- not stock {ref.label} and not any other version in tools/stockver.d/: the '
+                f'string packs sit at different addresses in every build, so reading here would '
+                f'read something else entirely' if ref else '')
+        raise StockStringsError(f'{e}{tail}') from None
+    except stockver.StockVerError as e:
+        raise StockStringsError(str(e)) from None
 
-    `header_va` is None for the headerless toast pack, which instead names `offsets_va`, `blob_va`
-    and `blob_size` outright. `limit_va` is the first VA after the pack that holds live data: the
-    free tail can never reach it."""
 
-    def __init__(self, name, groups, limit_va, header_va=None, offsets_va=None, blob_va=None,
-                 blob_size=None, what=''):
-        self.name, self.groups, self.limit_va, self.what = name, groups, limit_va, what
-        self.header_va, self.offsets_va, self.blob_va, self.blob_size = \
-            header_va, offsets_va, blob_va, blob_size
+def _baseline():
+    """The baseline version (tools/stockver.d/7.2.4.json), for the CLI's `--pack` choices, the help
+    epilog and the module-level defaults. The image at hand always decides for itself."""
+    return stockver.baseline()
 
 
-PACKS = {
-    'counts': PackSpec('counts', 18, 0x3c3f7d54, header_va=0x3c3f7a08,
-                       what='count formats (%d books, %d/%d)'),
-    'labels': PackSpec('labels', 234, 0x3c3fb988, header_va=0x3c3f7d54,
-                       what='every menu / settings / panel label'),
-    'toasts': PackSpec('toasts', 688, 0x3c4a0e31, offsets_va=0x3c490124, blob_va=0x3c4916a4,
-                       blob_size=63373, what='toasts, dialogs, buttons (headerless)'),
-}
-PACK_NAMES = tuple(PACKS)
+_REF = _baseline()
+PACKS = dict(_REF.packs) if _REF else {}        # the baseline version's packs
+PACK_NAMES = tuple(PACKS) or ('counts', 'labels', 'toasts')
+LANG_COUNT = (_REF.lang_count if _REF and _REF.lang_count else len(LANG_NAMES))
+LANGS = LANG_NAMES[:LANG_COUNT]
 # a handful of the label pack's group ids, printed by `list` and useful in messages
-KNOWN_GROUPS = {0: 'Bookshelf', 6: 'Read', 8: 'Extensions', 9: 'Lua Apps', 10: 'All Files',
-                11: 'USB Mode', 13: 'Settings', 50: 'Bluetooth', 64: 'Developer', 65: 'Memory',
-                66: 'Boost', 67: 'Full Refresh', 68: 'Light', 70: 'Screen Capture',
-                71: 'Sleep Lock', 91: 'Language', 137: 'Cloud Sync', 168: 'Upgrade',
-                169: 'About Device', 192: 'System Font'}
+KNOWN_GROUPS = dict(_REF.known_groups) if _REF else {}
 
 
 # ---------------------------------------------------------------- VA -> file offset
@@ -146,11 +153,12 @@ def segment_map(data, base):
             for off, length in lay['segments']]
 
 
-def va_to_file(segs, va, what='address'):
+def va_to_file(segs, va, what='address', label='a stock app'):
     for load, off, length in segs:
         if load <= va < load + length:
             return off + va - load
-    raise StockStringsError(f'{what} {va:#x} is in no segment of this image: not a stock 7.2.4 app')
+    raise StockStringsError(f'{what} {va:#x} is in no segment of this image: not {label} as its '
+                            f'version file describes it')
 
 
 # ---------------------------------------------------------------- the pack itself
@@ -161,35 +169,39 @@ class Pack:
     is the first blob byte no live string uses at the end of the blob; the tail runs from there to
     `free_end` (the blob end plus the zero padding that follows it, never past `spec.limit_va`)."""
 
-    def __init__(self, data, base, spec):
-        self.spec, self.base, self.data = spec, base, data
+    def __init__(self, data, base, spec, ver):
+        self.spec, self.base, self.data, self.ver = spec, base, data, ver
+        self.lang_count = ver.need_lang_count()
+        self.langs = LANG_NAMES[:self.lang_count]
+        lc, label = self.lang_count, ver.label
         segs = segment_map(data, base)
         self.segs = segs
         if spec.header_va is not None:
-            self.header_off = va_to_file(segs, spec.header_va, f'{spec.name} pack header')
+            self.header_off = va_to_file(segs, spec.header_va, f'{spec.name} pack header', label)
             groups, langs = struct.unpack_from('<HH', data, self.header_off)
             ids = bytes(data[self.header_off + 4:self.header_off + 8])
             self.blob_size = struct.unpack_from('<H', data, self.header_off + 8)[0]
-            if langs != LANG_COUNT or ids != bytes(range(LANG_COUNT)) or groups != spec.groups:
+            if langs != lc or ids[:lc] != bytes(range(lc)) or groups != spec.groups:
                 raise StockStringsError(
                     f'the {spec.name} pack at {spec.header_va:#x} reads group_count={groups} '
                     f'lang_count={langs} lang_ids={list(ids)}, expected {spec.groups}, '
-                    f'{LANG_COUNT}, {list(range(LANG_COUNT))}: this is not stock xteink_app 7.2.4')
+                    f'{lc}, {list(range(lc))}: this is not stock {label} as {ver.file} '
+                    f'describes it')
             self.groups = groups
             self.offsets_off = self.header_off + 10
         else:
             self.header_off = None
             self.groups, self.blob_size = spec.groups, spec.blob_size
-            self.offsets_off = va_to_file(segs, spec.offsets_va, f'{spec.name} pack offsets')
-        self.blob_off = (self.offsets_off + self.groups * LANG_COUNT * 2 if spec.header_va is not None
-                         else va_to_file(segs, spec.blob_va, f'{spec.name} pack blob'))
+            self.offsets_off = va_to_file(segs, spec.offsets_va, f'{spec.name} pack offsets', label)
+        self.blob_off = (self.offsets_off + self.groups * lc * 2 if spec.header_va is not None
+                         else va_to_file(segs, spec.blob_va, f'{spec.name} pack blob', label))
         self.start_off = self.header_off if self.header_off is not None else self.offsets_off
-        self.limit_off = va_to_file(segs, spec.limit_va, f'{spec.name} pack limit')
+        self.limit_off = va_to_file(segs, spec.limit_va, f'{spec.name} pack limit', label)
         self.reload()
 
     # --- reading -----------------------------------------------------------------------------
     def reload(self):
-        d, n = self.data, self.groups * LANG_COUNT
+        d, n = self.data, self.groups * self.lang_count
         if self.header_off is not None:
             self.blob_size = struct.unpack_from('<H', d, self.header_off + 8)[0]
         self.offsets = list(struct.unpack_from(f'<{n}H', d, self.offsets_off))
@@ -234,14 +246,15 @@ class Pack:
         if not 0 <= group < self.groups:
             raise StockStringsError(f'{self.spec.name}: group {group} is out of range '
                                     f'(0..{self.groups - 1})')
-        return group * LANG_COUNT + lang
+        return group * self.lang_count + lang
 
     def group_strings(self, group):
-        return [self.string(self.offsets[self.slot(group, l)]) for l in range(LANG_COUNT)]
+        return [self.string(self.offsets[self.slot(group, l)]) for l in range(self.lang_count)]
 
     def sharers(self, off):
         """Every (group, lang) whose offset is `off` -- the slots an in-place overwrite would hit."""
-        return [(i // LANG_COUNT, i % LANG_COUNT) for i, o in enumerate(self.offsets) if o == off]
+        return [(i // self.lang_count, i % self.lang_count)
+                for i, o in enumerate(self.offsets) if o == off]
 
     # --- writing -----------------------------------------------------------------------------
     def write_blob(self, blob, blob_size=None):
@@ -270,11 +283,15 @@ def open_image(path):
 
 
 def parse_pack(data, base, name):
-    spec = PACKS.get(name)
-    if spec is None:
-        raise StockStringsError(f'unknown pack {name!r}; have {", ".join(PACK_NAMES)}')
+    """One pack of the image at `base`, using the addresses of *its* version's file."""
+    _base, ver = version_of(data, base)
+    if name not in ver.packs and name not in PACK_NAMES:
+        raise StockStringsError(f'unknown pack {name!r}; have '
+                                f'{", ".join(ver.packs or PACK_NAMES)}')
     try:
-        return Pack(data, base, spec)
+        return Pack(data, base, ver.need_pack(name), ver)
+    except stockver.StockVerError as e:
+        raise StockStringsError(str(e)) from None
     except StockDevError as e:
         raise StockStringsError(str(e))
 
@@ -283,18 +300,22 @@ def read_pack(data, base, name):
     """[{'group', 'strings': [4], 'offsets': [4]}] plus the pack's own numbers, for scripts."""
     p = parse_pack(data, base, name)
     return {'pack': name, 'groups': p.groups, 'blob_size': p.blob_size, 'free': p.free_end - p.free_start,
-            'entries': [{'group': g, 'offsets': p.offsets[g * LANG_COUNT:(g + 1) * LANG_COUNT],
+            'entries': [{'group': g,
+                         'offsets': p.offsets[g * p.lang_count:(g + 1) * p.lang_count],
                          'strings': p.group_strings(g)} for g in range(p.groups)]}
 
 
-def lang_index(name):
+def lang_index(name, langs=LANGS):
+    """`en` / `0` -> the language index. `langs` is the pack's own list of languages (the baseline
+    version's four when it is left out)."""
     s = str(name).strip()
-    if s.isdigit() and 0 <= int(s) < LANG_COUNT:
+    if s.isdigit() and 0 <= int(s) < len(langs):
         return int(s)
-    for i, l in enumerate(LANGS):
+    for i, l in enumerate(langs):
         if s.lower() == l.lower():
             return i
-    raise StockStringsError(f'unknown language {name!r}; have {", ".join(LANGS)} (or 0..3)')
+    raise StockStringsError(f'unknown language {name!r}; have {", ".join(langs)} '
+                            f'(or 0..{len(langs) - 1})')
 
 
 # ---------------------------------------------------------------- set / compact / restore
@@ -303,7 +324,7 @@ def set_string(data, base, name, group, lang, text, append=False, shared=False):
     checksum + SHA-256 refreshed. `append` forces the appended path even when the text would fit;
     `shared` allows an in-place overwrite that changes every slot sharing the old string."""
     p = parse_pack(data, base, name)
-    lang = lang_index(lang)
+    lang = lang_index(lang, p.langs)
     new = text.encode('utf-8')
     if b'\0' in new:
         raise StockStringsError('a label cannot contain a NUL byte')
@@ -312,8 +333,8 @@ def set_string(data, base, name, group, lang, text, append=False, shared=False):
     old = p.string(old_off)
     old_len = len(old.encode('utf-8')) if old_off else -1
     others = [s for s in p.sharers(old_off) if s != (group, lang)] if old_off else []
-    rep = {'pack': name, 'group': group, 'lang': LANGS[lang], 'old': old, 'new': text,
-           'old_offset': old_off, 'shared_with': [(g, LANGS[l]) for g, l in others]}
+    rep = {'pack': name, 'group': group, 'lang': p.langs[lang], 'old': old, 'new': text,
+           'old_offset': old_off, 'shared_with': [(g, p.langs[l]) for g, l in others]}
 
     fits = old_off != 0 and len(new) <= old_len and (shared or not others)
     if fits and not append:
@@ -327,7 +348,7 @@ def set_string(data, base, name, group, lang, text, append=False, shared=False):
         free = p.free_end - p.free_start
         if need > free:
             why = ('the text is longer than the old string' if len(new) > old_len else
-                   'the old string is shared with ' + ', '.join(f'{g}/{LANGS[l]}' for g, l in others)
+                   'the old string is shared with ' + ', '.join(f'{g}/{p.langs[l]}' for g, l in others)
                    if others else 'an appended write was asked for')
             raise StockStringsError(
                 f'{name}: {why}, so it has to be appended, but the pack\'s free tail is {free} '
@@ -398,8 +419,8 @@ def compact_pack(data, base, name):
     now = [after.string(o) for o in after.offsets]
     if now != was:
         bad = next(i for i, (a, b) in enumerate(zip(was, now)) if a != b)
-        raise StockStringsError(f'{name}: compaction changed group {bad // LANG_COUNT} '
-                                f'{LANGS[bad % LANG_COUNT]} from {was[bad]!r} to {now[bad]!r}')
+        raise StockStringsError(f'{name}: compaction changed group {bad // p.lang_count} '
+                                f'{p.langs[bad % p.lang_count]} from {was[bad]!r} to {now[bad]!r}')
     if not (ok_c and ok_h):
         raise StockStringsError(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
                                 f'hash_ok={ok_h}) -- refusing to write it')
@@ -430,16 +451,17 @@ def restore_pack(data, base, orig, orig_base, name):
 
 
 # ---------------------------------------------------------------- CLI
-def kind_of(data, base):
+def kind_of(data, base, ver=None):
     return ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + \
-        f', {len(data)} bytes'
+        f', {len(data)} bytes' + (f', {ver.label}' if ver else '')
 
 
 def print_group(p, g, lang=None, prefix=''):
     ss = p.group_strings(g)
-    note = f'  [{KNOWN_GROUPS[g]}]' if p.spec.name == 'labels' and g in KNOWN_GROUPS else ''
+    known = p.ver.known_groups
+    note = f'  [{known[g]}]' if p.spec.name == 'labels' and g in known else ''
     if lang is None:
-        print(f'{prefix}{g:4}  ' + ' | '.join(f'{LANGS[i]}: {s}' for i, s in enumerate(ss)) + note)
+        print(f'{prefix}{g:4}  ' + ' | '.join(f'{p.langs[i]}: {s}' for i, s in enumerate(ss)) + note)
     else:
         print(f'{prefix}{g:4}  {ss[lang]}{note}')
 
@@ -456,7 +478,8 @@ def main(argv=None):
                                  epilog='packs: ' + ', '.join(f'{n} ({p.groups} groups, {p.what})'
                                                               for n, p in PACKS.items()),
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('image', help='a stock 7.2.4 app image, or a 16 MB flash image (app0 at 0x10000)')
+    ap.add_argument('image', help='a stock app image of a known version (tools/stockver.py '
+                                  'versions), or a 16 MB flash image (app0 at 0x10000)')
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     def add_pack(p, choices=PACK_NAMES):
@@ -493,15 +516,16 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         data, base = open_image(a.image)
-        packs = PACK_NAMES if getattr(a, 'pack', None) == 'all' else (a.pack,)
+        base, ver = version_of(data, base)          # refuses an unknown build before any read
+        packs = tuple(ver.packs) if getattr(a, 'pack', None) == 'all' else (a.pack,)
 
         if a.cmd == 'list':
             lang = lang_index(a.lang) if a.lang else None
             for name in packs:
                 p = parse_pack(data, base, name)
-                print(f'{a.image}: {kind_of(data, base)}\n'
-                      f'{name} pack: {p.groups} groups x {LANG_COUNT} languages '
-                      f'({", ".join(LANGS)}), blob {p.blob_size} bytes at file {p.blob_off:#x}'
+                print(f'{a.image}: {kind_of(data, base, ver)}\n'
+                      f'{name} pack: {p.groups} groups x {p.lang_count} languages '
+                      f'({", ".join(p.langs)}), blob {p.blob_size} bytes at file {p.blob_off:#x}'
                       f', free tail {p.free_end - p.free_start} bytes  -- {p.spec.what}')
                 for g in range(p.groups):
                     ss = p.group_strings(g)
@@ -514,7 +538,7 @@ def main(argv=None):
         elif a.cmd == 'set':
             r = set_string(data, base, a.pack, a.group, a.lang, a.text, a.append, a.shared)
             dst = write_out(a.image, data, a.out)
-            print(f'{a.image}: {kind_of(data, base)}\n'
+            print(f'{a.image}: {kind_of(data, base, ver)}\n'
                   f'  {a.pack} group {r["group"]} {r["lang"]}: {r["old"]!r} -> {r["new"]!r} '
                   f'({r["mode"]}, offset {r["old_offset"]} -> {r["offset"]}, blob {r["blob_size"]} '
                   f'bytes, free tail {r["free_after"]})\n'

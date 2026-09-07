@@ -1,0 +1,103 @@
+{
+  "project": "xteink_app",
+  "version": "7.2.4",
+  "app_elf_sha256": "5e6f90d4ab9035c188d586df3276ca67bd088e240e58aa1ecb02b8c66fa0f4df",
+  "app_sha256": "c1fed9ff411775bb72aadf51529a707b4d54f2c46e5a6ebdf51dc0f77d8a2fc1",
+  "app_bytes": 5503680,
+  "built": "19:25:05 Aug 14 2026",
+  "idf": "v6.0.1",
+  "source": "images/device/stock-app0-7.2.4.bin",
+  "note": "The baseline: the app0 slot of the device dumps of 2026-09-06, and the version every address in docs/stock-firmware.md and docs/xic.md was found in. The device itself took an OTA to 7.5.4 on 2026-09-07; 7.2.4 stays the reference the emulator work was done on.",
+
+  "dev_stub": {
+    "app_offset": "0x4eabe0",
+    "va": "0x4233abe0",
+    "stub": "36 41 00 0c 02 1d f0",
+    "movi_index": 4,
+    "unpatched": "0x02",
+    "patched": "0x12",
+    "evidence": "The developer-mode predicate is a compile-time stub (entry a1,32 / movi.n a2,0 / retw.n) at app VA 0x4233abe0, segment 2 (IROM, load 0x42000020 at file 0x1b0020); nothing in 7.2.4 makes it return anything else, so the light panel never shows Memory / Developer / Screen Capture (docs/xic.md, 'How developer mode is enabled')."
+  },
+
+  "patches": {
+    "developer-menu": {
+      "app_offset": "0x4eabe0",
+      "va": "0x4233abe0",
+      "original": "36 41 00 0c 02 1d f0",
+      "patched": "36 41 00 0c 12 1d f0",
+      "description": "developer mode: Memory / Developer / Screen Capture in the light panel",
+      "detail": "movi.n a2,0 -> movi.n a2,1 in the developer-mode predicate stub (byte +4)",
+      "docs": "docs/xic.md; the same bytes as tools/stockdev.py",
+      "evidence": "Same site as dev_stub: the whole 7-byte stub is matched so the 0x12 is never written into another build's instruction stream."
+    },
+    "hidden-menu-rows": {
+      "app_offset": "0x4f516a",
+      "va": "0x4234516a",
+      "original": "b6 29 07",
+      "patched": "b6 29 ff",
+      "description": "nav menu: unhide the Preload List and Statistics rows (gate A)",
+      "detail": "bltui a9,2,+7 -> bltui a9,2,+255: menu slots 1 and 2 stop being skipped",
+      "docs": "docs/stock-firmware.md, \"Probed in session 7\"",
+      "evidence": "The nav-menu builder walks menu slots 0..7 through the predicate at VA 0x42345158, whose bltui a9,2,+7 hides slots 1 and 2; moving the branch target past the return grows the menu to seven rows, both new pages functional."
+    },
+    "lua-apps-row": {
+      "app_offset": "0x2ed873",
+      "va": "0x4213d873",
+      "original": "82 02 ac",
+      "patched": "82 a0 01",
+      "description": "nav menu: a sixth row \"Lua Apps\" that opens the Lua app list (page 0x09)",
+      "detail": "l8ui a8,a2,172 -> movi a8,1 in the nav-menu builder: slot 3 is always appended",
+      "docs": "docs/lua-apps.md",
+      "evidence": "FUN_4213d834 skips slot 3 in its loop and appends it only when presenter+172 is non-zero, which nothing ever writes; making the load a constant 1 gives the menu its Lua Apps row into AppsPagePresenter (page 0x09)."
+    }
+  },
+
+  "packs": {
+    "counts": {
+      "groups": 18,
+      "limit_va": "0x3c3f7d54",
+      "header_va": "0x3c3f7a08",
+      "what": "count formats (%d books, %d/%d)",
+      "evidence": "Headed pack in DROM; its blob ends one byte before the label pack's header, so its free tail is 1 byte (docs/stock-firmware.md section 6)."
+    },
+    "labels": {
+      "groups": 234,
+      "limit_va": "0x3c3fb988",
+      "header_va": "0x3c3f7d54",
+      "what": "every menu / settings / panel label",
+      "evidence": "Headed pack: 234 groups x 4 languages, blob 13,528 bytes at VA 0x3c3f84ae. The blob ends at 0x3c3fb986 and the DROM bitmap directory starts at 0x3c3fb988, so the stock free tail is 2 bytes until `stockstrings.py compact` frees 497."
+    },
+    "toasts": {
+      "groups": 688,
+      "limit_va": "0x3c4a0e31",
+      "offsets_va": "0x3c490124",
+      "blob_va": "0x3c4916a4",
+      "blob_size": 63373,
+      "what": "toasts, dialogs, buttons (headerless)",
+      "evidence": "No header: the u16 offsets[688][4] array starts right after the 0xff that ends the XTZB table at 0x3c48fe94, and the blob follows it. Found by walking back from the blob docs/stock-firmware.md names: group 0 = Cancel, group 3 = 'Region set successfully'. The blob ends where the user_config string of the ordinary string table begins, so it cannot grow."
+    }
+  },
+  "lang_count": 4,
+  "known_groups": {
+    "0": "Bookshelf",
+    "6": "Read",
+    "8": "Extensions",
+    "9": "Lua Apps",
+    "10": "All Files",
+    "11": "USB Mode",
+    "13": "Settings",
+    "50": "Bluetooth",
+    "64": "Developer",
+    "65": "Memory",
+    "66": "Boost",
+    "67": "Full Refresh",
+    "68": "Light",
+    "70": "Screen Capture",
+    "71": "Sleep Lock",
+    "91": "Language",
+    "137": "Cloud Sync",
+    "168": "Upgrade",
+    "169": "About Device",
+    "192": "System Font"
+  }
+}

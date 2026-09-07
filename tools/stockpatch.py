@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Named byte patches on a stock `xteink_app` 7.2.4 image, verified before and after.
+r"""Named byte patches on a stock `xteink_app` image, verified before and after.
 
   stockpatch.py list IMAGE                  every patch and its state (applied / original / unknown)
   stockpatch.py apply IMAGE PATCH...        write the patched bytes, re-checksum, verify
@@ -17,7 +17,18 @@ after the last segment and the appended SHA-256 the second-stage bootloader veri
 `stockdev.refresh_image` / `verify_image`, imported, not copied; `tools/stockdev.py` keeps its own
 CLI and is the `developer-menu` patch below in one-command form.
 
-THE MANIFEST (`PATCHES`; each entry is name, description, app_offset, original, patched)
+THE MANIFEST IS PER VERSION (tools/stockver.py)
+    A patch site belongs to one build, not to this tool: the manifest lives in
+    `tools/stockver.d/<version>.json` (`patches`), one file per stock version, and the image picks
+    its own by what its `esp_app_desc` says (project + version, with `app_elf_sha256` as the
+    identity of the build). `stockver.identify` does the picking and the hash check;
+    `tools/stockver.py versions` lists what is known and its module docstring is the schema. A
+    version with no file is refused, and so is a patch name that version's file does not carry --
+    "not located in this version" is a safe answer, a guessed offset is not. `PATCHES` here is the
+    manifest of the baseline version (7.2.4) for scripts that want the table without an image;
+    `patches_for(data)` is the manifest of a given image.
+
+    Stock 7.2.4 (`tools/stockver.d/7.2.4.json`), as one version among several:
 
     | name              | app offset | app VA     | bytes                    |
     |-------------------|------------|------------|--------------------------|
@@ -57,13 +68,14 @@ WHAT `apply` / `revert` GUARANTEE
         .venv/bin/python -m esptool --chip esp32s3 image-info OUT.bin
             -> "Checksum: ... (valid)" and "Validation hash: ... (valid)"
 
-    The image's `esp_app_desc` is read too: a project name / version other than `xteink_app` 7.2.4
-    is refused before any offset is touched.
+    The image's `esp_app_desc` is read first: a project name / version no `tools/stockver.d/` file
+    describes, or an `app_elf_sha256` that is not the one that file names, is refused before any
+    offset is touched (our patches change an image but never its ELF hash).
 
 EXIT STATUS
     0  every named patch is in the wanted state (or `list --check`: all applied)
     1  `--check` only: at least one named patch is not in the wanted state (nothing was written)
-    2  refused: not a stock 7.2.4 app image, unknown bytes at a patch site, or an unknown name
+    2  refused: an unknown firmware version, unknown bytes at a patch site, or an unknown name
 
 SAFETY
     A flash image made from the device dump still carries the owner's WiFi credentials in its NVS
@@ -75,141 +87,110 @@ SAFETY
         .venv/bin/python tools/x4emu --name lp1 run --flash $S/flash.bin --sd $S/sd.img \
             --boot-hold-power
 
-`PATCHES`, `state()`, `states()`, `apply()`, `revert()` and `app_version()` are importable; `apply`
-and `revert` return `(new_bytes, report)` and raise `StockPatchError` on anything unexpected.
+`PATCHES`, `patches_for()`, `state()`, `states()`, `apply()`, `revert()` and `app_version()` are
+importable; `apply` and `revert` return `(new_bytes, report)` and raise `StockPatchError` on
+anything unexpected.
 """
 import argparse, os, sys
-from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import stockver                                                                # noqa: E402
+from stockver import Patch                                                     # noqa: E402,F401
 from stockdev import (FLASH_SIZE, APP0_OFF, StockDevError, app_base,           # noqa: E402,F401
                       image_layout, refresh_image, verify_image)
 
-APP_BYTES = 5503680                     # images/device/stock-app0-7.2.4.bin (for messages only)
-PROJECT, VERSION = 'xteink_app', '7.2.4'
-DESC_OFF = 0x20                         # esp_app_desc: 24-byte image header + 8-byte segment header
-DESC_MAGIC = 0xABCD5432
 APPLIED, ORIGINAL, UNKNOWN = 'applied', 'original', 'unknown'
+DESC_OFF = stockver.DESC_OFF            # esp_app_desc: 24-byte image header + 8-byte segment header
+DESC_MAGIC = stockver.DESC_MAGIC
 
 
 class StockPatchError(ValueError):
-    """The image is not a stock 7.2.4 app, or a patch site does not hold the bytes it must hold."""
+    """The image is not a stock app of a known version, or a patch site does not hold the bytes the
+    version file says it must hold."""
 
 
-@dataclass(frozen=True)
-class Patch:
-    """One named byte patch. `app_offset` is an offset into the *app image*; a 16 MB flash image
-    adds `app_base` (0x10000). `original` and `patched` are equal-length byte strings and include
-    enough context (a whole instruction, or the stub around it) to identify the site."""
-    name: str
-    description: str
-    app_offset: int
-    original: bytes
-    patched: bytes
-    va: int = 0                          # the app virtual address of app_offset (documentation)
-    detail: str = ''                     # what the changed instruction does
-    docs: str = ''
-
-    def __post_init__(self):
-        assert len(self.original) == len(self.patched) and self.original != self.patched, self.name
-
-    @property
-    def size(self):
-        return len(self.original)
-
-    def window(self, data, base=0):
-        off = base + self.app_offset
-        return bytes(data[off:off + self.size])
-
-    def state(self, data, base=0):
-        """'applied', 'original' or 'unknown' for the bytes at this site."""
-        got = self.window(data, base)
-        return {self.patched: APPLIED, self.original: ORIGINAL}.get(got, UNKNOWN)
+def _baseline_patches():
+    """The manifest of the baseline version, for scripts that want the table without an image.
+    Empty (never a guess) when tools/stockver.d/ has no file for it."""
+    ref = stockver.baseline()
+    return dict(ref.patches) if ref else {}
 
 
-PATCHES = {p.name: p for p in (
-    Patch(name='developer-menu',
-          description='developer mode: Memory / Developer / Screen Capture in the light panel',
-          app_offset=0x4eabe0, va=0x4233abe0,
-          original=bytes((0x36, 0x41, 0x00, 0x0c, 0x02, 0x1d, 0xf0)),
-          patched=bytes((0x36, 0x41, 0x00, 0x0c, 0x12, 0x1d, 0xf0)),
-          detail='movi.n a2,0 -> movi.n a2,1 in the developer-mode predicate stub (byte +4)',
-          docs='docs/xic.md; the same bytes as tools/stockdev.py'),
-    Patch(name='hidden-menu-rows',
-          description='nav menu: unhide the Preload List and Statistics rows (gate A)',
-          app_offset=0x4f516a, va=0x4234516a,
-          original=bytes((0xb6, 0x29, 0x07)), patched=bytes((0xb6, 0x29, 0xff)),
-          detail='bltui a9,2,+7 -> bltui a9,2,+255: menu slots 1 and 2 stop being skipped',
-          docs='docs/stock-firmware.md, "Probed in session 7"'),
-    Patch(name='lua-apps-row',
-          description='nav menu: a sixth row "Lua Apps" that opens the Lua app list (page 0x09)',
-          app_offset=0x2ed873, va=0x4213d873,
-          original=bytes((0x82, 0x02, 0xac)), patched=bytes((0x82, 0xa0, 0x01)),
-          detail='l8ui a8,a2,172 -> movi a8,1 in the nav-menu builder: slot 3 is always appended',
-          docs='docs/lua-apps.md'),
-)}
+PATCHES = _baseline_patches()           # tools/stockver.d/7.2.4.json, the reference manifest
+
+
+def patches_for(data, base=None):
+    """The patch manifest of *this* image's version: {name: Patch}, in file order."""
+    return dict(version_of(data, base)[1].patches)
 
 
 # ---------------------------------------------------------------- reading an image
 def app_version(data, base=0):
     """(project_name, version) from the image's `esp_app_desc`, or (None, None) when the descriptor
     magic is not there."""
-    off = base + DESC_OFF
-    if len(data) < off + 0x60 or int.from_bytes(bytes(data[off:off + 4]), 'little') != DESC_MAGIC:
-        return None, None
-    def s(at):
-        raw = bytes(data[off + at:off + at + 32])
-        return raw.split(b'\0', 1)[0].decode('utf-8', 'replace')
-    return s(0x30), s(0x10)
+    desc = stockver.app_desc(data, base)
+    return (desc['project'], desc['version']) if desc else (None, None)
+
+
+def version_of(data, base=None):
+    """(base, stockver.Version) for an image, with this tool's wording on a refusal."""
+    try:
+        return stockver.identify(data, base)
+    except stockver.UnknownVersion as e:
+        ref = stockver.baseline()
+        tail = (f' -- not {ref.label} ({ref.app_bytes} bytes) and not any other version in '
+                f'tools/stockver.d/: every offset in this tool was found per version and means '
+                f'nothing in another build, so find the sites again (tools/appdis.py, '
+                f'tools/ghidra_stock.py) before patching anything' if ref else '')
+        raise StockPatchError(f'{e}{tail}') from None
+    except stockver.StockVerError as e:
+        raise StockPatchError(str(e)) from None
 
 
 def check_image(data, base=None):
-    """Parse `data` as a stock 7.2.4 app or flash image; returns (base, layout). Raises
-    StockPatchError when it is another firmware -- before any offset is written."""
+    """Parse `data` as a stock app or flash image of a known version; returns (base, layout,
+    version). Raises StockPatchError when it is another firmware -- before any offset is written."""
     try:
-        base = app_base(data) if base is None else base
+        base, ver = version_of(data, base)
         lay = image_layout(data, base)
     except StockDevError as e:
         raise StockPatchError(str(e)) from None
-    project, version = app_version(data, base)
-    if (project, version) != (PROJECT, VERSION):
-        raise StockPatchError(
-            f'the image at {base:#x} is {project or "?"} {version or "?"}, not {PROJECT} {VERSION}: '
-            f'every offset in this tool was found in stock 7.2.4 ({APP_BYTES} bytes) and means '
-            f'nothing in another build -- find the sites again (tools/appdis.py, tools/ghidra_stock.py) '
-            f'before patching anything')
     end = lay['end'] - base
-    for p in PATCHES.values():
+    for p in ver.patches.values():
         if p.app_offset + p.size > end:
             raise StockPatchError(f'the image ends at app offset {end:#x}, before the '
                                   f'{p.name} site at {p.app_offset:#x}')
-    return base, lay
+    return base, lay, ver
 
 
-def resolve(names):
-    """['all'] or a list of patch names -> the Patch objects, in manifest order."""
+def resolve(names, patches=None):
+    """['all'] or a list of patch names -> the Patch objects, in manifest order. `patches` is the
+    manifest of the image at hand (the baseline manifest when it is left out)."""
+    patches = PATCHES if patches is None else patches
+    if not patches:
+        raise StockPatchError('this version has no patch sites: ' + stockver.where_to_add())
     if not names:
-        raise StockPatchError('no patch named (try `all`, or ' + ', '.join(PATCHES) + ')')
+        raise StockPatchError('no patch named (try `all`, or ' + ', '.join(patches) + ')')
     if list(names) == ['all']:
-        return list(PATCHES.values())
+        return list(patches.values())
     for n in names:
-        if n not in PATCHES:
-            raise StockPatchError(f'unknown patch {n!r}: known names are ' + ', '.join(PATCHES) +
+        if n not in patches:
+            raise StockPatchError(f'unknown patch {n!r}: known names are ' + ', '.join(patches) +
                                   ' (or `all`)')
-    return [p for n, p in PATCHES.items() if n in set(names)]      # always in manifest order
+    return [p for n, p in patches.items() if n in set(names)]      # always in manifest order
 
 
 def state(data, name, base=None):
     """'applied' / 'original' / 'unknown' for one named patch."""
-    base, _ = check_image(data, base)
-    return PATCHES[name].state(data, base)
+    base, _, ver = check_image(data, base)
+    return ver.need_patch(name).state(data, base)
 
 
 def states(data, base=None):
     """{name: {'state', 'offset', 'bytes', ...}} for every patch in the manifest."""
-    base, _ = check_image(data, base)
+    base, _, ver = check_image(data, base)
     out = {}
-    for p in PATCHES.values():
+    for p in ver.patches.values():
         out[p.name] = {'state': p.state(data, base), 'offset': base + p.app_offset,
                        'app_offset': p.app_offset, 'va': p.va, 'bytes': p.window(data, base).hex(' '),
                        'original': p.original.hex(' '), 'patched': p.patched.hex(' '),
@@ -221,8 +202,8 @@ def states(data, base=None):
 def _write(data, names, want, verb):
     """The shared body of apply/revert. `want` is the byte string attribute to end up with."""
     data = bytearray(data)
-    base, _ = check_image(data)
-    patches = resolve(names)
+    base, _, ver = check_image(data)
+    patches = resolve(names, ver.patches)
     changes = []
     for p in patches:
         st = p.state(data, base)
@@ -244,7 +225,7 @@ def _write(data, names, want, verb):
         raise StockPatchError(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
                               f'hash_ok={ok_h}) -- refusing to write it')
     return bytes(data), {
-        'base': base, 'changes': changes,
+        'base': base, 'version': ver.version, 'project': ver.project, 'changes': changes,
         'checksum_offset': lay['checksum_off'], 'checksum': data[lay['checksum_off']],
         'hash_offset': lay['hash_off'],
         'sha256': bytes(data[lay['hash_off']:lay['hash_off'] + 32]).hex()
@@ -253,8 +234,9 @@ def _write(data, names, want, verb):
 
 
 def apply(data, names):
-    """Apply the named patches (or `['all']`) to the bytes of a stock 7.2.4 app or flash image.
-    Returns (new bytes, report); raises StockPatchError rather than writing over unknown bytes."""
+    """Apply the named patches (or `['all']`) to the bytes of a stock app or flash image of a
+    known version. Returns (new bytes, report); raises StockPatchError rather than writing over
+    unknown bytes."""
     return _write(data, names, 'patched', 'apply')
 
 
@@ -264,15 +246,20 @@ def revert(data, names):
 
 
 # ---------------------------------------------------------------- CLI
-def _kind(data, base):
-    return ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + f', {len(data)} bytes'
+def _kind(data, base, ver=None):
+    return ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + \
+        f', {len(data)} bytes' + (f', {ver.label}' if ver else '')
 
 
 def _do_list(a, data):
-    base, _ = check_image(data)
+    base, _, ver = check_image(data)
     ok_c, ok_h = verify_image(data, base)
     rows = states(data, base)
-    print(f'{a.image}: {_kind(data, base)}\n'
+    if not rows:
+        print(f'{a.image}: {_kind(data, base, ver)}\n'
+              f'  no patch sites are located in {ver.label} ({ver.file})')
+        return 2 if a.check else 0
+    print(f'{a.image}: {_kind(data, base, ver)}\n'
           f'  checksum {"valid" if ok_c else "INVALID"}, '
           f'{"hash " + ("valid" if ok_h else "INVALID") if image_layout(data, base)["hash_off"] else "no appended hash"}')
     width = max(len(n) for n in rows)
@@ -289,11 +276,11 @@ def _do_list(a, data):
 
 
 def _do_write(a, data, verb):
-    base, _ = check_image(data)
-    patches = resolve(a.patches)
+    base, _, ver = check_image(data)
+    patches = resolve(a.patches, ver.patches)
     want = 'patched' if verb == 'apply' else 'original'
     target = APPLIED if verb == 'apply' else ORIGINAL
-    print(f'{a.image}: {_kind(data, base)}')
+    print(f'{a.image}: {_kind(data, base, ver)}')
     if a.check:
         rc = 0
         for p in patches:
@@ -332,13 +319,14 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd', required=True)
-    names = ', '.join(PATCHES) + ', all'
+    names = ', '.join(PATCHES) + ', all'      # the baseline names; the image's own manifest decides
     for verb, helptext in (('list', 'print every patch and its state'),
                            ('apply', 'write the patched bytes'),
                            ('revert', 'write the original bytes back')):
         p = sub.add_parser(verb, help=helptext, description=__doc__,
                            formatter_class=argparse.RawDescriptionHelpFormatter)
-        p.add_argument('image', help='a stock 7.2.4 app image, or a 16 MB flash image (app0 at 0x10000)')
+        p.add_argument('image', help='a stock app image of a known version '
+                                      '(tools/stockver.py versions), or a 16 MB flash image')
         if verb != 'list':
             p.add_argument('patches', nargs='+', metavar='PATCH', help=names)
             p.add_argument('-o', '--out', help='write here instead of editing IMAGE in place')
