@@ -5,63 +5,66 @@ Goal of the next phase, in the owner's words: run the **stock Xteink firmware** 
 **world class**. This document is the whole context you need; the previous agent's context is gone.
 Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
 
-## 0. Resume here (end of session 6, 2026-09-07)
+## 0. Resume here (end of session 7, 2026-09-07)
 
-**Work is organised as squads: read §10 before starting anything.** Sessions 5 and 6 ran the protocol with
-four to five agents in parallel; session 6 balanced cost as the owner asked (one Fable for the model that
-had to be inferred, Opus for the C work, Sonnet for the Python polish against a precise spec) — see the
-session-6 entry of `docs/log.md` for what each tier delivered.
+**Work is organised as squads: read §10 before starting anything.** Sessions 5–7 ran four to five agents in
+parallel with cost balancing (Fable only for models and symbol-less firmware reading, Opus for C/Python
+work with a mechanical acceptance, Sonnet for tap-path hunts and Python polish against a precise spec).
+The session-7 entries of `docs/log.md` say what each tier delivered.
 
-1. `cd /Users/mini/x4pro-emu && make test` — 65 cases (13 CrossPoint, 4 interface, 12 stock incl. the
-   relabel, font and capture tests, 36 fast), 7 min 50 s, green at the end of session 7 apart from one
-   stock tap per full-suite run that the firmware reads and ignores or answers with the wrong screen — the
-   stock tests retry such a tap once (`tap_repaints`, `tap()`, and `step()` with a golden per screen). Needs the built QEMU
-   (`qemu/build/qemu-system-xtensa`, patches 0001–0017), the CrossPoint build and the gitignored `images/`;
-   all present on this Mac. If `qemu/` were ever missing: `make setup && make build`. After exporting a
-   patch, `touch qemu/.x4pro-patched`. `qemu/build-s1/` and `qemu/build-s2/` are agents' complete build
-   directories (`X4EMU_QEMU=/Users/mini/x4pro-emu/qemu/build-sN/qemu-system-xtensa`; `tests/conftest.py`
-   honours the variable): the pattern for QEMU work beside other agents — rebuild before use, or delete.
-2. **Session 6 in one line:** a waveform-level grey model (UC8279 LUT interpreter + per-pixel reflectance,
-   `docs/grayscale.md`, off by default behind `waveform-gray`) that finds CrossPoint's anti-aliased text is
-   three-level on this panel because its AA bank has BW == WB; the SDMMC log noise gone (patch 0016, an
-   Espressif file: 484,963 → 1,788 lines per stock boot); 28 window/addressing tests that found and then
-   fixed three SSD1677 addressing gaps; `x4emu shell`, `x4emu watch`, the MCP server in-process with
-   record/replay. Everything committed on `main`; the owner pushes.
-3. ~~The grey verdict~~ **settled (2026-09-07):** the owner photographed the test book on the device; the glass
-   shows one uniform grey rim per glyph (the waveform model), measured at ~0.45 reflectance in the photo, so
-   the model is the default with `gray-k` 38; the CrossPoint reader goldens were regenerated.
-4. Carried over: **the stock ignores a tap now and then** — `x4emu tap` reports "read by the firmware after
-   0.03s" and no repaint follows (twice in three full-suite runs, always the first or second tap after Home,
-   never when the test runs alone; the tests retry). Unknown whether the device does the same: a question for
-   the parity harness (S6) — if the device never drops one, the emulator's timing around the pre-sent old
-   plane is suspect. The 4-level grey `.xic` (never observed); the QMP `pmemsave` zero pages (pause first); the
-   device oracle for a pixel-exact stock capture (optional, §0.3 of session 5 — needs the patched stock on
-   the device); D1–D4 (§9); the `esp32s3.gpspi +0x38` noise and an IO_MUX overlay (§10.3 S5 row).
-5. **The owner's direction (2026-09-07): enhance the stock firmware** — "making it prettier with better UX" —
-   with the emulator as the workbench. So S6 is re-scoped from "a custom firmware's debug console" to
-   **modding the closed-source stock app**: a survey of its UI layer first (`docs/stock-firmware.md`, a Fable
-   agent started at the end of session 6: binary shape, C++ classes from the mangled names, the drawing and
-   font path, `.xtf`/`.xic` formats, assets, strings, layout constants, risks, tooling), then a patch-manifest
-   tool generalising `tools/stockdev.py` (offset + expected bytes + new bytes, checksum/SHA-256 recompute,
-   apply/check/revert, a boot test), then data-only enhancements (fonts, wallpapers, splash, strings) before
-   code patches. Device rules unchanged: every modification is verified in the emulator, and the device only
-   through the guarded tools after the backup check. S7 upstream stays after that; the grey default flip
-   happens as soon as the owner answers on the crops.
-   **Session 7 status:** `tools/stockstrings.py` (relabel anything, verified), `tools/xtfont.py` (a converted TrueType font installs through Settings → System Font and
-   renders: the header carries two CRC-32s, now written), the card wallpaper path verified (no patch: All Files → image → Set as Wallpaper),
-   the nav menu's hidden Preload List / Statistics rows (one 3-byte patch), the Lua host mapped but never
-   invoked in 7.2.4 (a build-time stub on the standby/router path is the likely gate — needs Ghidra).
-   **The owner answered (2026-09-07):** Ghidra + a JDK may be installed (an Opus agent is installing
-   Temurin 21 + Ghidra + an Xtensa module and writing `tools/ghidra_stock.py`: headless analysis, exported
-   functions/xrefs/strings/calls, `xrefs`/`callers`/`func`/`decompile`). **Wish list:** "mostly just visual
-   enhancements as well as a smarter keyboard with some near miss correction (like the iPhone does) and
-   predictive suggestions along the top of it." So the order is: visual data-only wins (font, wallpaper,
-   labels, icons) → the keyboard: map the stock's keyboard classes and key-commit path (Ghidra), a hook
-   (new native code in the app slot's free area + a trampoline; the pioarduino Xtensa toolchain is on this
-   Mac), a dictionary on the card, the suggestion strip through the app's own text API — the hardest item
-   in the survey's list, planned as its own squad after the map. **Grey verdict:** the owner put the test
-   EPUB (`tests/mkepub.py`, the page the crops show) on the device's card via USB drive mode and will
-   photograph the page in CrossPoint; compare that photo with the two renderings and flip the default.
+1. `cd /Users/mini/x4pro-emu && make test` — 66 cases, 8 min 27 s, all green at the end of session 7 on QEMU
+   with patches 0001–0018 (the last run had no dropped tap; the stock tests retry one anyway). Needs the
+   built QEMU, the CrossPoint build and the gitignored `images/` (device dump, card mirror, ROM ELF, and now
+   `images/ghidra/` — rebuilt in a minute by `tools/ghidra_stock.py analyze`). `qemu/build-s1/`,
+   `build-s2/` are agents' build directories (`X4EMU_QEMU=…`): the pattern for QEMU work beside other agents.
+2. **An Opus agent was still running when session 7 ended** (started at the end of the session, 150-minute
+   box): `tools/stockpatch.py` (named patches: developer-menu, hidden-menu-rows, lua-apps-row; list/apply/
+   revert/--check), `tools/xtapp.py` (pack/info/install/new for the `app.xtapp` container),
+   `tests/test_stockpatch.py`, `tests/test_xtapp.py`, `tests/test_lua_apps.py` (boots the patched stock,
+   opens Lua Apps, runs the hello app; goldens `stock-menu-lua.png`, `stock-lua-apps.png`,
+   `stock-lua-hello.png`), `tests/data/hello-app/`, `docs/lua-apps.md`. **First thing next session:**
+   `git status` — if those files are there, read them, run their tests (fast ones twice, the emulator test
+   once), add the CLAUDE.md rows, commit; if the agent did not finish, the facts it needs are all in
+   `docs/stock-firmware.md` ("Probed in session 7") and its scratch (`…/scratchpad/lua/`, gone with the
+   session) — re-brief from the doc.
+3. **Session 7 in one line:** the owner's goal is modding the stock firmware (visual enhancements + a smarter
+   keyboard); the survey (`docs/stock-firmware.md`) mapped it; data-only tools landed and work —
+   `tools/stockstrings.py` (relabel anything), `tools/xtfont.py` (a converted TrueType font installs and
+   renders; the header's two CRC-32s), the card wallpaper recipe (no patch); Ghidra + openjdk installed
+   with a one-minute headless analysis (`tools/ghidra_stock.py`); **a Lua script runs as a screen on the
+   stock after a 3-byte patch** (nav-menu row for page 0x09) with an unsigned `app.xtapp` container
+   (0x80-byte header + JSON manifest); the grey model became the default (the owner's photo of the glass:
+   one uniform rim per glyph, ~0.45 reflectance → `gray-k` 38); the device's own reader screenshots match
+   the emulator's pages in 0 px outside the clock (`tests/test_device_screenshot.py`); CrossPoint tests
+   now boot private copies of the flash and card (state leaked between tests before). Everything is
+   committed on `main`; the owner pushes (GitHub Desktop; no push credential here; watch the CI run time
+   now that the suite has 66 cases — CI runs only the CrossPoint half).
+4. **Next steps, in order:**
+   a. Commit the Lua tooling (item 2). Then a one-screen demo the owner can judge: a Lua "home" or status
+      page drawn the way they like (fonts through `ctx.fonts`, the confirmed `g`/`ctx` API in
+      `docs/lua-apps.md`), screenshots to the owner.
+   b. **The keyboard (the owner's second wish).** Map the stock's on-screen keyboard with Ghidra: the
+      view/presenter classes (search the typeinfo names for Keyboard/Input/TextField), where it is invoked
+      (WiFi password, Startup Password, search), the key layout table, hit-testing, the key-commit path and
+      the text buffer, how key rows and the field are drawn. Then design the hook: new native code compiled
+      with the pioarduino Xtensa toolchain (`~/.platformio/packages/toolchain-xtensa-esp-elf`) into the app
+      slot's free ~2.4 MB as an extra IROM segment, a trampoline at the key-commit site, a dictionary on the
+      card, a suggestion strip drawn through the app's own text routine; near-miss correction = a
+      key-adjacency-weighted edit distance over the dictionary (the iPhone way, simplified). Fable for the
+      hook design and the segment/trampoline mechanics (an Espressif-image question: the bootloader maps
+      segments from the image header; a new segment means a new header entry and the hash recomputed —
+      `stockdev.refresh_image` handles the hash, the segment table needs code); Opus for the dictionary,
+      the correction algorithm (host-tested in Python first, then C), and the tests.
+   c. **Device deployment path** (needed before anything patched reaches the device): a guarded
+      `tools/device.py flash-stock-patched` writing the patched stock into **app1** with otadata pointing at
+      it as pending-verify (survey §8: app0's otadata is VALID = no auto-rollback), so a bad image rolls
+      back; the emulator test suite as the gate; the owner presses the buttons. Not started.
+   d. Lock screen as a Lua app: the standby path reads `lockscrMode` 2 but constructs no presenter
+      (`docs/stock-firmware.md`, "Probed in session 7"); a Ghidra job on the standby coordinator.
+   e. Carried over: the ignored-tap parity question (does the device also drop a tap right after Home? —
+      the parity harness, §9 D4); the 4-level grey `.xic`; the QMP `pmemsave` zero pages; the
+      `esp32s3.gpspi +0x38` and IO_MUX logger noise; S7 upstream (patches 0003/0006/0008/0009/0016 are the
+      candidates).
 
 ## 1. Where things stand (2026-09-06)
 

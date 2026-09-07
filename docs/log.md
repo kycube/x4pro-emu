@@ -913,3 +913,7 @@ photo; the truth between them), so `gray-k` moves from 28 to 38 (3 frames → 11
 default (`epd_core_init`, the `waveform-gray` property); `test_epd.c`'s approximation test sets the flag off
 explicitly; the CrossPoint reader goldens were regenerated under the new default. The device's own 1-bit
 screenshots could not have settled this: only the glass shows the grey.
+
+**Close of session 7:** `make test` 66 passed in 8 min 27 s (no dropped tap this run); 40+ commits on `main`
+awaiting the owner's push. One Opus agent (the Lua tooling: `stockpatch.py`, `xtapp.py`, tests, goldens,
+`docs/lua-apps.md`) was still running at the close — `docs/NEXT_PHASE.md` §0.2 says how to pick up its output.
