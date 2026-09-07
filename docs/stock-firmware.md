@@ -438,6 +438,28 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
     (0x3c3f0adc) to new paint code that calls `EPD_GFX`; needs the drawing API's method signatures
     from Ghidra first. Weeks, not days; the Lua route (3) should be tried before this.
 
+### Probed in session 7 (emulator, scratch images only)
+
+- **The nav menu's hidden rows.** The builder at 0x4213d834 walks menu indices 0,1,2,(3),4,5,6,7 through
+  the predicate at 0x42345158; the slot → page-id table is DROM 0x3c3dc8b0 = `02 1c 16 09 0b 0a 0d 01`.
+  **Gate A**, VA 0x4234516a (file 0x4f516a; +0x10000 in a flash image): `bltui a9,2,+7` = `b6 29 07` →
+  `b6 29 ff` unhides indices 1 and 2 — the menu then shows **Read, Preload List, Statistics, All Files,
+  USB Mode, Cloud Sync, Settings** (7 rows, 85 px apart), both new pages functional in the emulator.
+  **Gate B**, a second compile-time stub at VA 0x4233abe8 (file 0x4eabeb/0x4eabec, `02` → `12`, twin of the
+  developer stub), gates index 3 = page id 0x09 ("Extensions" or "Lua Apps"); flipping it (plus
+  0x4213dbfc `00` → `01` and 0x4213d873 `82 02 ac` → `82 a0 01`) produced no eighth row — the page is not
+  registered for the menu, or the router refuses it.
+- **Unwrapped Lua apps.** A card directory `XTApps/hello/{manifest.json, index.lua}` is never mentioned on
+  the console and All Files hides `/sdcard/XTApps`. The code for plain directories exists: a manifest
+  reader at 0x42064b50 (`%s/manifest.json`, 8 KiB cap: app_id, display_name, author, display,
+  permissions), the script host building `<root>/<app>/index.lua` at 0x4212a92a (`lockscreen.lua`
+  alternative), `AppsPagePresenter` (ctor 0x421280d8) and `ScriptHostPagePresenter` (0x42128a84)
+  constructed at boot by the shell factory (0x42023037 / 0x4202304e); page registration records
+  `{u8 id, u8 kind, ptr presenter, ptr view}` through the thunk at 0x42024928, router check 0x420249fc;
+  rejection strings at 0x3c497334, 0x3c49746a, 0x3c494c2a. Whether an unwrapped app loads is still open;
+  the lock-screen route (an NVS key naming a Lua app as the lock screen, `set_as_lockscreen_app`) is the
+  next experiment.
+
 ### What this map still lacks
 The icon table and image-blit call signatures (§5), the second string pack's header (§6), the exact
 `.xtf` metric-byte order and the `.hot.xtfp` body (§4), the accessor of the i18n packs, whether the
