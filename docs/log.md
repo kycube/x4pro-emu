@@ -773,3 +773,9 @@ CrossPoint including `test_replay.py`, 8 stock including `test_stock_capture.py`
 lost one menu tap in `test_stock_wifi_fails_fast` (the stock read nothing; the panel trace ended in its idle
 pre-sent plane) while the test passed alone in 34 s — the stock's known dropped tap under a loaded host — so
 the stock tests' menu taps now go through `tap_repaints` (one retry). CI green on b7f5918; device untouched.
+
+**Owner's device check (2026-09-06, end of session 5):** shown the emulator's stock screens upright (Home, nav
+menu, light panel, Settings, All Files, a reader page — `tests/data/stock-home-panel.png` and the
+`tests/golden/stock-*.png` goldens rotated `ROTATE_270`), the owner judged them **1:1 with the device**. That is
+the device oracle for the stock firmware at the level of the eye; a pixel-exact `.xic` capture from the device
+(S2-device) stays optional and needs the developer-patched stock on the device.

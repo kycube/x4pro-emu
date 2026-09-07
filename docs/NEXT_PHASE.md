@@ -31,8 +31,10 @@ owner building in its own directory); what worked is in §10.2 and in the sessio
    green on the first Linux run (12 min); S4's `record` / `replay` / `wait-guest-ms` / `run --deterministic`
    done (two replays 0 px apart). Everything is committed on `main`; the owner pushes (GitHub Desktop; this
    Mac has no push credential and no `gh`; the public Actions API answers without a login, the logs do not).
-3. **Device oracle for a stock screen — the open half of S2, the owner's decision.** Screen Capture is
-   unreachable on an unpatched device. Two ways: (a) the patched stock on the device: `tools/stockdev.py -o
+3. **Device oracle for a stock screen — settled by eye, pixel capture optional.** At the end of session 5
+   the owner looked at the emulator's stock screens (Home, menu, light panel, Settings, All Files, reader,
+   rotated upright) and judged them 1:1 with the device. A pixel-exact capture from the device is now
+   optional; if ever wanted, Screen Capture is unreachable on an unpatched device and there are two ways: (a) the patched stock on the device: `tools/stockdev.py -o
    images/stock-app-dev.bin images/device/stock-app0-7.2.4.bin`, written into an app slot through a guarded
    `tools/device.py` path (to add: `flash-crosspoint --firmware F` writes app0 from an arbitrary image after the
    backup check — make sure it accepts the 5.5 MB stock app and the slot boots it; otadata untouched), then on
@@ -45,8 +47,8 @@ owner building in its own directory); what worked is in §10.2 and in the sessio
    the running stock returned 44 of 120 pages zero (`tcbwalk.py` found no task) — pause the VM first, or find
    out why; `x4emu watch` / `shell` (S4 leftovers); `tools/x4emu_mcp.py` should import the package instead of
    shelling out and expose `record`/`replay`; D1–D4 (§9).
-5. Next squads, in order (§10.3): S2-device (owner + coordinator, item 3), S5 fidelity, S6 custom firmware,
-   S7 upstream.
+5. Next squads, in order (§10.3): S5 fidelity, S6 custom firmware, S7 upstream; S2-device only if a
+   pixel-exact device capture is ever wanted (item 3).
 
 ## 1. Where things stand (2026-09-06)
 
@@ -309,8 +311,9 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
 - [x] Stock firmware: boots, renders, navigates, frontlight observable (WiFi off in NVS).
 - [x] Stock firmware: WiFi start fails fast (analog-master I2C block, SENS, radio stub; `tests/test_stock.py`).
 - [x] Stock firmware: the screens reachable by touch have goldens and a walk test (session 4).
-- [ ] Stock firmware: one screen matched to a device capture (`.xic`, needs the developer-patched stock on the
-  device) or a photo — the emulator side is proven (`tests/test_stock_capture.py`, session 5).
+- [x] Stock firmware: screens matched to the device — by the owner's eye (Home, menu, light panel, Settings, All
+  Files, reader; session 5). A pixel-exact `.xic` device capture stays optional (needs the developer-patched
+  stock on the device); the emulator side of that is proven (`tests/test_stock_capture.py`).
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle.
 - [x] Deterministic replay of an input script yields identical screenshots run to run (`tests/test_replay.py`, session 5).
 - [ ] Waveform-aware grayscale validated against device photos.
@@ -435,7 +438,7 @@ edit CLAUDE.md or docs/*.md except [own page]. Time box: [N] minutes. Final repo
 |---|---|---|
 | ~~**S1 stock-close**~~ | **done** (sessions 4–5): `--boot-hold-power`, `nvsedit` set-str/erase/redact, RTC IO overlay, the DC-offset comparator + PLL lock flag, the GT911 key byte (Home pad = Back) | met: `make test` green, no `rtcio` in `iolog_hot`, no `pll_cal` line, a redacted image boots to Home |
 | ~~**S2 oracle**~~ (emulator half) | **done** (session 5): `.xic` decoded and verified, `tools/xic2png.py`, `tools/stockdev.py`, `tests/test_stock_capture.py`, `docs/xic.md` | met in the emulator: a capture equals the panel in 0 px |
-| **S2-device** | owner + coordinator: the developer-patched stock into an app slot through a guarded `tools/device.py` path (or photos), one capture copied off the card, `xic2png.py --diff` against the emulator's screen (§0.3) | one stock screen diffed against a device capture with every difference explained |
+| **S2-device** (optional) | owner + coordinator, only if a pixel-exact capture is wanted: the developer-patched stock into an app slot through a guarded `tools/device.py` path, one capture copied off the card, `xic2png.py --diff` against the emulator's screen (§0.3). The owner already judged the screens 1:1 by eye (session 5) | one stock screen diffed against a device capture with every difference explained |
 | ~~**S3 ci-green**~~ | **done** (session 5): first Linux run green without iteration | met; keep an eye on cache hits and run time |
 | **S4 determinism** | ~~Opus: `--deterministic` · Opus: `record/replay`~~ done (session 5) · Opus: `x4emu watch` and `x4emu shell`, `x4emu_mcp.py` importing the package | met for replay (`tests/test_replay.py`); `watch`/`shell` open |
 | **S5 fidelity** | **Fable**: waveform-level grayscale design and core (§4) · Opus: core tests for edge windows and data-entry modes 0..7 · Opus: per-opcode BUSY timing table from `docs/device/*.log` · Opus: `dwc_sdmmc` DEBUG-to-trace patch | grayscale validated against a device photo of AA text; `qemu.log` free of `dwc_sdmmc_` lines |
