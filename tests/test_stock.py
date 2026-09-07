@@ -35,7 +35,7 @@ instant "fade done" interrupt storms core 0's level-1 dispatcher forever, taking
 with it. `test_stock_idle_dims_frontlight_and_keeps_ticking` guards that.
 """
 import json, os, shutil, subprocess, sys, time, pytest
-from conftest import x4emu, ROOT, PY
+from conftest import x4emu, ROOT, PY, instance_name
 
 DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')
 GOLDEN = os.path.join(ROOT, 'tests', 'golden', 'stock-home.png')
@@ -121,7 +121,7 @@ def stock(tmp_path, request, stock_card):
     else:
         opts = {'net_en': param}
     net_en, boot_hold = opts.get('net_en', 0), opts.get('boot_hold', True)
-    name = 'pytest-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')   # '=' breaks -qmp unix:PATH
+    name = instance_name(request.node.name)   # '=' breaks -qmp unix:PATH
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(DUMP, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8', 'user_config', 'net_en', str(net_en)],

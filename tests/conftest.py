@@ -1,4 +1,4 @@
-import os, subprocess, sys, time, pytest
+import hashlib, os, subprocess, sys, time, pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
@@ -11,6 +11,24 @@ def x4emu(name, *args, check=True, timeout=120):
     if check and r.returncode:
         raise AssertionError(f'x4emu {args} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
     return r
+
+# `x4emu --name NAME` becomes .x4emu/NAME/ and part of two UNIX socket paths, and sun_path holds
+# 104 bytes on macOS, 108 on Linux (CLAUDE.md, "Lessons"). pytest node names are long and the CI
+# checkout (/home/runner/work/x4pro-emu/x4pro-emu) is 20 bytes longer than the desk Mac's, so
+# `pytest-test_mcp_module_imports_and_calls_in_process` measured 93 bytes here and 109 on CI -- one
+# over the limit, which is why that job was red from 2026-09-07 while the same suite passed on the
+# Mac. `instance_name` clamps to what actually fits the checkout it is running in.
+SOCK_MAX = 104          # the smaller of the two caps, so a name that fits here fits everywhere
+
+
+def instance_name(node_name):
+    """The `--name` for one test: readable, unique, and short enough for the socket paths."""
+    name = 'pytest-' + node_name.replace('[', '-').replace(']', '').replace('=', '-')
+    room = SOCK_MAX - len(os.path.join(ROOT, '.x4emu')) - len('/console.sock') - 2   # '/' + NUL
+    if len(name) > room:
+        name = name[:room - 9] + '-' + hashlib.sha1(name.encode()).hexdigest()[:8]
+    return name
+
 
 def x4emu_input(name, *args, tries=2, **kw):
     """An input command carrying `--wait`, repeated once when nothing repainted.
@@ -65,7 +83,7 @@ def images(images_base, tmp_path):
 
 @pytest.fixture
 def emu(images, request):
-    name = 'pytest-' + request.node.name.replace('[', '-').replace(']', '')
+    name = instance_name(request.node.name)
     x4emu(name, 'stop', check=False)
     yield name
     x4emu(name, 'stop', check=False)
