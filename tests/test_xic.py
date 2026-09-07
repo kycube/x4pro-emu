@@ -1,9 +1,9 @@
-"""tools/xic2png.py on tests/data/preview.xic -- no emulator, no device dump, no QEMU.
+"""tools/xic2png.py on two committed `.xic` files -- no emulator, no device dump, no QEMU.
 
 tests/data/preview.xic is a copy of the stock's own font preview
 (images/device/sd-files/XTData/system_fonts/misans-demibold/preview.xic, 320x96, 3864 bytes): a
-MiSans DemiBold specimen reading "Small Aa 123 <CJK> / Medium Aa 123 <CJK>". It is the only `.xic`
-whose contents are known, so it is what pins the three decode assumptions (docstring of the tool):
+MiSans DemiBold specimen reading "Small Aa 123 <CJK> / Medium Aa 123 <CJK>". It is what pinned the
+three decode assumptions before any capture existed (docstring of the tool):
 
   MSB_FIRST     the strokes of the glyphs are horizontally continuous -- 0.6 % of the ink pixels
                 have no ink neighbour left or right, against 3.9 % when the bits of every byte are
@@ -11,9 +11,19 @@ whose contents are known, so it is what pins the three decode assumptions (docst
   ONE_IS_BLACK  13.2 % of the bits are set: an ink fraction on paper, not paper on ink
   TOP_DOWN      the shorter "Small" line sits above the taller "Medium" line
 
-The `.xic` header is 24 bytes and only byte 8 (bits per pixel) is interpreted; the tests below check
-that a file disagreeing with itself is rejected with a message rather than decoded into noise. 2 bpp
-is a documented guess (no such file has been seen), so it is exercised on a synthetic header only.
+tests/data/stock-home-{capture.xic,panel.png} is the oracle that settled the header: a Developer ->
+Screen Capture `.xic` the stock wrote to the emulator's card, and the `x4emu screenshot` of the same
+Home screen taken just before it. The two agree in **every** pixel, which is what fixes the
+orientation (portrait 480x800, the landscape panel rotated 90 degrees counter-clockwise) as well as
+the polarity and the bit order at screen scale. Both files are emulator-made and hold nothing of the
+owner's. `tests/test_stock_capture.py` reproduces that pair from a boot; this file only needs the
+bytes.
+
+Header bytes 8, 9 and 10 are version / levels / planes -- byte 8 is *not* a bit depth, and grey is
+two appended 1-bpp planes rather than packed pixel pairs (docs/xic.md). The tests below check that
+the fields are read as such, that a file disagreeing with itself is rejected with a message rather
+than decoded into noise, and that the grey path does what the tool's docstring says it guesses (no
+grey `.xic` has ever been seen, so that is all it can check).
 """
 import json, os, struct, subprocess, sys
 import pytest
@@ -23,7 +33,10 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import xic2png                                                                 # noqa: E402
 
 TOOL = os.path.join(ROOT, 'tools', 'xic2png.py')
-SAMPLE = os.path.join(ROOT, 'tests', 'data', 'preview.xic')
+DATA = os.path.join(ROOT, 'tests', 'data')
+SAMPLE = os.path.join(DATA, 'preview.xic')
+CAPTURE = os.path.join(DATA, 'stock-home-capture.xic')
+PANEL = os.path.join(DATA, 'stock-home-panel.png')
 Image = pytest.importorskip('PIL.Image')
 
 
@@ -32,6 +45,15 @@ def run(*args, expect=0):
     r = subprocess.run([PY, TOOL, *map(str, args)], capture_output=True, text=True)
     assert r.returncode == expect, f'xic2png {args} exited {r.returncode}, wanted {expect}:\n{r.stdout}\n{r.stderr}'
     return r.stdout
+
+
+def header(width, height, version=1, levels=1, planes=1, byte11=0, reserved12=0, payload=None,
+           reserved20=0):
+    """A synthetic 24-byte header, so one field at a time can be broken."""
+    if payload is None:
+        payload = ((width + 7) >> 3) * height * planes
+    return (b'XIC\0' + struct.pack('<HHBBBB', width, height, version, levels, planes, byte11)
+            + struct.pack('<III', reserved12, payload, reserved20))
 
 
 def ink(im):
@@ -49,16 +71,17 @@ def isolated(rows):
                if r[x] and not (x and r[x - 1]) and not (x < w - 1 and r[x + 1]))
 
 
-def test_the_sample_header_is_read_as_320x96_1bpp():
-    """Every header field of the known file, including the three bytes at 8..11 that are still a
-    guess (bpp / format / version) and the reserved words, which are all zero in it."""
+def test_the_sample_header_is_read_as_320x96_mono():
+    """Every header field of the font preview, by its real name: version 1, one level, one plane,
+    and the three reserved fields all zero."""
     data = open(SAMPLE, 'rb').read()
     assert len(data) == 3864 and data[:4] == b'XIC\0'
     im, h = xic2png.decode_xic(data)
     assert (h['width'], h['height']) == (320, 96) and im.size == (320, 96)
-    assert (h['bpp'], h['format'], h['version'], h['pad11']) == (1, 1, 1, 0)
-    assert h['payload_bytes'] == 3840 == h['stride'] * h['height'] == 320 * 96 // 8
-    assert h['reserved_12_15'] == h['reserved_20_23'] == '00000000'
+    assert (h['version'], h['levels'], h['planes']) == (1, 1, 1)
+    assert h['payload_bytes'] == 3840 == h['stride'] * h['height'] * h['planes'] == 320 * 96 // 8
+    assert h['byte11'] == h['reserved12'] == h['reserved20'] == 0
+    assert (h['magic'], h['file_bytes']) == ('XIC\0', 3864)
     assert im.mode == '1'
 
 
@@ -93,45 +116,87 @@ def test_the_sample_decodes_to_black_text_on_white():
     assert isolated(ink(mirrored)[0]) > 2 * isolated(rows), 'the two bit orders are indistinguishable here'
 
 
+def test_the_stock_screen_capture_matches_the_panel_screenshot_exactly():
+    """The oracle: a 480x800 Developer -> Screen Capture `.xic` of Home and the 800x480 panel PNG of
+    the same screen. Header fields by name, and 0 pixels differing once the capture is rotated back
+    into the landscape frame -- not "close", but byte for byte after the rotation."""
+    data = open(CAPTURE, 'rb').read()
+    assert len(data) == 48024
+    im, h = xic2png.decode_xic(data)
+    assert (h['width'], h['height'], im.size) == (480, 800, (480, 800))
+    assert (h['version'], h['levels'], h['planes']) == (1, 1, 1)
+    assert h['payload_bytes'] == 48000 == h['stride'] * h['height'] * h['planes'] == 60 * 800
+    assert h['byte11'] == h['reserved12'] == h['reserved20'] == 0
+    assert h['file_bytes'] == 24 + 48000
+
+    panel = Image.open(PANEL)
+    assert panel.size == (800, 480), 'the panel screenshot is the landscape frame'
+    assert xic2png.compare(im, panel) == (0, 0.0), 'the capture and the panel disagree'
+    rotated = im.transpose(Image.Transpose.ROTATE_90)             # 90 degrees counter-clockwise
+    assert rotated.size == (800, 480)
+    assert rotated.convert('L').tobytes() == panel.convert('L').tobytes(), 'rotation convention'
+
+
+def test_cli_diff_of_the_capture_against_the_panel_exits_zero(tmp_path):
+    """The same pair through the CLI, which is how a capture gets checked in a shell."""
+    out = run(CAPTURE, tmp_path / 'home.png', '--diff', PANEL)
+    assert '0.000% of pixels differ (0)' in out, out
+    assert Image.open(tmp_path / 'home.png').size == (480, 800)
+
+
 def test_round_trip_png_xic_png_is_identical(tmp_path):
     """PNG -> .xic -> PNG pixel for pixel, and the re-encoded file equals the original .xic byte for
-    byte (the sample is 1 bpp, so nothing is lost in either direction)."""
-    blob = open(SAMPLE, 'rb').read()
-    im, _ = xic2png.decode_xic(blob)
-    png = tmp_path / 'preview.png'
-    im.save(png)
+    byte (both samples are mono, so nothing is lost in either direction)."""
+    for src in (SAMPLE, CAPTURE):
+        blob = open(src, 'rb').read()
+        im, _ = xic2png.decode_xic(blob)
+        png = tmp_path / (os.path.basename(src) + '.png')
+        im.save(png)
 
-    again = xic2png.encode_xic(Image.open(png))
-    assert again == blob, 'the encoder does not reproduce the sample'
+        again = xic2png.encode_xic(Image.open(png))
+        assert again == blob, f'the encoder does not reproduce {os.path.basename(src)}'
+        h = xic2png.parse_header(again)
+        assert (h['version'], h['levels'], h['planes']) == (1, 1, 1), 'encode writes v1 mono'
 
-    out = tmp_path / 'rt.xic'
-    run('--encode', png, out)
-    back = tmp_path / 'back.png'
-    run(out, back)
-    assert Image.open(back).convert('L').tobytes() == im.convert('L').tobytes()
+        out = tmp_path / 'rt.xic'
+        run('--encode', png, out)
+        back = tmp_path / 'back.png'
+        run(out, back)
+        assert Image.open(back).convert('L').tobytes() == im.convert('L').tobytes()
 
     # a grayscale source is thresholded at 128, so the round trip is still exact for it
+    im, _ = xic2png.decode_xic(open(SAMPLE, 'rb').read())
     gray = im.convert('L').point(lambda v: 200 if v else 40)
-    assert xic2png.encode_xic(gray) == blob
+    assert xic2png.encode_xic(gray) == open(SAMPLE, 'rb').read()
 
 
 def test_a_broken_header_is_rejected_with_a_message(tmp_path):
-    """Bad magic, a truncated payload, a header shorter than 24 bytes, an unknown bpp and a payload
-    length that does not match the dimensions: XicError (a ValueError), and the CLI exits non-zero
-    with the reason on stderr instead of a traceback."""
+    """Bad magic, a truncated payload, a header shorter than 24 bytes, an unknown version, an
+    impossible levels/planes pair, a non-zero word at 12..15 and a payload length that does not match
+    the dimensions: XicError (a ValueError), and the CLI exits non-zero with the reason on stderr
+    instead of a traceback."""
     blob = open(SAMPLE, 'rb').read()
+    body = blob[24:]
     with pytest.raises(xic2png.XicError, match='bad magic'):
         xic2png.decode_xic(b'PNG\0' + blob[4:])
     with pytest.raises(xic2png.XicError, match='truncated'):
         xic2png.decode_xic(blob[:-1])
     with pytest.raises(xic2png.XicError, match='shorter than'):
         xic2png.decode_xic(blob[:20])
-    with pytest.raises(xic2png.XicError, match='bits per pixel 4'):
-        xic2png.decode_xic(blob[:8] + bytes([4]) + blob[9:])
-    with pytest.raises(xic2png.XicError, match='does not match'):
-        xic2png.decode_xic(blob[:4] + struct.pack('<HH', 321, 96) + blob[8:])
     with pytest.raises(xic2png.XicError, match='bad dimensions'):
-        xic2png.decode_xic(blob[:4] + struct.pack('<HH', 0, 96) + blob[8:])
+        xic2png.decode_xic(header(0, 96) + body)
+    with pytest.raises(xic2png.XicError, match='format version 3'):
+        xic2png.decode_xic(header(320, 96, version=3) + body)
+    with pytest.raises(xic2png.XicError, match='levels=1 planes=2'):
+        xic2png.decode_xic(header(320, 96, levels=1, planes=2) + body * 2)
+    with pytest.raises(xic2png.XicError, match='levels=4 planes=1'):
+        xic2png.decode_xic(header(320, 96, levels=4, planes=1) + body)
+    with pytest.raises(xic2png.XicError, match=r'bytes 12\.\.15'):
+        xic2png.decode_xic(header(320, 96, reserved12=1) + body)
+    with pytest.raises(xic2png.XicError, match='does not match'):
+        xic2png.decode_xic(header(321, 96, payload=3840) + body)
+    # version 2 and a set byte 11 / word 20 stay acceptable: the stock's own reader takes them
+    assert xic2png.decode_xic(header(320, 96, version=2, byte11=7, reserved20=9) + body)[1]['byte11'] == 7
 
     bad = tmp_path / 'bad.xic'
     bad.write_bytes(b'XIC\0' + blob[4:-100])
@@ -140,11 +205,15 @@ def test_a_broken_header_is_rejected_with_a_message(tmp_path):
     assert not (tmp_path / 'x.png').exists()
 
 
-def test_cli_info_prints_the_header_as_json():
-    out = run(SAMPLE, '--info')
-    h = json.loads(out)
-    assert h['width'] == 320 and h['height'] == 96 and h['bpp'] == 1
-    assert h['magic'] == 'XIC\0' and h['file_bytes'] == 3864 and h['path'] == os.path.abspath(SAMPLE)
+def test_cli_info_prints_the_header_fields_by_name():
+    """--info is exactly the twelve header fields, no more (docs/xic.md's table)."""
+    h = json.loads(run(CAPTURE, '--info'))
+    assert list(h) == ['magic', 'width', 'height', 'version', 'levels', 'planes', 'byte11',
+                       'reserved12', 'payload_bytes', 'stride', 'reserved20', 'file_bytes']
+    assert (h['width'], h['height'], h['version'], h['levels'], h['planes']) == (480, 800, 1, 1, 1)
+    assert (h['payload_bytes'], h['stride'], h['file_bytes']) == (48000, 60, 48024)
+    assert h['magic'] == 'XIC\0'
+    assert json.loads(run(SAMPLE, '--info'))['file_bytes'] == 3864
 
 
 def test_cli_diff_counts_the_differing_pixels(tmp_path):
@@ -177,19 +246,24 @@ def test_a_portrait_capture_is_un_rotated_into_the_landscape_frame():
     assert xic2png.compare(land, land.resize((160, 48)))[0] > 0   # a plain resize still compares
 
 
-def test_2bpp_is_decoded_as_four_gray_levels():
-    """The 2 bpp branch (four levels, two bits per pixel, most significant pair first, 0 = white ..
-    3 = black) on a synthetic header -- a guess until a real 2 bpp .xic turns up, so this test only
-    pins what the tool currently does."""
-    payload = bytes([0b00_01_10_11, 0b11_11_00_00,          # 8x2: white..black, black x2, white x2
-                     0b11_10_01_00, 0b00_00_11_11])
-    blob = (b'XIC\0' + struct.pack('<HHBBBB', 8, 2, 2, 1, 1, 0) + b'\0' * 4
-            + struct.pack('<I', len(payload)) + b'\0' * 4 + payload)
+def test_grey_is_decoded_as_two_appended_planes():
+    """The grey branch (levels 4, planes 2): plane 0 holds bit 0 of every pixel, plane 1 holds bit 1
+    right after it, and the level `bit0 | bit1 << 1` renders as 255 - level * 85. This is the tool's
+    documented guess -- no grey .xic has ever been seen -- so the test only pins what the tool does,
+    not what the device writes."""
+    plane0 = bytes([0b10100000, 0])                          # bit 0 set for pixels 0 and 2 of row 0
+    plane1 = bytes([0b11000000, 0])                          # bit 1 set for pixels 0 and 1 of row 0
+    blob = header(8, 2, levels=4, planes=2) + plane0 + plane1
     im, h = xic2png.decode_xic(blob)
-    assert (h['bpp'], h['stride'], im.mode, im.size) == (2, 2, 'L', (8, 2))
-    assert list(im.tobytes()) == [255, 170, 85, 0, 0, 0, 255, 255,
-                                 0, 85, 170, 255, 255, 255, 0, 0]
+    assert (h['levels'], h['planes'], h['stride'], h['payload_bytes']) == (4, 2, 1, 4)
+    assert (im.mode, im.size) == ('L', (8, 2))
+    assert list(im.tobytes()) == [0, 85, 170, 255, 255, 255, 255, 255] + [255] * 8
+
+    # the first plane on its own is a mono image, not "the first half of the grey one"
+    mono, _ = xic2png.decode_xic(header(8, 2) + plane0)
+    assert list(mono.convert('L').tobytes()) == [0, 255, 0, 255, 255, 255, 255, 255] + [255] * 8
+
     with pytest.raises(xic2png.XicError, match='does not match'):
-        xic2png.decode_xic(blob[:8] + b'\1' + blob[9:])      # 4 bytes cannot be 8x2 at 1 bpp
-    with pytest.raises(ValueError, match='only 1 bpp'):
-        xic2png.encode_xic(im, bpp=2)
+        xic2png.decode_xic(header(8, 2, levels=4, planes=2, payload=2) + plane0)
+    with pytest.raises(ValueError, match='only mono'):
+        xic2png.encode_xic(im, levels=4, planes=2)
