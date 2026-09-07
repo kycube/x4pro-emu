@@ -362,15 +362,24 @@ def cmd_wait_text(a):
 
 
 # ---------------------------------------------------------------- panel
-def cmd_screenshot(a):
-    q = connect(a.name)
-    dest = os.path.abspath(a.out)
+def screenshot_to(name, path):
+    """Take a fresh panel screenshot into `path` over a short QMP connection (closed again before
+    returning, since the socket serves one client at a time) and update `.x4emu/<name>/last.png`.
+    Returns the absolute path written. Shared by `cmd_screenshot` and `x4emu watch`."""
+    q = connect(name)
+    dest = os.path.abspath(path)
     q.cmd('screendump', filename=dest, format='png', device='epd')
-    shot = os.path.join(idir(a.name), 'last.png')
+    q.close()
+    shot = os.path.join(idir(name), 'last.png')
     try:
         import shutil; shutil.copyfile(dest, shot)
     except OSError:
         pass
+    return dest
+
+
+def cmd_screenshot(a):
+    dest = screenshot_to(a.name, a.out)
     out.line(dest)
     out.set(path=dest)
     if a.diff:

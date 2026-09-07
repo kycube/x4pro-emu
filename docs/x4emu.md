@@ -8,7 +8,9 @@ and an agent. With `--json` every command prints one JSON object and nothing els
 
 - The CLI lives in the `x4emu` package at the repository root (`x4emu/cli.py` builds the parser,
   `x4emu/commands.py` implements the commands, `x4emu/qmp.py` talks QMP, `x4emu/paths.py` finds the
-  checkout, `x4emu/output.py` decides human text vs JSON).
+  checkout, `x4emu/output.py` decides human text vs JSON vs in-process, `x4emu/api.py` runs a
+  command in-process for `shell` and the MCP server, `x4emu/shell.py` and `x4emu/watch.py` are the
+  `shell`/`watch` subcommands — see "Developer experience" below).
 - `tools/x4emu` is a thin shim that imports the package straight from the checkout (and pins
   `X4EMU_ROOT` to it), so nothing has to be installed to use the repository exactly as before.
 - The MCP server (`tools/x4emu_mcp.py`) and `tests/` call `tools/x4emu` and parse its human output;
@@ -283,6 +285,55 @@ back to back instead, which is the way to reuse a journal as a plain macro on a 
 | `mem` | `read ADDR LEN` | `{"addr", "bytes": [...]}` (`bytes` are integers; the human mode prints QEMU's `xp` line) |
 | `qmp` | `'{"execute": …, "arguments": {…}}'` | `{"return": …}` — the raw QMP reply, wrapped so the output is always an object |
 | `gdb` | `--elf ELF` (default `firmware/.pio/build/x4pro/firmware.elf`) | `{"gdb", "elf", "target": ":1234"}`, printed before the process is replaced by `xtensa-esp-elf-gdb` (run the instance with `--gdb`) |
+
+### Developer experience: `shell`, `watch`, the in-process API
+
+`x4emu/api.py` runs one CLI command **in-process** — no subprocess, no printing, and it never raises
+`SystemExit` — and is what `shell` below and `tools/x4emu_mcp.py` are built on:
+
+- `api.run(argv, name=None) -> dict` builds the parser exactly as the CLI does, runs the command,
+  and returns its `--json` object. `argv` is the subcommand and its own arguments (`['state']`,
+  `['tap', '345', '350', '--quiet', '2']`); `name`, if given, is prefixed as `--name NAME` (or put
+  `--name` in `argv` yourself, e.g. `api.run(['--name', 'dev0', 'status'])`). On success the return
+  value is exactly the `--json` object documented above for that command. On failure — a bad
+  argument, a command's own `sys.exit`, an unexpected exception — it returns that same object
+  merged with `"error"` (as `--json` does) plus `"rc"`, the exit code the real CLI would have used;
+  it never prints anything and never raises.
+- `api.run_text(argv, name=None) -> str` is the human-mode equivalent: it returns the text the
+  command would have printed to stdout. On failure it raises `RuntimeError` (never `SystemExit`)
+  carrying that text plus the failure message — the same contract `tools/x4emu_mcp.py`'s old
+  subprocess helper had, so callers built on it did not need to change their error handling.
+
+Both are implemented via `output.Out`'s `collect` mode (`out.configure(json_mode, collect=True)`,
+`out.collected()` / `out.text()`): the human lines and the final JSON object are buffered instead of
+printed, then the API function restores `out`'s prior state before returning (the same
+save-then-restore shape as `output.suspended()`, which `replay` uses for the same reason).
+
+| Command | Arguments | Notes |
+|---|---|---|
+| `shell` | — | a REPL: one command per line from stdin (`shlex.split`), run in-process through the parser, printing exactly what `x4emu <line>` would (or, when the shell itself was started with `--json`, one JSON object per line via `api.run`). `exit`, `quit` or EOF end the session; `name NEW` switches the instance later lines target; a failing line (a bad argument, a command's own failure) is reported — to stderr in human mode, as `{"error": ..., "rc": ...}` in `--json` mode — and the loop continues. The prompt `x4emu NAME> ` is printed only when stdin is a TTY, so `printf 'status\nstate\n' \| x4emu --name X shell` works non-interactively and prints nothing but each line's own output. |
+| `watch` | `--port P` (default 8420, `0` = any free port), `--seconds S` (default: run until Ctrl-C), `--out FILE` | a small HTTP server on `127.0.0.1:P`: `/` is a live page showing the panel and refreshing only when `refresh_count` changes (polls `/state.json` every 300 ms); `/panel.png` is a fresh screenshot (`commands.screenshot_to`, the same helper `screenshot` uses) and `/state.json` is `state`'s object — each request opens its own short QMP connection and closes it before responding, so other `x4emu` commands keep working the whole time `watch` is up. `--out FILE` also writes the PNG to `FILE` on every `/panel.png` request. The URL is printed first (`http://127.0.0.1:P/`, and in `--json` mode `{"url", "port"}`) before `watch` blocks serving requests. |
+
+`shell` recipe (piped, non-interactive):
+
+```
+$ printf 'status\nstate\nscreenshot /tmp/a.png\nexit\n' | x4emu --name dev0 shell
+dev0: pid 1234, running, running=True
+{
+ "uptime_us": 12345678,
+ ...
+}
+/tmp/a.png
+```
+
+`watch` recipe:
+
+```
+$ x4emu --name dev0 watch --port 0 &
+http://127.0.0.1:54321/
+$ open http://127.0.0.1:54321/          # live panel + state in a browser
+$ x4emu --name dev0 tap 345 350 --quiet 2   # still works: watch only holds the QMP socket briefly
+```
 
 ## Recipes
 

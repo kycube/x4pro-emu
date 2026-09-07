@@ -86,12 +86,21 @@ def build_parser():
     p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=c.cmd_mem)
     p = sp.add_parser('gdb'); p.add_argument('--elf'); p.set_defaults(fn=c.cmd_gdb)
     p = sp.add_parser('qmp'); p.add_argument('json'); p.set_defaults(fn=c.cmd_qmp)
+    # Lazy imports: `shell`/`watch` import `x4emu.api`, which imports this module back
+    # (`cli.build_parser`) to run commands in-process; importing them here at call time (not at
+    # this module's top level) keeps that from being a circular import at load time.
+    from . import shell, watch
+    p = sp.add_parser('shell'); p.set_defaults(fn=shell.cmd_shell)
+    p = sp.add_parser('watch'); p.add_argument('--port', type=int, default=8420)
+    p.add_argument('--seconds', type=float, default=None)
+    p.add_argument('--out'); p.set_defaults(fn=watch.cmd_watch)
     return ap
 
 
-def main(argv=None):
-    a = build_parser().parse_args(argv)
-    out.configure(a.json_out)
+def _dispatch(a):
+    """Run a parsed command through `out` (human line or `--json` object, per `out.json_mode`),
+    the way `main()` does; also used by `x4emu shell` so each line behaves exactly like a fresh
+    `x4emu <line>` invocation."""
     try:
         rc = a.fn(a)
     except SystemExit as e:
@@ -107,6 +116,13 @@ def main(argv=None):
             raise SystemExit(1) from None
         raise
     out.finish()
+    return rc
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
+    out.configure(a.json_out)
+    rc = _dispatch(a)
     sys.exit(rc or 0)
 
 
