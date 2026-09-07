@@ -301,7 +301,7 @@ def device_console(seconds: float = 30, reset: bool = True, out: str | None = No
 
 @server.tool()
 def device_flash_crosspoint(firmware: str | None = None, preserve_stock: bool = False, confirm: bool = False) -> str:
-    """Write a CrossPoint firmware.bin into app0 (0x10000) over the stock bootloader/table, after
+    """Write a CrossPoint firmware.bin into an app slot over the stock bootloader/table, after
     re-reading the device against the verified backup. Without confirm=True only the plan is shown."""
     args = [PY, DEVICE, 'flash-crosspoint']
     if firmware: args += ['--firmware', firmware]
@@ -312,7 +312,10 @@ def device_flash_crosspoint(firmware: str | None = None, preserve_stock: bool = 
 
 @server.tool()
 def device_restore_stock(confirm: bool = False) -> str:
-    """Write the stock app image from the verified backup back into app0. Plan only unless confirm=True."""
+    """Write the stock app image from the verified backup back into its app slot. Plan only unless
+    confirm=True. Since the owner's OTA update the bootloader starts app1, and `tools/device.py` reads
+    otadata: with no --slot both writers refuse and name the slot that would actually boot
+    (`device.py slots` reports it). Nothing here writes otadata."""
     args = [PY, DEVICE, 'restore-stock'] + (['--yes'] if confirm else [])
     r = subprocess.run(args, capture_output=True, text=True, cwd=ROOT, timeout=900)
     return (r.stdout + r.stderr).strip()
