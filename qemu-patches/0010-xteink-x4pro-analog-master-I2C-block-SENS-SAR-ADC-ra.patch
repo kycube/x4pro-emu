@@ -1,0 +1,991 @@
+From 21c1607fe52875b66afc1616f45c8a14a0b97471 Mon Sep 17 00:00:00 2001
+From: x4pro-emu <x4pro-emu@localhost>
+Date: Sun, 6 Sep 2026 19:11:10 -0500
+Subject: [PATCH 10/10] xteink-x4pro: analog-master I2C block, SENS/SAR ADC,
+ radio register stub, capped access loggers
+
+The stock xteink_app's WiFi start parked its radio task (priority 23, core 0)
+in polls that the SoC's silent catch-all never satisfied, starving the UI:
+ROM rom_pkdet_vol_start on the analog-master block (0x6000E050 bits 26:24),
+then the PHY on SENS TSENS_READY (0x60008850 bit 8), FE 0x60006174 bit 16
+(capture done) and WiFi MAC 0x60033D14 bit 0 (ready). None has a timeout.
+
+- hw/misc/x4pro_ana_i2c.c: I2C_ANA_MST at 0x6000E000. Command words of the
+  two regi2c masters (block | reg<<8 | data<<16, write bit 24, busy bit 25,
+  start bit 26; protocol from the ROM), analog registers stored per (block,
+  register), ANA_CONF0 with CAL_DONE, SAR2 power-detector control idle/done
+  and eight samples from the "sar2-code" property.
+- hw/misc/esp32s3_saradc.c: SENS at 0x60008800. MEAS1/MEAS2 oneshots complete
+  on the next read (DONE + "sar1-data"/"sar2-data"), the temperature sensor
+  is always ready ("tsens-out"), everything else reads back as written.
+- hw/misc/esp32s3_rfstub.c: FE2/FE/RX/BB/WiFi-MAC storage stub with status
+  bits that read as set (FE +0x174.16, MAC +0xD14.0); the "sticky" property
+  adds "0xADDR:0xMASK" entries at run time.
+- include/hw/misc/x4pro_hotlog.h: the I/O access loggers and the stub log the
+  first 32 accesses per address and count the rest; the board state JSON lists
+  the addresses polled past the cap ("iolog_hot", "rf.hot"). One PHY poll had
+  written 1.9 GB of qemu.log in 30 s before.
+- xteink_x4pro.c: wire the three devices (priority 2), extend the logger table
+  to the remaining holes of the map (WDEV around the RNG, BT, SLC, ...), add
+  "ana_i2c", "saradc", "rf" and "iolog_hot" to /machine/x4pro-board state.
+
+With the device's NVS (WiFi enabled) the stock now prints "wifi:mode : sta",
+"wifi:enable tsf" as on the hardware, then "TX Q not empty" / "force witi
+stop" at +7.5 s and deinitialises WiFi at +17.5 s; gauge polls, repaints and
+touch continue throughout. No Espressif file is touched.
+---
+ hw/misc/esp32s3_rfstub.c         | 168 +++++++++++++++++++++++++++++
+ hw/misc/esp32s3_saradc.c         | 156 +++++++++++++++++++++++++++
+ hw/misc/meson.build              |   3 +
+ hw/misc/x4pro_ana_i2c.c          | 174 +++++++++++++++++++++++++++++++
+ hw/xtensa/xteink_x4pro.c         | 100 ++++++++++++++++--
+ include/hw/misc/esp32s3_rfstub.h |  50 +++++++++
+ include/hw/misc/esp32s3_saradc.h |  29 ++++++
+ include/hw/misc/x4pro_ana_i2c.h  |  30 ++++++
+ include/hw/misc/x4pro_hotlog.h   |  91 ++++++++++++++++
+ 9 files changed, 795 insertions(+), 6 deletions(-)
+ create mode 100644 hw/misc/esp32s3_rfstub.c
+ create mode 100644 hw/misc/esp32s3_saradc.c
+ create mode 100644 hw/misc/x4pro_ana_i2c.c
+ create mode 100644 include/hw/misc/esp32s3_rfstub.h
+ create mode 100644 include/hw/misc/esp32s3_saradc.h
+ create mode 100644 include/hw/misc/x4pro_ana_i2c.h
+ create mode 100644 include/hw/misc/x4pro_hotlog.h
+
+diff --git a/hw/misc/esp32s3_rfstub.c b/hw/misc/esp32s3_rfstub.c
+new file mode 100644
+index 0000000..2e56be9
+--- /dev/null
++++ b/hw/misc/esp32s3_rfstub.c
+@@ -0,0 +1,168 @@
++/*
++ * ESP32-S3 radio register stub (FE2, FE, RX/NRX, BB and WiFi MAC blocks).
++ *
++ * The stock firmware's PHY (libphy, phy_version 711) programs these blocks
++ * during WiFi start and polls completion flags in them with no timeout; the
++ * SoC's silent catch-all (reads 0) parks the WiFi task there at priority 23
++ * and starves core 0. Nothing here models the radio: registers are storage
++ * (writes read back), and a table of status bits reads as set:
++ *
++ *   FE 0x60006174 bit 16 - measurement done, polled after FE 0x144 bit 1 and
++ *                           RX 0x6001C02C bit 23 start a capture (the loop at
++ *                           app 0x422e2cf9 counts RX 0x6001C08C[18:12] <= 69
++ *                           iterations while it waits).
++ *   MAC 0x60033D14 bit 0 - ready after the driver sets bit 1 (app 0x4230bfa6,
++ *                           first MAC access after phy_init; the device prints
++ *                           "wifi:mode : sta" right after).
++ *
++ * The "sticky" property ("0xADDR:0xMASK,...") extends the table at run time
++ * so a new poll found in the hot list (board state "rf") can be answered
++ * without a rebuild; add it here once it is understood.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/cutils.h"
++#include "qapi/error.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/misc/esp32s3_rfstub.h"
++
++const ESP32S3RfStubMap esp32s3_rfstub_map[ESP32S3_RFSTUB_REGIONS] = {
++    { "fe2", 0x60005000, 0x1000 },
++    { "fe",  0x60006000, 0x1000 },
++    { "rx",  0x6001C000, 0x1000 },   /* NRX proper starts at +0xC00 */
++    { "bb",  0x6001D000, 0x1000 },
++    { "mac", 0x60033000, 0x1000 },
++};
++
++static const ESP32S3RfStubSticky esp32s3_rfstub_builtin[] = {
++    { 0x60006174, 1u << 16 },   /* FE measurement done */
++    { 0x60033D14, 1u << 0 },    /* MAC ready after bit 1 */
++};
++
++static uint32_t esp32s3_rfstub_sticky_mask(ESP32S3RfStubState *s, hwaddr addr)
++{
++    uint32_t m = 0;
++    for (int i = 0; i < s->n_sticky; i++) {
++        if (s->sticky[i].addr == addr) {
++            m |= s->sticky[i].mask;
++        }
++    }
++    return m;
++}
++
++static uint64_t esp32s3_rfstub_read(void *opaque, hwaddr off, unsigned size)
++{
++    ESP32S3RfStubRegion *r = opaque;
++    ESP32S3RfStubState *s = r->owner;
++    hwaddr addr = r->base + off;
++    uint32_t v = r->reg[off / 4] | esp32s3_rfstub_sticky_mask(s, addr);
++    s->reads++;
++    x4pro_hotlog_hit(&s->hot, addr, false, 0, size);
++    return v;
++}
++
++static void esp32s3_rfstub_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
++{
++    ESP32S3RfStubRegion *r = opaque;
++    ESP32S3RfStubState *s = r->owner;
++    r->reg[off / 4] = value;
++    s->writes++;
++    x4pro_hotlog_hit(&s->hot, r->base + off, true, value, size);
++}
++
++static const MemoryRegionOps esp32s3_rfstub_ops = {
++    .read = esp32s3_rfstub_read,
++    .write = esp32s3_rfstub_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void esp32s3_rfstub_add_sticky(ESP32S3RfStubState *s, hwaddr addr, uint32_t mask, Error **errp)
++{
++    if (s->n_sticky >= ESP32S3_RFSTUB_MAX_STICKY) {
++        error_setg(errp, "esp32s3.rfstub: too many sticky entries");
++        return;
++    }
++    s->sticky[s->n_sticky].addr = addr;
++    s->sticky[s->n_sticky].mask = mask;
++    s->n_sticky++;
++}
++
++static void esp32s3_rfstub_realize(DeviceState *dev, Error **errp)
++{
++    ESP32S3RfStubState *s = ESP32S3_RFSTUB(dev);
++    for (size_t i = 0; i < ARRAY_SIZE(esp32s3_rfstub_builtin); i++) {
++        esp32s3_rfstub_add_sticky(s, esp32s3_rfstub_builtin[i].addr, esp32s3_rfstub_builtin[i].mask, errp);
++    }
++    if (s->sticky_prop && s->sticky_prop[0]) {
++        g_auto(GStrv) items = g_strsplit(s->sticky_prop, ",", -1);
++        for (char **it = items; *it; it++) {
++            uint64_t a, m;
++            char *colon = strchr(*it, ':');
++            if (!colon || qemu_strtou64(*it, NULL, 0, &a) || qemu_strtou64(colon + 1, NULL, 0, &m)) {
++                error_setg(errp, "esp32s3.rfstub: bad sticky entry '%s' (want 0xADDR:0xMASK)", *it);
++                return;
++            }
++            esp32s3_rfstub_add_sticky(s, a, m, errp);
++        }
++    }
++}
++
++static void esp32s3_rfstub_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3RfStubState *s = ESP32S3_RFSTUB(obj);
++    for (int i = 0; i < ESP32S3_RFSTUB_REGIONS; i++) {
++        memset(s->region[i].reg, 0, sizeof(s->region[i].reg));
++    }
++}
++
++static void esp32s3_rfstub_init(Object *obj)
++{
++    ESP32S3RfStubState *s = ESP32S3_RFSTUB(obj);
++    x4pro_hotlog_init(&s->hot, "rf", 32);
++    for (int i = 0; i < ESP32S3_RFSTUB_REGIONS; i++) {
++        ESP32S3RfStubRegion *r = &s->region[i];
++        char name[32];
++        r->name = esp32s3_rfstub_map[i].name;
++        r->base = esp32s3_rfstub_map[i].base;
++        r->size = MIN(esp32s3_rfstub_map[i].size, ESP32S3_RFSTUB_REGION_SIZE);
++        r->owner = s;
++        snprintf(name, sizeof(name), "esp32s3.rfstub.%s", r->name);
++        memory_region_init_io(&r->mr, obj, &esp32s3_rfstub_ops, r, name, r->size);
++        sysbus_init_mmio(SYS_BUS_DEVICE(obj), &r->mr);
++    }
++}
++
++static Property esp32s3_rfstub_properties[] = {
++    DEFINE_PROP_STRING("sticky", ESP32S3RfStubState, sticky_prop),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void esp32s3_rfstub_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    dc->realize = esp32s3_rfstub_realize;
++    rc->phases.hold = esp32s3_rfstub_reset_hold;
++    device_class_set_props(dc, esp32s3_rfstub_properties);
++}
++
++static const TypeInfo esp32s3_rfstub_info = {
++    .name = TYPE_ESP32S3_RFSTUB,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3RfStubState),
++    .instance_init = esp32s3_rfstub_init,
++    .class_init = esp32s3_rfstub_class_init,
++};
++
++static void esp32s3_rfstub_register_types(void)
++{
++    type_register_static(&esp32s3_rfstub_info);
++}
++
++type_init(esp32s3_rfstub_register_types)
+diff --git a/hw/misc/esp32s3_saradc.c b/hw/misc/esp32s3_saradc.c
+new file mode 100644
+index 0000000..2a71299
+--- /dev/null
++++ b/hw/misc/esp32s3_saradc.c
+@@ -0,0 +1,156 @@
++/*
++ * ESP32-S3 SENS block (DR_REG_SENS_BASE 0x60008800, 1 KB): the RTC-side SAR ADC
++ * controller, the temperature sensor and the RTC peripheral clock gates.
++ *
++ * Why: the stock firmware's PHY reads the chip temperature during its WiFi start
++ * (SENS_SAR_TSENS_CTRL: power up, then poll TSENS_READY forever) and samples the
++ * power detector through SAR2 (SENS_SAR_MEAS2_CTRL2: START_SAR, then poll
++ * DONE_SAR); ESP-IDF's adc_oneshot and temperature_sensor drivers use the same
++ * registers. Espressif's SoC leaves the block to its silent catch-all (reads 0),
++ * so every such poll spins.
++ *
++ * Model: a oneshot started with MEASx_START_SAR is complete on the next read
++ * (DONE_SAR set, DATA_SAR = the "sar1-data"/"sar2-data" property); the
++ * temperature sensor answers TSENS_READY with TSENS_OUT = "tsens-out"
++ * (ESP-IDF: T = 0.4386 * out - 20.52 in the default range; 104 = ~25 C).
++ * All other registers are plain storage (clock gates, attenuation, mux, touch,
++ * ULP co-processor interrupt registers), which is what the firmware expects of
++ * configuration it never reads back for status.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/misc/esp32s3_saradc.h"
++
++#define R_SAR_MEAS1_CTRL2   0x0C
++#define R_SAR_MEAS2_CTRL2   0x30
++#define R_SAR_TSENS_CTRL    0x50
++#define R_SAR_COCPU_INT_RAW 0xE8
++#define R_SAR_COCPU_INT_ST  0xF0
++#define R_SAR_COCPU_INT_CLR 0xF4
++#define R_SAR_COCPU_INT_ENA_W1TS 0x10C
++#define R_SAR_COCPU_INT_ENA_W1TC 0x110
++#define R_SAR_COCPU_INT_ENA 0xEC
++
++#define MEAS_DATA_SAR_MASK  0xFFFFu
++#define MEAS_DONE_SAR       (1u << 16)
++#define MEAS_START_SAR      (1u << 17)
++#define MEAS_EN_PAD_SHIFT   19
++#define MEAS_EN_PAD_MASK    0xFFFu
++
++#define TSENS_OUT_MASK      0xFFu
++#define TSENS_READY         (1u << 8)
++
++static uint64_t esp32s3_saradc_read(void *opaque, hwaddr addr, unsigned size)
++{
++    ESP32S3SarAdcState *s = ESP32S3_SARADC(opaque);
++    uint32_t v = s->reg[addr / 4];
++    switch (addr) {
++    case R_SAR_MEAS1_CTRL2:
++        if (v & MEAS_START_SAR) {
++            return (v & ~MEAS_DATA_SAR_MASK) | MEAS_DONE_SAR | (s->sar1_data & MEAS_DATA_SAR_MASK);
++        }
++        return v & ~(MEAS_DONE_SAR | MEAS_DATA_SAR_MASK);
++    case R_SAR_MEAS2_CTRL2:
++        if (v & MEAS_START_SAR) {
++            return (v & ~MEAS_DATA_SAR_MASK) | MEAS_DONE_SAR | (s->sar2_data & MEAS_DATA_SAR_MASK);
++        }
++        return v & ~(MEAS_DONE_SAR | MEAS_DATA_SAR_MASK);
++    case R_SAR_TSENS_CTRL:
++        s->tsens_reads++;
++        return (v & ~TSENS_OUT_MASK) | TSENS_READY | (s->tsens_out & TSENS_OUT_MASK);
++    case R_SAR_COCPU_INT_ST:
++        return s->reg[R_SAR_COCPU_INT_RAW / 4] & s->reg[R_SAR_COCPU_INT_ENA / 4];
++    default:
++        return v;
++    }
++}
++
++static void esp32s3_saradc_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    ESP32S3SarAdcState *s = ESP32S3_SARADC(opaque);
++    uint32_t v = value;
++    uint32_t old = s->reg[addr / 4];
++    switch (addr) {
++    case R_SAR_MEAS1_CTRL2:
++        if ((v & MEAS_START_SAR) && !(old & MEAS_START_SAR)) {
++            s->sar1_starts++;
++            s->sar1_pad = (v >> MEAS_EN_PAD_SHIFT) & MEAS_EN_PAD_MASK;
++        }
++        break;
++    case R_SAR_MEAS2_CTRL2:
++        if ((v & MEAS_START_SAR) && !(old & MEAS_START_SAR)) {
++            s->sar2_starts++;
++            s->sar2_pad = (v >> MEAS_EN_PAD_SHIFT) & MEAS_EN_PAD_MASK;
++        }
++        break;
++    case R_SAR_COCPU_INT_CLR:
++        s->reg[R_SAR_COCPU_INT_RAW / 4] &= ~v;
++        return;
++    case R_SAR_COCPU_INT_ENA_W1TS:
++        s->reg[R_SAR_COCPU_INT_ENA / 4] |= v;
++        return;
++    case R_SAR_COCPU_INT_ENA_W1TC:
++        s->reg[R_SAR_COCPU_INT_ENA / 4] &= ~v;
++        return;
++    default:
++        break;
++    }
++    s->reg[addr / 4] = v;
++}
++
++static const MemoryRegionOps esp32s3_saradc_ops = {
++    .read = esp32s3_saradc_read,
++    .write = esp32s3_saradc_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void esp32s3_saradc_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3SarAdcState *s = ESP32S3_SARADC(obj);
++    memset(s->reg, 0, sizeof(s->reg));
++    s->reg[0x104 / 4] = 0;   /* SAR_PERI_CLK_GATE_CONF: gates closed until the firmware opens them */
++}
++
++static void esp32s3_saradc_init(Object *obj)
++{
++    ESP32S3SarAdcState *s = ESP32S3_SARADC(obj);
++    memory_region_init_io(&s->iomem, obj, &esp32s3_saradc_ops, s, TYPE_ESP32S3_SARADC, ESP32S3_SENS_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++}
++
++static Property esp32s3_saradc_properties[] = {
++    DEFINE_PROP_UINT32("sar1-data", ESP32S3SarAdcState, sar1_data, 2048),
++    DEFINE_PROP_UINT32("sar2-data", ESP32S3SarAdcState, sar2_data, 2048),
++    DEFINE_PROP_UINT32("tsens-out", ESP32S3SarAdcState, tsens_out, 104),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void esp32s3_saradc_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = esp32s3_saradc_reset_hold;
++    device_class_set_props(dc, esp32s3_saradc_properties);
++}
++
++static const TypeInfo esp32s3_saradc_info = {
++    .name = TYPE_ESP32S3_SARADC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3SarAdcState),
++    .instance_init = esp32s3_saradc_init,
++    .class_init = esp32s3_saradc_class_init,
++};
++
++static void esp32s3_saradc_register_types(void)
++{
++    type_register_static(&esp32s3_saradc_info);
++}
++
++type_init(esp32s3_saradc_register_types)
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 832eafa..c8bbdf3 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -183,6 +183,9 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
+   'x4pro_i2c_devs.c',
+   'esp32s3_ledc.c',
+   'x4pro_sleep.c',
++  'x4pro_ana_i2c.c',
++  'esp32s3_saradc.c',
++  'esp32s3_rfstub.c',
+   'esp32s3_rng.c',
+   'esp32s3_pms.c',
+   'esp_hmac.c',
+diff --git a/hw/misc/x4pro_ana_i2c.c b/hw/misc/x4pro_ana_i2c.c
+new file mode 100644
+index 0000000..fb498b4
+--- /dev/null
++++ b/hw/misc/x4pro_ana_i2c.c
+@@ -0,0 +1,174 @@
++/*
++ * ESP32-S3 analog-master I2C block ("I2C_ANA_MST", 0x6000E000, 4 KB).
++ *
++ * Nothing in Espressif's SoC answers this block; its silent catch-all returns 0,
++ * which parks the stock firmware's WiFi task in ROM rom_pkdet_vol_start polling
++ * +0x50 for a state that never comes (docs/log.md 2026-09-06). Protocol, from the
++ * ROM (images/rom/esp32s3_rev0_rom.elf) and ESP-IDF's regi2c_ctrl_ll.h:
++ *
++ *   +0x00 / +0x04  master 0 / 1 command word (rom_chip_i2c_readReg_org,
++ *                  rom_chip_i2c_writeReg, rom_i2c_paral_read/write):
++ *                    [7:0] slave block (BBPLL 0x66, SAR ADC 0x69, DIG_REG 0x6D,
++ *                          BOD/ULP 0x61, radio 0x62..0x64), [15:8] register,
++ *                    [23:16] data, bit 24 write, bit 25 busy, bit 26 start.
++ *                  The ROM polls busy clear, then takes a read's answer from
++ *                  [23:16]. rom_get_i2c_hostid picks master 1 for 0x62..0x64.
++ *   +0x40  ANA_CONF0: BBPLL calibration STOP_FORCE_HIGH/LOW bits 2/3, CAL_DONE
++ *          bit 24 answered set.
++ *   +0x44  ANA_CONFIG (per-block enables, a cleared bit enables), +0x48 ANA_CONFIG2.
++ *   +0x50  SAR2 power detector: bit 1 start (rom_pkdet_vol_start), bits 26:24 state,
++ *          7 = idle/done, polled before and after the start; bits 6,7 rom_en_pwdet.
++ *   +0x5C / +0x60  detector configuration (rom_pwdet_sar2_init: 0x16a, bits 19..23;
++ *          rom_get_sar2_vol: bits 4:3 select the input).
++ *   +0x80..+0x9C  eight 13-bit SAR2 samples (rom_read_sar_dout), answered with
++ *          the "sar2-code" property.
++ *
++ * The analog registers behind the masters are stored per (block, register) and
++ * read back as written; no PLL, ADC or radio behaviour is derived from them.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/misc/x4pro_ana_i2c.h"
++
++#define R_MST0          0x00
++#define R_MST1          0x04
++#define R_ANA_CONF0     0x40
++#define R_ANA_CONFIG    0x44
++#define R_ANA_CONFIG2   0x48
++#define R_SAR2_CTRL     0x50
++#define R_SAR2_CONF1    0x5C
++#define R_SAR2_CONF2    0x60
++#define R_SAR2_DOUT0    0x80
++#define R_SAR2_DOUT7    0x9C
++
++#define CMD_BLOCK(v)    ((v) & 0xFF)
++#define CMD_REG(v)      (((v) >> 8) & 0xFF)
++#define CMD_DATA(v)     (((v) >> 16) & 0xFF)
++#define CMD_WRITE       (1u << 24)
++#define CMD_BUSY        (1u << 25)
++#define CMD_START       (1u << 26)
++
++#define ANA_CONF0_BBPLL_CAL_DONE (1u << 24)
++#define SAR2_CTRL_START          (1u << 1)
++#define SAR2_CTRL_STATE_DONE     (7u << 24)
++#define SAR2_CODE_MASK           0x1FFF
++
++static void x4pro_ana_i2c_command(X4ProAnaI2cState *s, int master, uint32_t v)
++{
++    uint8_t block = CMD_BLOCK(v), reg = CMD_REG(v), data = CMD_DATA(v);
++    bool write = v & CMD_WRITE;
++    if (write) {
++        s->mem[block][reg] = data;
++        s->writes++;
++    } else {
++        data = s->mem[block][reg];
++        s->reads++;
++    }
++    s->last_master = master;
++    s->last_block = block;
++    s->last_reg = reg;
++    s->last_data = data;
++    /* busy never shows; a read leaves its answer in the data field */
++    s->reg[master] = (v & ~(CMD_BUSY | (0xFFu << 16))) | ((uint32_t)data << 16);
++    if (s->log) {
++        qemu_log_mask(LOG_UNIMP, "x4pro.ana-i2c: m%d %s block 0x%02x reg 0x%02x data 0x%02x\n",
++                      master, write ? "wr" : "rd", block, reg, data);
++    }
++}
++
++static uint64_t x4pro_ana_i2c_read(void *opaque, hwaddr addr, unsigned size)
++{
++    X4ProAnaI2cState *s = X4PRO_ANA_I2C(opaque);
++    uint32_t v = s->reg[addr / 4];
++    switch (addr) {
++    case R_MST0:
++    case R_MST1:
++        return v & ~CMD_BUSY;
++    case R_ANA_CONF0:
++        return v | ANA_CONF0_BBPLL_CAL_DONE;
++    case R_SAR2_CTRL:
++        return (v & ~SAR2_CTRL_STATE_DONE) | SAR2_CTRL_STATE_DONE;
++    case R_SAR2_DOUT0 ... R_SAR2_DOUT7:
++        return s->sar2_code & SAR2_CODE_MASK;
++    default:
++        return v;
++    }
++}
++
++static void x4pro_ana_i2c_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    X4ProAnaI2cState *s = X4PRO_ANA_I2C(opaque);
++    uint32_t v = value;
++    switch (addr) {
++    case R_MST0:
++    case R_MST1:
++        x4pro_ana_i2c_command(s, addr / 4, v);
++        return;
++    case R_SAR2_CTRL:
++        if ((v & SAR2_CTRL_START) && !(s->reg[addr / 4] & SAR2_CTRL_START)) {
++            s->sar2_starts++;
++        }
++        break;
++    case R_SAR2_DOUT0 ... R_SAR2_DOUT7:
++        return;   /* read-only samples */
++    default:
++        break;
++    }
++    s->reg[addr / 4] = v;
++}
++
++static const MemoryRegionOps x4pro_ana_i2c_ops = {
++    .read = x4pro_ana_i2c_read,
++    .write = x4pro_ana_i2c_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void x4pro_ana_i2c_reset_hold(Object *obj, ResetType type)
++{
++    X4ProAnaI2cState *s = X4PRO_ANA_I2C(obj);
++    memset(s->reg, 0, sizeof(s->reg));
++    memset(s->mem, 0, sizeof(s->mem));
++}
++
++static void x4pro_ana_i2c_init(Object *obj)
++{
++    X4ProAnaI2cState *s = X4PRO_ANA_I2C(obj);
++    memory_region_init_io(&s->iomem, obj, &x4pro_ana_i2c_ops, s, TYPE_X4PRO_ANA_I2C, X4PRO_ANA_I2C_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++}
++
++static Property x4pro_ana_i2c_properties[] = {
++    DEFINE_PROP_UINT32("sar2-code", X4ProAnaI2cState, sar2_code, 0x800),
++    DEFINE_PROP_BOOL("log", X4ProAnaI2cState, log, true),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void x4pro_ana_i2c_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = x4pro_ana_i2c_reset_hold;
++    device_class_set_props(dc, x4pro_ana_i2c_properties);
++}
++
++static const TypeInfo x4pro_ana_i2c_info = {
++    .name = TYPE_X4PRO_ANA_I2C,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(X4ProAnaI2cState),
++    .instance_init = x4pro_ana_i2c_init,
++    .class_init = x4pro_ana_i2c_class_init,
++};
++
++static void x4pro_ana_i2c_register_types(void)
++{
++    type_register_static(&x4pro_ana_i2c_info);
++}
++
++type_init(x4pro_ana_i2c_register_types)
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index e335d7c..c3d0c29 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -30,6 +30,10 @@
+ #include "hw/misc/x4pro_i2c_devs.h"
+ #include "hw/misc/esp32s3_ledc.h"
+ #include "hw/misc/x4pro_sleep.h"
++#include "hw/misc/x4pro_ana_i2c.h"
++#include "hw/misc/esp32s3_saradc.h"
++#include "hw/misc/esp32s3_rfstub.h"
++#include "hw/misc/x4pro_hotlog.h"
+ #include "qapi/qmp/qjson.h"
+ #include "qapi/qmp/qdict.h"
+ #include "qapi/qmp/qlist.h"
+@@ -58,6 +62,7 @@ typedef struct IoLogRegion {
+     hwaddr base;
+     uint32_t size;
+     MemoryRegion mr;
++    X4ProHotLog hot;      /* first 32 accesses per address are logged, the rest counted */
+ } IoLogRegion;
+ 
+ static IoLogRegion iolog_regions[] = {
+@@ -66,7 +71,6 @@ static IoLogRegion iolog_regions[] = {
+     { "spi3",      DR_REG_SPI3_BASE,            0x1000 },
+     { "usb_wrap",  DR_REG_USB_WRAP_BASE,        0x1000 },
+     { "rmt",       DR_REG_RMT_BASE,             0x1000 },
+-    { "sens",      0x60008800,                  0x400  },
+     { "apb_saradc",0x60040000,                  0x1000 },
+     { "pcnt",      0x60017000,                  0x1000 },
+     { "mcpwm0",    0x6001E000,                  0x1000 },
+@@ -76,6 +80,24 @@ static IoLogRegion iolog_regions[] = {
+     { "i2s1",      0x6002D000,                  0x1000 },
+     { "lcd_cam",   0x60041000,                  0x1000 },
+     { "usb_otg",   0x60080000,                  0x40000 },
++    /* radio side, unmodelled: the stock's WiFi start touches these (docs/NEXT_PHASE.md 3.2) */
++    { "rtc_i2c",   DR_REG_RTC_I2C_BASE,         0x400  },
++    { "hinf",      DR_REG_HINF_BASE,            0x1000 },
++    { "uhci1",     DR_REG_UHCI1_BASE,           0x1000 },
++    { "p0d",       0x6000D000,                  0x1000 },
++    { "bt",        DR_REG_BT_BASE,              0x1000 },
++    { "p12",       0x60012000,                  0x1000 },
++    { "slchost",   DR_REG_SLCHOST_BASE,         0x1000 },
++    { "slc",       DR_REG_SLC_BASE,             0x1000 },
++    { "p1a",       0x6001A000,                  0x2000 },
++    { "p22",       0x60022000,                  0x1000 },
++    { "p29",       0x60029000,                  0x1000 },
++    { "p2f",       0x6002F000,                  0x4000 },
++    { "p34",       0x60034000,                  0x1000 },
++    { "wdev",      0x60035000,                  0x7C   },   /* the SoC's RNG sits at 0x6003507C */
++    { "wdev",      0x60035080,                  0xF80  },
++    { "p36",       0x60036000,                  0x2000 },
++    { "p42",       0x60042000,                  0x3E000 },  /* 0x60042000..0x60080000 */
+ };
+ 
+ static uint32_t x4pro_strap_mode = 0x4;   /* SPI flash boot; copied from /machine/soc/gpio */
+@@ -86,16 +108,14 @@ static uint64_t iolog_read(void *opaque, hwaddr addr, unsigned size)
+     if (r->base == DR_REG_GPIO_BASE && addr == 0x38) {
+         return x4pro_strap_mode;   /* GPIO_STRAP_REG: keep the SoC stub's answer */
+     }
+-    qemu_log_mask(LOG_UNIMP, "x4pro/%s: read  0x%08" HWADDR_PRIx " size %u\n",
+-                  r->name, r->base + addr, size);
++    x4pro_hotlog_hit(&r->hot, r->base + addr, false, 0, size);
+     return 0;
+ }
+ 
+ static void iolog_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+ {
+     IoLogRegion *r = opaque;
+-    qemu_log_mask(LOG_UNIMP, "x4pro/%s: write 0x%08" HWADDR_PRIx " = 0x%08" PRIx64 " size %u\n",
+-                  r->name, r->base + addr, value, size);
++    x4pro_hotlog_hit(&r->hot, r->base + addr, true, value, size);
+ }
+ 
+ static const MemoryRegionOps iolog_ops = {
+@@ -110,6 +130,7 @@ static void x4pro_add_iolog(MachineState *machine, MemoryRegion *sys_mem)
+         IoLogRegion *r = &iolog_regions[i];
+         char name[32];
+         snprintf(name, sizeof(name), "x4pro.iolog.%s", r->name);
++        x4pro_hotlog_init(&r->hot, r->name, 32);
+         memory_region_init_io(&r->mr, OBJECT(machine), &iolog_ops, r, name, r->size);
+         memory_region_add_subregion_overlap(sys_mem, r->base, &r->mr, 1);
+     }
+@@ -357,6 +378,9 @@ struct X4ProBoardState {
+     X4ProPcf8563State *rtc;
+     ESP32S3LedcState *ledc;
+     X4ProSleepState *sleep;
++    X4ProAnaI2cState *ana;
++    ESP32S3SarAdcState *saradc;
++    ESP32S3RfStubState *rf;
+ };
+ 
+ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+@@ -445,6 +469,35 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+             b->sleep->sleeping ? "true" : "false", b->sleep->deep ? "true" : "false", b->sleep->sleep_count, b->sleep->wake_count,
+             b->sleep->light_sleeps, b->sleep->sleep_entered_us, b->sleep->ext_wakeup1, b->sleep->ext_wakeup1_status, b->sleep->wakeup_cause);
+     }
++    if (b->ana) {
++        g_string_append_printf(j, "\"ana_i2c\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"sar2_starts\":%" PRIu64
++            ",\"last\":\"m%u 0x%02x/0x%02x=0x%02x\"},",
++            b->ana->reads, b->ana->writes, b->ana->sar2_starts, b->ana->last_master, b->ana->last_block, b->ana->last_reg, b->ana->last_data);
++    }
++    if (b->saradc) {
++        g_string_append_printf(j, "\"saradc\":{\"sar1_starts\":%" PRIu64 ",\"sar2_starts\":%" PRIu64 ",\"tsens_reads\":%" PRIu64
++            ",\"sar1_pad\":\"0x%03x\",\"sar2_pad\":\"0x%03x\"},",
++            b->saradc->sar1_starts, b->saradc->sar2_starts, b->saradc->tsens_reads, b->saradc->sar1_pad, b->saradc->sar2_pad);
++    }
++    if (b->rf) {
++        g_string_append_printf(j, "\"rf\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"sticky\":%d,\"hot\":",
++                               b->rf->reads, b->rf->writes, b->rf->n_sticky);
++        x4pro_hotlog_json(&b->rf->hot, j, 8);
++        g_string_append(j, "},");
++    }
++    {
++        /* unmodelled blocks whose registers were polled past the log cap */
++        GString *h = g_string_new("");
++        for (size_t i = 0; i < ARRAY_SIZE(iolog_regions); i++) {
++            GString *one = g_string_new("");
++            if (x4pro_hotlog_json(&iolog_regions[i].hot, one, 4) > 0) {
++                g_string_append_printf(h, "%s\"%s\":%s", h->len ? "," : "", iolog_regions[i].name, one->str);
++            }
++            g_string_free(one, true);
++        }
++        g_string_append_printf(j, "\"iolog_hot\":{%s},", h->str);
++        g_string_free(h, true);
++    }
+     if (j->str[j->len - 1] == ',') {
+         g_string_truncate(j, j->len - 1);
+     }
+@@ -674,6 +727,41 @@ static void x4pro_machine_init(MachineState *machine)
+         }
+     }
+ 
++    /* Analog-master I2C block at 0x6000E000: regi2c masters, ANA_CONF, SAR2 power detector */
++    X4ProAnaI2cState *ana;
++    {
++        DeviceState *dev = qdev_new(TYPE_X4PRO_ANA_I2C);
++        object_property_add_child(OBJECT(machine), "x4pro-ana-i2c", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, 0x6000E000, mr, 2);
++        ana = X4PRO_ANA_I2C(dev);
++    }
++
++    /* SENS block at 0x60008800: SAR ADC oneshot, temperature sensor, RTC peripheral clock gates */
++    ESP32S3SarAdcState *saradc;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_SARADC);
++        object_property_add_child(OBJECT(machine), "x4pro-saradc", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_SENS_BASE, mr, 2);
++        saradc = ESP32S3_SARADC(dev);
++    }
++
++    /* Radio register stub: FE2 / FE / RX / BB blocks the PHY programs and polls */
++    ESP32S3RfStubState *rf;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_RFSTUB);
++        object_property_add_child(OBJECT(machine), "x4pro-rf", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        for (int i = 0; i < ESP32S3_RFSTUB_REGIONS; i++) {
++            MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), i);
++            memory_region_add_subregion_overlap(sys_mem, esp32s3_rfstub_map[i].base, mr, 2);
++        }
++        rf = ESP32S3_RFSTUB(dev);
++    }
++
+     /* Board state object: /machine/x4pro-board */
+     {
+         DeviceState *dev = qdev_new(TYPE_X4PRO_BOARD);
+@@ -681,7 +769,7 @@ static void x4pro_machine_init(MachineState *machine)
+         X4ProBoardState *b = X4PRO_BOARD(dev);
+         b->gpio = gpio; b->spi2 = spi2; b->epd = epd; b->usj = usj_state; b->input = input;
+         b->i2c0 = i2c0; b->gt911 = gt911; b->cw2017 = cw2017; b->rtc = rtc;
+-        b->ledc = ledc; b->sleep = sleep;
++        b->ledc = ledc; b->sleep = sleep; b->ana = ana; b->saradc = saradc; b->rf = rf;
+         qdev_realize_and_unref(dev, NULL, &error_fatal);
+     }
+ 
+diff --git a/include/hw/misc/esp32s3_rfstub.h b/include/hw/misc/esp32s3_rfstub.h
+new file mode 100644
+index 0000000..7c431e4
+--- /dev/null
++++ b/include/hw/misc/esp32s3_rfstub.h
+@@ -0,0 +1,50 @@
++/*
++ * ESP32-S3 radio register stub: FE2 (0x60005000), FE (0x60006000), NRX/RX
++ * (0x6001C000), BB (0x6001D000) and the WiFi MAC (0x60033000). Plain storage so read-modify-write holds,
++ * plus "sticky" status bits that read as set so the PHY's calibration polls
++ * complete instead of spinning. No radio behaviour.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++#include "hw/misc/x4pro_hotlog.h"
++
++#define TYPE_ESP32S3_RFSTUB "esp32s3.rfstub"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3RfStubState, ESP32S3_RFSTUB)
++
++#define ESP32S3_RFSTUB_REGIONS 5
++#define ESP32S3_RFSTUB_REGION_SIZE 0x1000
++#define ESP32S3_RFSTUB_MAX_STICKY 64
++
++typedef struct ESP32S3RfStubRegion {
++    const char *name;
++    hwaddr base;
++    uint32_t size;
++    MemoryRegion mr;
++    uint32_t reg[ESP32S3_RFSTUB_REGION_SIZE / 4];
++    struct ESP32S3RfStubState *owner;
++} ESP32S3RfStubRegion;
++
++typedef struct ESP32S3RfStubSticky {
++    hwaddr addr;
++    uint32_t mask;
++} ESP32S3RfStubSticky;
++
++struct ESP32S3RfStubState {
++    SysBusDevice parent_obj;
++    ESP32S3RfStubRegion region[ESP32S3_RFSTUB_REGIONS];
++    ESP32S3RfStubSticky sticky[ESP32S3_RFSTUB_MAX_STICKY];
++    int n_sticky;
++    char *sticky_prop;       /* "0xADDR:0xMASK,..." added to the built-in table */
++    X4ProHotLog hot;
++    uint64_t reads, writes;
++};
++
++typedef struct ESP32S3RfStubMap {
++    const char *name;
++    hwaddr base;
++    uint32_t size;
++} ESP32S3RfStubMap;
++
++extern const ESP32S3RfStubMap esp32s3_rfstub_map[ESP32S3_RFSTUB_REGIONS];
+diff --git a/include/hw/misc/esp32s3_saradc.h b/include/hw/misc/esp32s3_saradc.h
+new file mode 100644
+index 0000000..0238562
+--- /dev/null
++++ b/include/hw/misc/esp32s3_saradc.h
+@@ -0,0 +1,29 @@
++/*
++ * ESP32-S3 SENS block (0x60008800): SAR ADC oneshot control (RTC path),
++ * temperature sensor, RTC peripheral clock gates. Minimal model: a oneshot
++ * completes immediately with a configurable code, the temperature sensor is
++ * always ready with a configurable output, every other register reads back
++ * as written. The APB_SARADC (DMA/digital controller, 0x60040000) is not here.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++
++#define TYPE_ESP32S3_SARADC "esp32s3.saradc"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3SarAdcState, ESP32S3_SARADC)
++
++#define ESP32S3_SENS_SIZE 0x400
++
++struct ESP32S3SarAdcState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++
++    uint32_t reg[ESP32S3_SENS_SIZE / 4];
++
++    uint32_t sar1_data, sar2_data;   /* 12-bit codes answered by the oneshot */
++    uint32_t tsens_out;              /* 8-bit temperature sensor output */
++
++    uint64_t sar1_starts, sar2_starts, tsens_reads;
++    uint32_t sar1_pad, sar2_pad;     /* EN_PAD mask of the last oneshot */
++};
+diff --git a/include/hw/misc/x4pro_ana_i2c.h b/include/hw/misc/x4pro_ana_i2c.h
+new file mode 100644
+index 0000000..f844bca
+--- /dev/null
++++ b/include/hw/misc/x4pro_ana_i2c.h
+@@ -0,0 +1,30 @@
++/*
++ * ESP32-S3 analog-master I2C block (I2C_ANA_MST, 0x6000E000): the register masters
++ * behind rom_i2c_readReg/writeReg, ESP-IDF's ANA_CONF registers and the SAR2
++ * power-detector path the PHY polls. Answers as idle hardware would; keeps the
++ * analog registers per (block, register) so read-modify-write sequences hold.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++
++#define TYPE_X4PRO_ANA_I2C "x4pro.ana-i2c"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProAnaI2cState, X4PRO_ANA_I2C)
++
++#define X4PRO_ANA_I2C_SIZE 0x1000
++
++struct X4ProAnaI2cState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++
++    uint32_t reg[X4PRO_ANA_I2C_SIZE / 4];   /* last written value of every register */
++    uint8_t mem[256][256];                   /* analog registers: [block][register] */
++
++    uint32_t sar2_code;                      /* 13-bit sample answered at +0x80..+0x9C */
++    bool log;                                /* log every master transaction (-d unimp) */
++
++    uint64_t reads, writes;                  /* master transactions */
++    uint64_t sar2_starts;                    /* +0x50 bit 1 set */
++    uint8_t last_master, last_block, last_reg, last_data;
++};
+diff --git a/include/hw/misc/x4pro_hotlog.h b/include/hw/misc/x4pro_hotlog.h
+new file mode 100644
+index 0000000..eace2c8
+--- /dev/null
++++ b/include/hw/misc/x4pro_hotlog.h
+@@ -0,0 +1,91 @@
++/*
++ * Capped access logger with per-address counters. The first `cap` accesses of
++ * every (address, direction) go to the QEMU log (-d unimp) as before; later ones
++ * are only counted, so a firmware poll cannot grow qemu.log without bound, and
++ * the counters name the polled register (board state JSON, "hot" lists).
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "exec/hwaddr.h"
++
++typedef struct X4ProHotEnt {
++    uint64_t reads, writes;
++} X4ProHotEnt;
++
++typedef struct X4ProHotLog {
++    const char *name;
++    GHashTable *tab;      /* addr -> X4ProHotEnt* */
++    unsigned cap;
++} X4ProHotLog;
++
++static inline void x4pro_hotlog_init(X4ProHotLog *h, const char *name, unsigned cap)
++{
++    h->name = name;
++    h->cap = cap;
++    h->tab = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
++}
++
++static inline void x4pro_hotlog_hit(X4ProHotLog *h, hwaddr addr, bool write, uint64_t value, unsigned size)
++{
++    int64_t key = addr;
++    X4ProHotEnt *e = g_hash_table_lookup(h->tab, &key);
++    if (!e) {
++        int64_t *k = g_new(int64_t, 1);
++        *k = key;
++        e = g_new0(X4ProHotEnt, 1);
++        g_hash_table_insert(h->tab, k, e);
++    }
++    uint64_t n = write ? ++e->writes : ++e->reads;
++    if (n > h->cap) {
++        return;
++    }
++    if (write) {
++        qemu_log_mask(LOG_UNIMP, "x4pro/%s: write 0x%08" HWADDR_PRIx " = 0x%08" PRIx64 " size %u%s\n",
++                      h->name, addr, value, size, n == h->cap ? " (further writes only counted)" : "");
++    } else {
++        qemu_log_mask(LOG_UNIMP, "x4pro/%s: read  0x%08" HWADDR_PRIx " size %u%s\n",
++                      h->name, addr, size, n == h->cap ? " (further reads only counted)" : "");
++    }
++}
++
++typedef struct X4ProHotRow {
++    int64_t addr;
++    uint64_t reads, writes;
++} X4ProHotRow;
++
++static inline int x4pro_hotlog_cmp(const void *a, const void *b)
++{
++    const X4ProHotRow *x = a, *y = b;
++    uint64_t sx = x->reads + x->writes, sy = y->reads + y->writes;
++    return sx < sy ? 1 : sx > sy ? -1 : 0;
++}
++
++/* Append a JSON array of the `top` busiest addresses that exceeded the cap; returns the count. */
++static inline int x4pro_hotlog_json(X4ProHotLog *h, GString *j, int top)
++{
++    GArray *rows = g_array_new(false, false, sizeof(X4ProHotRow));
++    GHashTableIter it;
++    gpointer k, v;
++    g_hash_table_iter_init(&it, h->tab);
++    while (g_hash_table_iter_next(&it, &k, &v)) {
++        X4ProHotEnt *e = v;
++        if (e->reads + e->writes > h->cap) {
++            X4ProHotRow r = { *(int64_t *)k, e->reads, e->writes };
++            g_array_append_val(rows, r);
++        }
++    }
++    qsort(rows->data, rows->len, sizeof(X4ProHotRow), x4pro_hotlog_cmp);
++    g_string_append_c(j, '[');
++    int n = MIN((int)rows->len, top);
++    for (int i = 0; i < n; i++) {
++        X4ProHotRow *r = &g_array_index(rows, X4ProHotRow, i);
++        g_string_append_printf(j, "%s{\"addr\":\"0x%08" PRIx64 "\",\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 "}",
++                               i ? "," : "", (uint64_t)r->addr, r->reads, r->writes);
++    }
++    g_string_append_c(j, ']');
++    g_array_free(rows, true);
++    return n;
++}
+-- 
+2.50.1 (Apple Git-155)
+

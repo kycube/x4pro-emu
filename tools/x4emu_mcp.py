@@ -71,7 +71,9 @@ def emu_status(name: str = 'dev0') -> str:
 @server.tool()
 def emu_state(name: str = 'dev0') -> dict:
     """Board state JSON: panel/refresh counters, BUSY, GPIO levels, buttons, touch, GT911, I2C,
-    battery, RTC, LEDC channels (frontlight duty), sleep state, console/SPI counters."""
+    battery, RTC, LEDC channels (frontlight duty), sleep state, console/SPI counters, analog-master
+    (ana_i2c) / SENS (saradc) / radio-stub (rf, with `hot` polls) counters, iolog_hot (unmodelled
+    registers polled past the log cap)."""
     return json.loads(_x4(name, 'state'))
 
 # ---------------------------------------------------------------- observation

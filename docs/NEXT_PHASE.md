@@ -9,13 +9,15 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 
 - Repo: `/Users/mini/x4pro-emu` (symlink at `/Users/mini/xteink x4/x4pro-emu`; paths with spaces
   break QEMU/ESP-IDF). `make test` = core unit tests + fixture replay + pytest end-to-end cases
-  (12 CrossPoint + 1 stock), all green. `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182
+  (12 CrossPoint + 2 stock), all green. `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182
   with branch `x4pro`; **the source of truth for our QEMU changes is `qemu-patches/`** (export with
   `cd qemu && git format-patch -o ../qemu-patches febae182..x4pro` after every QEMU commit).
 - Machine `xteink-x4pro` = Espressif's `esp32s3` machine + overlays (higher MemoryRegion priority):
   USB Serial/JTAG console, full GPIO, SPI2 (CPU FIFO and GDMA paths), I2C0 (GT911 0x5D, BM8563 0x51,
-  CW2017 0x63), LEDC, RTC_CNTL deep-sleep overlay, D-cache occupy/lock DONE shim, named I/O access
-  loggers for everything else (`x4pro/<block>` lines in qemu.log). Espressif files are edited only by
+  CW2017 0x63), LEDC, RTC_CNTL deep-sleep overlay, D-cache occupy/lock DONE shim, analog-master I2C
+  block (0x6000E000), SENS (SAR oneshot, temperature sensor), radio register stub (FE2/FE/RX/BB/MAC with
+  sticky status bits), named I/O access loggers for everything else (`x4pro/<block>` lines in qemu.log,
+  32 per address, then counted into `state.iolog_hot`). Espressif files are edited only by
   the separate, upstreamable patches 0003 (USJ SOF), 0006 (interrupt matrix), 0008 (GDMA), 0009 (SPI1
   dummy cycles); everything else is overlays and new files.
 - Panel: pure-C core `models/epd_core.c` (SSD1677 / UC8179 / UC8279) behind `hw/display/x4pro_epd.c`
@@ -26,7 +28,9 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 - Stock `xteink_app` 7.2.4 (ESP-IDF **6.0.1**): with `user_config/net_en=0` it boots to its **home
   screen** ("Bookshelf", clock, battery), paints through IDF's `spi_master` + GDMA, lights the warm
   frontlight channel, takes touch (INT-driven GT911) and keeps polling the gauge. With WiFi enabled
-  the radio task spins from 14 s on and starves the UI. See §3.
+  (the device's NVS as dumped) the PHY calibrates against the analog-master, SENS and radio-stub models,
+  the driver reaches `wifi:mode : sta` and stops itself ~8 s later for lack of air; the UI never stalls
+  (`tests/test_stock.py`, two cases). See §3.
 - Device: ESP32-S3 rev v0.2, 8 MB octal PSRAM, **UC8279** panel (LUT_VER 0x68), 15.7 GB card.
   app0 = CrossPoint (EpdBus-trace build), app1 = stock 7.2.4 copy, bootloader/table/otadata untouched,
   verified double backup in `images/device/flash-2026-09-06-{a,b}.bin`. The owner is at the desk and
@@ -66,31 +70,30 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
    wake; `refresh_count` 3; warm frontlight on GPIO9 at ~25 %.
 4. Touch: a tap on the menu icon (`x4emu tap 88 38`) repaints; the stock reads the GT911 on its
    INT line (`state.gpio_irqs`, `gt911.frames`).
-5. With `net_en=1`: at 14 s `wifi_init` logs appear exactly as on the device, then the `wifi` task
-   (prio 23, core 0) spins in ROM `rom_pkdet_vol_start+0x2e` (called from `rom_get_sar2_vol`) polling
-   `0x6000E050` bits 26:24 for the value 7 — the analog-master I2C block (RTCCNTL+0x6050 in ROM
-   naming; SAR2 samples at `0x6000E080..9C`), which the SoC's silent catch-all answers with 0. Core 0
-   starves: no more gauge polls, no repaint. That is the only known blocker left in the stock.
+5. With `net_en=1` (the device's setting): at 14 s `wifi_init` logs appear exactly as on the device,
+   PHY 711 calibrates (≈1050 analog-master reads, the temperature sensor, ≈8700 radio-block accesses),
+   `wifi:mode : sta (98:c3:77:be:ea:30)` and `wifi:enable tsf` follow as on the device, then — no air —
+   `W wifi:TX Q not empty: 500`, `force witi stop`, `flush txq` at +7.5 s and `Deinit lldesc rx mblock:6`
+   at +17.5 s. Gauge polls, repaints and touch continue throughout. Emulator-only console line:
+   `phy: error: pll_cal exceeds 2ms!!!` x6 (the RF PLL lock flag in analog block 0x62 reg 0x0c is never
+   set). No blocker is known in the stock now.
 
-`tests/test_stock.py` boots a scratch copy of the dump with `net_en=0` and checks all of 1–4
-against `tests/golden/stock-home.png` (status bar masked).
+`tests/test_stock.py` boots scratch copies of the dump: `net_en=0` checks 1–4 against
+`tests/golden/stock-home.png` (status bar masked); `net_en=1` checks 5 (console sequence, no register
+polled past 200 k accesses, gauge alive, Home intact, menu tap repaints).
 
 ### 3.2 Attack plan (in order)
 
-1. **Analog-master I2C block model** (`I2C_ANA_MST`, 0x6000E000/0x1000): an overlay like the cache
-   shim. Minimum: `+0x50` reads back with bits 26:24 = 7 (the ROM's "done" state; bit 1 is its
-   start bit), `+0x80..0x9C` (8 SAR2 samples, 13-bit) return mid-scale, and the ROM
-   `rom_i2c_readReg/writeReg` command registers (find them with an `iolog` overlay first: the ROM's
-   `rom_i2c_writeReg_Mask` is at 0x400358d8) answer "not busy". Re-run with `net_en=1`; the PHY
-   continues into `wifi:mode : sta`, then hits the MAC/BB blocks.
-2. **WiFi MAC/BB/RF loggers**: add `iolog` overlays at 0x60033000 (MAC), 0x60035000, 0x6001C000/
-   0x6001D000 (BB/NRX) and see what `esp_wifi_start` polls; the goal from the owner's brief is
-   "fail fast, never hang": either answer the few status bits the driver waits for so it reports an
-   error, or keep WiFi off in NVS for tests and document it. No radio model is planned.
-3. **SAR ADC model** (`hw/misc/esp32s3_saradc.c`, SENS 0x60008800 + APB_SARADC 0x60040000): not on
-   the stock's boot path (its ~250 accesses are `bootloader_random_enable/disable` and RTC IO clock
-   gating), but custom firmware may read the battery through it and the PHY uses SAR2 via the block
-   in step 1. Oneshot via `MEAS1/2_START_SAR` → `DONE` + `DATA`, QOM property for the value.
+1. ~~Analog-master I2C block model~~ **done** (`hw/misc/x4pro_ana_i2c.c`; protocol and evidence in
+   `docs/hardware.md`, "Analog master…"; `state.ana_i2c`; `sar2-code` property).
+2. ~~WiFi MAC/BB/RF loggers~~ **done as a stub**: `hw/misc/esp32s3_rfstub.c` (FE2/FE/RX/BB/MAC storage
+   + sticky status bits FE +0x174.16 and MAC +0xD14.0; `sticky` property for run-time experiments);
+   loggers remain for the map's holes (`state.iolog_hot`). The driver stops itself at +7.5 s. Open and
+   cosmetic: answer the RF PLL lock flag (analog block 0x62 reg 0x0c, read after each write of the cap
+   value to 0x62 reg 0x01) so the six `pll_cal exceeds 2ms` lines disappear.
+3. ~~SAR ADC model~~ **done for SENS** (`hw/misc/esp32s3_saradc.c`: MEAS1/2 oneshot → DONE + DATA,
+   TSENS always ready, storage; `sar1-data`/`sar2-data`/`tsens-out`). APB_SARADC (the DMA controller at
+   0x60040000) stays a logger until a firmware uses continuous mode.
 4. **RTC IO pads**: `RTC_IO_TOUCH_PAD3/14`, `XTAL_32N`, `TOUCH_PAD0..` hold/pull writes (sleep
    isolation); a stored-value overlay removes them from the unknowns.
 5. **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps`); keep
@@ -109,7 +112,7 @@ against `tests/golden/stock-home.png` (status bar masked).
 Acceptance for Goal A (updated): Home renders ✓; touch navigates it ✓ (menu); the frontlight duty
 follows its slider (open Settings and check `x4emu light`); a stock screen matches a device oracle
 (photo); a pytest boots the stock and walks one screen ✓ (`tests/test_stock.py`); WiFi fails fast
-instead of hanging (open).
+instead of hanging ✓ (`force witi stop` +7.5 s, deinit +17.5 s, UI alive; second case in `tests/test_stock.py`).
 
 ## 4. Goal B — fidelity ("world class" model quality)
 
@@ -199,11 +202,18 @@ instead of hanging (open).
 - Three Espressif-model bugs bit the stock (patches 0006, 0008, 0009): interrupt re-routing, GDMA
   descriptor look-ahead, QIO dummy cycles. When IDF code "spins forever" on this SoC, suspect the
   model before the firmware.
+- The PHY's status polls have no timeouts. Find them from `x4emu state` (`rf.hot`, `iolog_hot`: the
+  addresses polled past the 32-line log cap, with counts), take the PC with `info registers -a` over
+  QMP, disassemble the app there (segments from the ESP image header: `objdump -D -b binary -m xtensa
+  --adjust-vma=LOAD_ADDR --start-address … ` on the segment bytes), and answer the bit (a sticky entry
+  in `esp32s3_rfstub.c`, or a model). Before the cap, one such poll wrote 1.9 GB of qemu.log in 30 s.
+  Loop counters kept with `l16ui/s16i` wrap at 65536 and look like countdowns in register samples.
 
 ## 8. Definition of "world class" (checklist)
 
 - [x] Stock firmware: boots, renders, navigates, frontlight observable (WiFi off in NVS).
-- [ ] Stock firmware: WiFi start fails fast (analog-master I2C block, WiFi MAC/BB loggers); one screen matched to a device photo.
+- [x] Stock firmware: WiFi start fails fast (analog-master I2C block, SENS, radio stub; `tests/test_stock.py`).
+- [ ] Stock firmware: one screen matched to a device photo.
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle.
 - [ ] Deterministic replay of an input script yields identical screenshots run to run.
 - [ ] Waveform-aware grayscale validated against device photos.
@@ -251,14 +261,17 @@ diffed pairwise, and every difference is either 0 or explained in the test's ass
 (battery %, clock). Acceptance: the M3/M5 device comparisons become an automated job the owner
 starts by plugging in the device.
 
-**D5. Fidelity gaps that block custom firmware first.** Analog-master I2C block and WiFi "fail
-fast" (§3.2 steps 1–2), SAR ADC (step 3), then RMT/I2S if the firmware uses them, then USB OTG
-device mode (large, optional).
+**D5. Fidelity gaps that block custom firmware first.** Analog-master I2C block, WiFi "fail fast" and
+the SENS/SAR oneshot are done (§3.2 steps 1–3); next RMT/I2S if the firmware uses them, APB_SARADC
+continuous mode if a firmware samples with DMA, then USB OTG device mode (large, optional).
 
 What the emulator guarantees a custom firmware today (design against this list): USB Serial/JTAG
 console both ways; GPIO 0..48 with edge/level interrupts; SPI2 to the panel, CPU FIFO or GDMA
 (ESP-IDF `spi_master`, interrupt-driven, re-routing in the interrupt matrix works); UC8279/UC8179/
 SSD1677 with the real probe answers and device timings; I2C0 with GT911, BM8563, CW2017 (BATINFO
 resident); LEDC frontlight; SDMMC 1-bit card (MBR/FAT32 image); NVS reads and writes through the
-QIO flash path; deep sleep with EXT1 wake on GPIO3; efuse/MAC of the desk unit. Not there: WiFi/BLE
-(the PHY hangs on the analog-master I2C block), USB OTG, SAR ADC, RMT, I2S, touch sensor pads, ULP.
+QIO flash path; deep sleep with EXT1 wake on GPIO3; efuse/MAC of the desk unit; a WiFi start that
+initialises (PHY calibration against the analog-master, SENS and radio-stub models) and then fails the
+way ESP-IDF fails without air, so a firmware's WiFi path runs and errors instead of hanging; SAR ADC
+oneshots and the temperature sensor with fixed values. Not there: a radio, BLE (untested), USB OTG,
+APB_SARADC DMA mode, RMT, I2S, touch sensor pads, ULP.

@@ -19,7 +19,9 @@ recorded under `docs/device/`. When the doc and the struct disagree, the struct 
 
 Peripheral bases (ESP-IDF v5.5 `reg_base.h`): GPIO 0x60004000, RTC_CNTL 0x60008000, RTC_IO 0x60008400,
 IO_MUX 0x60009000, I2C0 0x60013000, LEDC 0x60019000, SPI2 0x60024000, SPI3 0x60025000, SDMMC 0x60028000,
-USB_SERIAL_JTAG 0x60038000, USB_WRAP 0x60039000, GDMA 0x6003F000, SYSTEM 0x600C0000, INTERRUPT 0x600C2000.
+USB_SERIAL_JTAG 0x60038000, USB_WRAP 0x60039000, GDMA 0x6003F000, SYSTEM 0x600C0000, INTERRUPT 0x600C2000;
+radio side: I2C_ANA_MST 0x6000E000, SENS 0x60008800, FE2 0x60005000, FE 0x60006000, RX/NRX 0x6001C000
+(NRX at +0xC00), BB 0x6001D000, WiFi MAC 0x60033000, WDEV 0x60035000 (RNG at +0x7C).
 Register offsets used by the models are listed in `docs/audit.md` ("Register offsets").
 
 ## Firmware on the desk unit
@@ -192,6 +194,26 @@ seeing the SOF raw bit (`usb_serial_jtag_connection_monitor.c`) and (b) Arduino 
 true, which the SERIAL_IN_EMPTY or SERIAL_OUT_RECV_PKT interrupts set and USB_BUS_RESET clears. CrossPoint sets
 `tx_timeout_ms = 1`, so an unconnected console drops every line after 1 ms.
 
+## Analog master, SAR/temperature sensor, radio blocks (what the stock's WiFi start needs)
+
+Sources: `images/rom/esp32s3_rev0_rom.elf` (esp-rom-elfs 20241011, disassembled at the symbols named),
+`regi2c_ctrl_ll.h`/`regi2c_defs.h` and `sens_reg.h` (ESP-IDF v5.5 headers), and the stock app disassembled
+at the PCs of its polling loops (docs/log.md 2026-09-06, "Stock WiFi start"). The TRM documents none of it.
+
+| Block | Base | Behaviour the firmware relies on | Evidence |
+|---|---|---|---|
+| I2C_ANA_MST (regi2c masters) | 0x6000E000 | +0x00 / +0x04 command word `block \| reg<<8 \| data<<16`, bit 24 write, bit 25 busy, bit 26 start; a read's answer is in bits 23:16 once busy clears. Blocks: BOD/ULP 0x61, radio 0x62..0x64 (master 1), BBPLL 0x66, 0x67, SAR ADC 0x69, 0x6a, 0x6b, DIG_REG 0x6D. +0x40 ANA_CONF0 (BBPLL cal STOP_FORCE_HIGH/LOW bits 2/3, CAL_DONE bit 24), +0x44 ANA_CONFIG (block enables, cleared bit = on; the ROM writes the whole word), +0x48 ANA_CONFIG2. | ROM `rom_chip_i2c_readReg_org` 0x400354fc, `rom_chip_i2c_writeReg` 0x40035818, `rom_get_i2c_hostid` 0x400354bc, `rom_i2c_master_reset` 0x4003726c; `regi2c_defs.h` |
+| SAR2 power detector (same block) | 0x6000E050.. | +0x50 bit 1 start, bits 26:24 == 7 idle/done, bits 6/7 (`rom_en_pwdet`); +0x5C low 16 bits 0x16a, bits 19/21/23 toggled around a measurement; +0x60 bits 4:3 input select, bit 1; +0x80..+0x9C eight 13-bit samples. | ROM `rom_pkdet_vol_start` 0x40036a18, `rom_pwdet_sar2_init` 0x40036470, `rom_en_pwdet` 0x40036508, `rom_get_sar2_vol` 0x40036afc, `rom_read_sar_dout` 0x40036aa4 |
+| SENS | 0x60008800 | MEAS1_CTRL2 +0x0C / MEAS2_CTRL2 +0x30: DATA [15:0], DONE bit 16, START bit 17, EN_PAD [30:19]; TSENS_CTRL +0x50: OUT [7:0], READY bit 8, CLK_DIV [21:14], POWER_UP bit 22 (the PHY polls READY with no timeout); PERI_CLK_GATE_CONF +0x104 (IOMUX_CLK_EN bit 31). | `sens_reg.h`; app 0x422aac19 |
+| FE / FE2 (RF front end) | 0x60006000 / 0x60005000 | pbus register writes through +0xC8 (command word, polled for busy) and +0xCC (data); capture: +0x140, +0x144 bit 1 start, done flag +0x174 bit 16, results +0x148..+0x154 (I/Q sums). | app 0x422e2c68..0x422e2d1d; ROM `rom_pbus_*` |
+| RX (NRX at +0xC00) | 0x6001C000 | +0x02C bits 30/26/25 configuration, bit 23 capture start; +0x08C[18:12] a level the PHY counts while a capture runs. | app 0x422e2c08, 0x422e2cfd |
+| WiFi MAC | 0x60033000 | +0xD14: bit 1 command, bit 0 ready (first MAC access after `phy_init`); +0x000/+0x004 (+8n) station MAC address (bytes 4,5 masked into +0x004), +0x020/+0x024 (+8n) all-ones, +0x064 (+8n), +0x0D8 (+4n) per-queue bits, +0xC34/+0xC40. | app 0x4230be3c..0x4230c017 |
+
+What the emulator does with them: the analog master and SENS are models (idle/done answers, values as QOM
+properties, registers read back as written); FE/FE2/RX/BB/MAC are a storage stub with a table of status bits
+that read as set (`esp32s3.rfstub`, `sticky` property). There is no radio: the driver's TX queue never
+drains and ESP-IDF's own timeouts stop WiFi about 8 s after `wifi:mode : sta`.
+
 ## Simplifications the emulator makes (by design)
 
 - The GPIO matrix is not modelled electrically: SPI2 transmits on its bus regardless of pin routing, and board
@@ -199,4 +221,7 @@ true, which the SERIAL_IN_EMPTY or SERIAL_OUT_RECV_PKT interrupts set and USB_BU
 - IO_MUX and RMT stay `unimp`; pull-up/pull-down settings written there are ignored, so the GPIO model carries a
   per-pin idle level itself (buttons, MOSI, RST idle HIGH).
 - BUSY durations and the RTC follow guest time.
-- USB OTG (TinyUSB MSC), WiFi, BLE are absent.
+- USB OTG (TinyUSB MSC) and BLE are absent. WiFi has the register blocks its start touches (analog master,
+  SENS, FE/RX/BB/MAC stub) but no radio: the driver comes up, finds no air and stops itself.
+- SAR ADC oneshots and the temperature sensor answer fixed values (`sar1-data`, `sar2-data`, `tsens-out`);
+  the analog registers behind the regi2c masters hold what was written (no PLL, no calibration results).

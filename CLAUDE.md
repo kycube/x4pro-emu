@@ -3,13 +3,17 @@
 Linux/macOS-hosted emulator for unmodified Xteink X4 Pro firmware images, driven from a shell:
 buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots to its home screen,
 opens books, pages, sleeps and wakes in it; the stock `xteink_app` 7.2.4 boots to its home screen,
-paints, lights the frontlight and takes touch (with WiFi disabled in NVS). Progress and dead ends:
-`docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`** (WiFi/analog-master block next, world-class checklist).
+paints, lights the frontlight, takes touch, and its WiFi start comes up and stops itself (no radio).
+Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`** (stock screens vs
+device photos, world-class checklist).
 
 ## What is NOT emulated (how it shows up for a firmware developer)
 
 - **USB mass storage / TinyUSB**: the "File Transfer" screen does nothing; the host never sees a disk.
-- **WiFi / BLE**: radio calls fail or time out; nothing enumerates on the network side.
+- **WiFi / BLE**: no radio. The blocks a WiFi start touches are answered (analog-master I2C block, SENS
+  temperature sensor and SAR oneshot, FE/RX/BB/MAC register stub with status bits that read as set), so
+  ESP-IDF's driver comes up, finds no air and stops itself about 8 s after `wifi:mode : sta`; nothing
+  enumerates on the network side. BLE is untested.
 - **Grayscale**: the two-plane 4-level rendering is an approximation (`state.gray_approx` is true
   after such a refresh); anti-aliased text will not look exactly like the glass.
 - **Deep sleep**: modelled as a paused VM followed by a system reset with reset cause 5 (DSLEEP),
@@ -21,10 +25,11 @@ paints, lights the frontlight and takes touch (with WiFi disabled in NVS). Progr
   CPU-frequency changes by the firmware do not change emulation speed.
 - **GPIO matrix / IO_MUX**: not modelled electrically. SPI2 always reaches the panel; pull settings
   are ignored (the GPIO model carries per-pin idle levels: buttons, MOSI, RST, CS idle HIGH).
-- **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1): runs to Home and is usable **only with WiFi
-  disabled** (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0`). With `net_en=1` its radio task
-  spins at priority 23 from 14 s on in ROM `rom_pkdet_vol_start`, polling the analog-master I2C block
-  (0x6000E050, unmodelled) and starving core 0. SAR ADC, RTC IO pads, RMT, I2S, USB OTG stay unmodelled.
+- **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1): runs to Home with the device's NVS as dumped; its
+  WiFi start (14 s) ends in `wifi:force witi stop` at +7.5 s and a deinit at +17.5 s without stalling
+  the UI (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0` skips it). Emulator-only console line:
+  `phy: error: pll_cal exceeds 2ms!!!` (x6, RF PLL lock flag unanswered). RTC IO pads, RMT, I2S,
+  APB_SARADC DMA mode, USB OTG stay unmodelled; SAR oneshots and the temperature sensor answer fixed values.
 
 ## Layout
 
@@ -71,8 +76,8 @@ The efuse file is generated automatically from `docs/device/efuse-dump.txt` (rea
 8 MB PSRAM). Drop `--fast-epd` for real refresh timing. A raw 16 MB device dump runs as-is
 (`--flash images/device/flash-….bin`).
 
-Stock firmware: `tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin`, then
-`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0`, then
+Stock firmware: `tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin` (optionally
+`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0` to skip its 18 s WiFi start), then
 `x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img`. Its boot-preflight
 rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it and Home follows in
 ~5 s (`tests/test_stock.py` does exactly this on scratch copies: the stock writes both images).
@@ -93,7 +98,7 @@ rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it a
 |---|---|
 | `run --flash F [--sd IMG] [--efuse F] [--panel ssd1677\|uc8179\|uc8279] [--fast-epd] [--gdb] [--trace-epd F] [--trace-i2c F] [--icount N] [--no-usb-host]` | start QEMU detached; `.x4emu/NAME/` holds qmp.sock, console.log (USB Serial/JTAG), uart0.log, qemu.log, pid, run.json |
 | `stop` / `reset` / `status` | quit; system_reset; pid + run state (+ "deep sleep" when paused by the sleep model) |
-| `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2/i2c0 counters, buttons, touch, gt911, battery, rtc, ledc channels, sleep |
+| `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2/i2c0 counters, buttons, touch, gt911, battery, rtc, ledc channels, sleep, ana_i2c (analog-master transactions), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), iolog_hot (unmodelled registers polled past the log cap) |
 | `log [--follow] [--since N] [--file uart0.log]` / `wait-text TEXT [--timeout S]` | console access; never blocks past the timeout |
 | `screenshot OUT.png [--diff OTHER.png]` | QMP screendump of the panel console (`device=epd`); `--diff` prints % pixels differing and exits 1 when they differ; a 480x800 device BMP is un-rotated automatically |
 | `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |
@@ -114,7 +119,10 @@ Tips: CrossPoint ignores input while it is painting, so use `--quiet 2` or `wait
 input in scripts. Power: < 400 ms is a click (double-click toggles the frontlight), ≥ 400 ms held
 sleeps. Panel coordinates are the landscape 800x480 screenshot; CrossPoint draws its portrait UI
 rotated on it. `tools/epdtrace.py device.log emu.jsonl --from-cmd 0x00` compares panel command
-streams; `models/build/replay uc8279 fixture.log` replays a recording through the core.
+streams; `models/build/replay uc8279 fixture.log` replays a recording through the core. Unmodelled-register polls:
+the `x4pro/<block>` loggers write 32 lines per address to qemu.log and count the rest into `state.iolog_hot`
+(`state.rf.hot` for the radio stub); `x4emu run … -global driver=esp32s3.rfstub,property=sticky,value=0xADDR:0xMASK`
+makes a radio status bit read as set without a rebuild.
 
 ## The real device (rules, in priority order)
 

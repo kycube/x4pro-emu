@@ -473,3 +473,60 @@ and "idled"; the handoff blamed the SAR ADC. Findings, in the order they were ma
 
 Device state unchanged (app0 CrossPoint, app1 stock, backups intact). `images/stock.bin` is
 regenerated from the dump; the stock writes NVS at first touch of settings, so tests boot copies.
+
+## 2026-09-06 — Stock WiFi start no longer starves the UI: analog master, SENS, radio stub
+
+Goal A's last blocker (`docs/NEXT_PHASE.md` §3.2 steps 1–3). With the device's NVS as dumped
+(`user_config/net_en=1`) the stock now runs its WiFi start to the same console lines as the device and
+then gives up on its own, while the UI keeps working. Four things were in the way, found one after the
+other; each step was: run, read the hot-poll list, take the PC over QMP, disassemble the app there.
+
+- **Analog-master I2C block** (0x6000E000, new `hw/misc/x4pro_ana_i2c.c`, overlay priority 2). Protocol
+  from the ROM (`images/rom/esp32s3_rev0_rom.elf`): the masters at +0x00/+0x04 take
+  `block | reg<<8 | data<<16`, bit 24 write, bit 25 busy, bit 26 start (`rom_chip_i2c_readReg_org`
+  0x400354fc, `rom_chip_i2c_writeReg` 0x40035818, `rom_i2c_paral_read/write` 0x40035614/0x40035684); a
+  read's answer comes back in bits 23:16 once busy clears; `rom_get_i2c_hostid` (0x400354bc) sends blocks
+  0x62..0x64 to master 1. +0x40 ANA_CONF0 (BBPLL cal STOP_FORCE bits 2/3, CAL_DONE bit 24), +0x44/+0x48
+  ANA_CONFIG/2 (`regi2c_ctrl_ll.h`). SAR2 power detector: +0x50 bit 1 start, bits 26:24 == 7 idle
+  (`rom_pkdet_vol_start` 0x40036a18 polls it before and after the start), +0x5C/+0x60 configuration
+  (`rom_pwdet_sar2_init` 0x40036470 writes 0x16a and bits 19/21/23; `rom_get_sar2_vol` 0x40036afc selects
+  the input in bits 4:3), +0x80..+0x9C eight 13-bit samples (`rom_read_sar_dout` 0x40036aa4). The model
+  stores every analog register per (block, reg), answers idle/done, and returns `sar2-code` (0x800) as the
+  samples. A WiFi start makes 1049 reads / 535 writes: SAR ADC 0x69 (IDF's adc/tsens init, on the boot path
+  with WiFi off too), DIG_REG 0x6D, BOD 0x61, BBPLL 0x66, and the radio blocks 0x62/0x63/0x64/0x67/0x6a/0x6b.
+  `x4emu state` → `ana_i2c`; qemu.log gets one `x4pro.ana-i2c:` line per transaction.
+- **SENS block** (0x60008800, new `hw/misc/esp32s3_saradc.c`). The next spin was app code (0x422aac19)
+  polling `SENS_SAR_TSENS_CTRL` (+0x50) for `TSENS_READY` (bit 8): the PHY reads the chip temperature.
+  Model: TSENS always ready with `tsens-out` (104 ≈ 25 °C by ESP-IDF's formula), MEAS1/MEAS2 oneshots
+  (`START_SAR` → `DONE_SAR` + `sar1-data`/`sar2-data`, 2048), everything else read-back storage (the RTC IO
+  clock gates and the bootloader RNG pattern tables that used to land in the `sens` logger). `state.saradc`.
+- **Radio register stub** (FE2 0x60005000, FE 0x60006000, RX/NRX 0x6001C000, BB 0x6001D000, WiFi MAC
+  0x60033000; new `hw/misc/esp32s3_rfstub.c`, priority 2). Storage plus status bits that read as set:
+  FE +0x174 bit 16 (app 0x422e2cf9: a capture started with FE +0x144 bit 1 and RX +0x02C bit 23; the loop
+  counts RX +0x08C[18:12] ≤ 69 while it waits, no timeout) and MAC +0xD14 bit 0 (app 0x4230bfa6: set bit 1,
+  wait for bit 0; the first MAC access after `phy_init`, the device prints `wifi:mode : sta` right after).
+  `-global driver=esp32s3.rfstub,property=sticky,value=0xADDR:0xMASK,…` adds entries without a rebuild.
+  A WiFi start makes 3154 reads / 5563 writes to these blocks, none a spin afterwards; the busiest pair is
+  the pbus FE +0xC8/+0xCC (RF register writes; 92 reads of the busy word, which reads 0 = idle).
+- **Capped access logger** (`include/hw/misc/x4pro_hotlog.h`). The first SENS poll wrote 22 M `x4pro/sens`
+  lines (1.9 GB) into qemu.log in 30 s. Every `x4pro/<block>` logger and the radio stub now log the first
+  32 accesses per address and count the rest; `state.iolog_hot` / `state.rf.hot` list the addresses that
+  went past the cap with their counts — the next spin is read from `x4emu state`, not from the log.
+
+Result (`x4emu --name net run --flash <dump copy, net_en=1> --sd images/sd-device.img`): PHY 711 comes up,
+`wifi:mode : sta (98:c3:77:be:ea:30)`, `wifi:enable tsf` (device: identical lines), then
+`W wifi:TX Q not empty: 500, TXQ_BLOCK=0`, `force witi stop`, `flush txq`, `sw txq[0] state(1) is not
+idle` at +7.5 s and `wifi:Deinit lldesc rx mblock:6` at +17.5 s after the start — ESP-IDF's own give-up path
+without air. Core 0 is never starved: the CW2017 poll continues every 3 s, Home repaints (refresh 4 instead
+of 3, a status-bar glyph), both CPUs sit in the idle loop, the menu tap still repaints, and Home matches
+`tests/golden/stock-home.png` outside the status bar. Emulator-only artefact: `phy: error: pll_cal exceeds
+2ms!!!` x6 — the PHY steps the RF PLL cap (writes 0x62/0x01 = 0..0x0a and reads 0x62/0x0c for a lock flag
+the stored-value model never sets); the device prints nothing there. New test:
+`tests/test_stock.py::test_stock_wifi_fails_fast` (the `net_en=0` case stays).
+QEMU patch 0010 carries all of it; no Espressif file touched.
+
+Lessons: the ROM's `RTCCNTL+0x6050` naming is the linker script's, the block is the analog master; the
+PHY's status polls have no timeouts, so every bit it waits for needs an answer, and with the hot lists each
+one is a two-minute step; loop counters kept with `l16ui/s16i` wrap at 65536 and look like countdowns in
+register samples; `esp32s3.rfstub` stores what the driver writes, which the MAC address setup at
+0x60033000+8n / +0x24+8n (app 0x4230be5e) relies on.
