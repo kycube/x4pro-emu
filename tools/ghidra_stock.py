@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-"""Ghidra over the stock `xteink_app` image: analyse once, then answer questions in milliseconds.
+"""Ghidra over a stock `xteink_app` image: analyse once, then answer questions in milliseconds.
 
 `tools/appdis.py` gives disassembly windows but no function boundaries and no cross-references,
 so the questions the firmware survey kept hitting -- "who calls this presenter", "which function
 draws this row", "what points at this string" -- were unanswerable without a real analyser. This
 wraps Ghidra's `analyzeHeadless` to answer them.
 
-    Layout                images/device/stock-app0-7.2.4.bin is imported as a *raw* binary with
-                          the Xtensa LE language; `tools/ghidra/StockLayout.java` then throws away
-                          the flat block and rebuilds memory from the ESP image header -- one block
-                          per segment at its load VA (DROM 0x3c380020, IROM 0x42000020 executable,
-                          IRAM 0x40378000 executable, the DRAM/RTC blocks) -- adds uninitialized
+    Which image           `--image PATH` and/or `--version TAG` (global options, accepted before
+                          or after the subcommand) pick the app image. The default is unchanged:
+                          7.2.4 = images/device/stock-app0-7.2.4.bin. `--version 7.5.4` alone finds
+                          images/device/stock-app*-7.5.4.bin; `--image` alone reads the version out
+                          of the image's esp_app_desc (offset 0x20, version at +0x10); both together
+                          must agree. Everything else follows the choice: the Ghidra project is
+                          images/ghidra/stock-<version>.gpr, the exports live in
+                          images/ghidra/stock-<version>/, and the staleness check compares them
+                          with *that* image. Nothing in the layout is version-specific: the
+                          segment table is read from the image header, so 7.5.4 (DROM at
+                          0x3c340020, a 244 KB smaller IROM) imports the same way.
+    Layout                the image is imported as a *raw* binary with the Xtensa LE language;
+                          `tools/ghidra/StockLayout.java` then throws away the flat block and
+                          rebuilds memory from the ESP image header -- one block per segment at its
+                          load VA (7.2.4: DROM 0x3c380020, IROM 0x42000020 executable, IRAM
+                          0x40378000 executable, the DRAM/RTC blocks) -- adds uninitialized
                           windows for the ESP32-S3 mask ROM and labels them from
                           images/rom/esp32s3_rev0_rom.nm, so calls to 0x4000xxxx read as names.
     Analysis              Ghidra's default analysers -- about **1 minute** on an M-series Mac for
@@ -20,9 +31,9 @@ wraps Ghidra's `analyzeHeadless` to answer them.
                           prebuilt .sla, so nothing has to be compiled) and its decompiler produces
                           usable C for this code. The "Invalid PNG/GIF data" errors in the log are
                           the embedded-media analyser hitting false magic in DROM; ignore them.
-    Exports               images/ghidra/stock-7.2.4/{functions,xrefs,strings,calls}.txt, written by
-                          `tools/ghidra/StockExport.java`. Every query subcommand below reads only
-                          these text files -- no JVM, no Ghidra, no project lock.
+    Exports               images/ghidra/stock-<version>/{functions,xrefs,strings,calls}.txt,
+                          written by `tools/ghidra/StockExport.java`. Every query subcommand below
+                          reads only these text files -- no JVM, no Ghidra, no project lock.
 
 Quick start (a future agent needs no more than this):
 
@@ -31,10 +42,16 @@ Quick start (a future agent needs no more than this):
     tools/ghidra_stock.py callers 0x42128a84      # who constructs this / who calls it
     tools/ghidra_stock.py xrefs 0x3c497334        # what points at this string or datum
     tools/ghidra_stock.py decompile 0x4233abe0    # C for one function (~3 s, starts a JVM)
+    tools/ghidra_stock.py --version 7.5.4 analyze          # the 7.5.4 image, own project + exports
+    tools/ghidra_stock.py --version 7.5.4 xrefs 0x3c3...   # every query takes the same options
+    tools/ghidra_stock.py --image SCRATCH/app.bin func ...  # any xteink_app image (version read
+                                                           # from its esp_app_desc)
 
 `analyze` re-runs only when the image or a tools/ghidra/*.java script is newer than the exports
 (or with --force). `decompile` is the only query that needs Ghidra; it opens the finished project
-read-only with -noanalysis, so it costs a JVM start, not a re-analysis.
+read-only with -noanalysis, so it costs a JVM start, not a re-analysis. Addresses are always
+those of the selected image: nothing found in one version means anything in another
+(docs/stock-7.5.4.md is the 7.2.4 -> 7.5.4 re-location table).
 
 Three things to expect from this particular binary. Nothing has C++ symbols, so functions are all
 `FUN_<addr>` (only the 254 ROM labels have names); identify them the way the survey did (typeinfo
@@ -45,10 +62,11 @@ pointer into it -- and `xrefs` says so, then names the pack base instead. And th
 SLEIGH does not decode every opcode: a decompilation can end in `halt_baddata()` ("Bad instruction
 - Truncating control flow"). That is localised; `appdis.py` at the same address is the fallback.
 
-For a human: the project is a normal Ghidra project at images/ghidra/stock-7.2.4.gpr. Open it with
-`$(brew --prefix ghidra)/libexec/ghidraRun`, then File > Open Project > that .gpr, and double-click
-`stock-app0-7.2.4.bin`. Close the GUI before running `analyze` or `decompile` -- Ghidra locks the
-project. Everything under images/ is gitignored.
+For a human: the project is a normal Ghidra project at images/ghidra/stock-<version>.gpr (the
+default: stock-7.2.4.gpr). Open it with `$(brew --prefix ghidra)/libexec/ghidraRun`, then File >
+Open Project > that .gpr, and double-click the program (the image's file name, e.g.
+`stock-app0-7.2.4.bin` or `stock-app1-7.5.4.bin`). Close the GUI before running `analyze` or
+`decompile` -- Ghidra locks the project. Everything under images/ is gitignored.
 
 Install (done once, Homebrew only):
     brew install ghidra          # formula, pulls openjdk@21; the `ghidra` *cask* does not exist
@@ -66,20 +84,92 @@ import tempfile
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGE = os.path.join(REPO, 'images', 'device', 'stock-app0-7.2.4.bin')
+DEVICE_DIR = os.path.join(REPO, 'images', 'device')
+DEFAULT_VERSION = '7.2.4'
+DEFAULT_IMAGE = os.path.join(DEVICE_DIR, 'stock-app0-7.2.4.bin')
 ROM_NM = os.path.join(REPO, 'images', 'rom', 'esp32s3_rev0_rom.nm')
 SCRIPT_DIR = os.path.join(REPO, 'tools', 'ghidra')
 PROJ_DIR = os.path.join(REPO, 'images', 'ghidra')
-PROJ_NAME = 'stock-7.2.4'
+LANGUAGE = 'Xtensa:LE:32:default'
+DESC_OFF = 0x20                 # esp_app_desc: 24-byte image header + 8-byte segment header
+DESC_MAGIC = 0xABCD5432
+
+# The image under analysis. `select()` rebinds these from --image / --version; the defaults are
+# the 7.2.4 app0 image, so the historical invocation behaves exactly as before.
+IMAGE = DEFAULT_IMAGE
+VERSION = DEFAULT_VERSION
+PROJ_NAME = 'stock-' + VERSION
 OUT_DIR = os.path.join(PROJ_DIR, PROJ_NAME)
 PROGRAM = os.path.basename(IMAGE)
-LANGUAGE = 'Xtensa:LE:32:default'
 
 EXPORTS = ('functions.txt', 'xrefs.txt', 'strings.txt', 'calls.txt')
+
+_FUNCS = None                   # functions.txt cache, dropped by select()
 
 
 class Error(Exception):
     pass
+
+
+# --------------------------------------------------------------------------- which image
+
+def app_desc(path):
+    """{'project', 'version', 'elf_sha256'} from the image's esp_app_desc, or None when the file
+    is not an ESP-IDF app image (no 0xE9 magic, no 0xABCD5432 descriptor)."""
+    try:
+        with open(path, 'rb') as fh:
+            head = fh.read(DESC_OFF + 0x100)
+    except OSError:
+        return None
+    if len(head) < DESC_OFF + 0xb0 or head[0] != 0xE9:
+        return None
+    if int.from_bytes(head[DESC_OFF:DESC_OFF + 4], 'little') != DESC_MAGIC:
+        return None
+    field = lambda off, n: head[DESC_OFF + off:DESC_OFF + off + n].split(b'\0', 1)[0].decode(
+        'ascii', 'replace')
+    return {'version': field(0x10, 32), 'project': field(0x30, 32),
+            'elf_sha256': head[DESC_OFF + 0x90:DESC_OFF + 0xb0].hex()}
+
+
+def find_image(version):
+    """The images/device/stock-app*-<version>.bin for a version tag (app0 before app1)."""
+    hits = sorted(f for f in os.listdir(DEVICE_DIR)
+                  if re.fullmatch(r'stock-app\d+-' + re.escape(version) + r'\.bin', f)) \
+        if os.path.isdir(DEVICE_DIR) else []
+    if not hits:
+        raise Error(f'no images/device/stock-app*-{version}.bin; pass --image PATH')
+    return os.path.join(DEVICE_DIR, hits[0])
+
+
+def select(image=None, version=None):
+    """Bind the module to one image: IMAGE, VERSION, PROJ_NAME (stock-<version>), OUT_DIR
+    (images/ghidra/stock-<version>/) and PROGRAM. Neither argument = the 7.2.4 default. With only
+    --version the image is images/device/stock-app*-<version>.bin; with only --image the version
+    comes from the image's esp_app_desc; with both they must agree (a tag that does not match the
+    descriptor would file the exports under the wrong name)."""
+    global IMAGE, VERSION, PROJ_NAME, OUT_DIR, PROGRAM, _FUNCS
+    if image is None and version is None:
+        image, version = DEFAULT_IMAGE, DEFAULT_VERSION
+    elif image is None:
+        image = find_image(version)
+    image = os.path.abspath(image)
+    desc = app_desc(image)
+    if version is None:
+        if desc is None:
+            raise Error(f'{image}: not an ESP-IDF app image (no esp_app_desc); pass --version TAG')
+        version = desc['version']
+    elif desc is not None and desc['version'] != version:
+        raise Error(f'{image} says it is {desc["project"]} {desc["version"]}, not {version}; '
+                    f'drop --version or pass the matching image')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', version):
+        raise Error(f'not a usable version tag: {version!r}')
+    IMAGE, VERSION = image, version
+    PROJ_NAME = 'stock-' + version
+    OUT_DIR = os.path.join(PROJ_DIR, PROJ_NAME)
+    PROGRAM = os.path.basename(image)
+    _FUNCS = None
+    return {'image': IMAGE, 'version': VERSION, 'project': PROJ_NAME, 'exports': OUT_DIR,
+            'desc': desc}
 
 
 # --------------------------------------------------------------------------- Ghidra invocation
@@ -176,7 +266,8 @@ def cmd_analyze(opts):
 def _rows(name):
     path = os.path.join(OUT_DIR, name)
     if not os.path.isfile(path):
-        raise Error(f'{path} is missing -- run `tools/ghidra_stock.py analyze` first.')
+        raise Error(f'{path} is missing -- run `tools/ghidra_stock.py --version {VERSION} analyze` '
+                    f'first.')
     with open(path, encoding='utf-8', errors='replace') as fh:
         for line in fh:
             if line.startswith('#'):
@@ -184,9 +275,6 @@ def _rows(name):
             line = line.rstrip('\n')
             if line:
                 yield line.split('\t')
-
-
-_FUNCS = None
 
 
 def functions():
@@ -333,7 +421,8 @@ def cmd_func(opts):
 def cmd_decompile(opts):
     addr = parse_addr(opts.addr)
     if not os.path.isfile(os.path.join(PROJ_DIR, PROJ_NAME + '.gpr')):
-        raise Error(f'no Ghidra project at {PROJ_DIR}/{PROJ_NAME}.gpr -- run `analyze` first.')
+        raise Error(f'no Ghidra project at {PROJ_DIR}/{PROJ_NAME}.gpr -- run '
+                    f'`tools/ghidra_stock.py --version {VERSION} analyze` first.')
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, 'decomp.c')
         rc = run_headless([PROJ_DIR, PROJ_NAME,
@@ -356,9 +445,21 @@ def main(argv=None):
         description=__doc__.split('\n\n')[0],
         epilog='See the module docstring for the manual.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    # --image / --version work before or after the subcommand: the top-level copies carry the
+    # defaults, the per-subcommand copies (SUPPRESS) only override when given.
+    which = argparse.ArgumentParser(add_help=False)
+    for parser, default in ((p, None), (which, argparse.SUPPRESS)):
+        parser.add_argument('--image', metavar='PATH', default=default,
+                            help='the xteink_app image to analyse / query '
+                                 '(default images/device/stock-app0-7.2.4.bin)')
+        parser.add_argument('--version', metavar='TAG', default=default,
+                            help='its version tag: names the project and the exports directory '
+                                 'images/ghidra/stock-TAG/ (default 7.2.4; alone, it selects '
+                                 'images/device/stock-app*-TAG.bin)')
     sub = p.add_subparsers(dest='cmd', required=True)
 
-    a = sub.add_parser('analyze', help='import + analyse the image and write the exports')
+    a = sub.add_parser('analyze', parents=[which],
+                       help='import + analyse the image and write the exports')
     a.add_argument('--force', action='store_true', help='re-analyse even if the exports are current')
     a.set_defaults(fn=cmd_analyze)
 
@@ -366,11 +467,12 @@ def main(argv=None):
             ('xrefs', cmd_xrefs, 'every reference that points at ADDR'),
             ('callers', cmd_callers, 'call sites that reach the function containing ADDR'),
             ('func', cmd_func, 'name, size, callers and callees of the function at ADDR')):
-        s = sub.add_parser(name, help=helptext)
+        s = sub.add_parser(name, parents=[which], help=helptext)
         s.add_argument('addr', help='hex address, e.g. 0x42128a84')
         s.set_defaults(fn=fn)
 
-    d = sub.add_parser('decompile', help='decompile the function containing ADDR to stdout')
+    d = sub.add_parser('decompile', parents=[which],
+                       help='decompile the function containing ADDR to stdout')
     d.add_argument('addr', help='hex address, e.g. 0x4233abe0')
     d.add_argument('-v', '--verbose', action='store_true',
                    help="show Ghidra's own log instead of only the C")
@@ -378,6 +480,7 @@ def main(argv=None):
 
     opts = p.parse_args(argv)
     try:
+        select(opts.image, opts.version)
         return opts.fn(opts)
     except Error as e:
         print(f'ghidra_stock.py: {e}', file=sys.stderr)

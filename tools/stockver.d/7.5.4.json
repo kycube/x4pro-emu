@@ -1,0 +1,110 @@
+{
+  "project": "xteink_app",
+  "version": "7.5.4",
+  "app_elf_sha256": "052d74433679d2dd1084cec45661cad8a3da2cb3f73ec407240de69fa67caeb5",
+  "app_sha256": "1998cdc3ee8f073d6625194f1cd3c145b3bf683e8621f58d79a1e223c8843b4d",
+  "app_bytes": 5445680,
+  "built": "12:25:04 Sep  5 2026",
+  "idf": "v6.0.1",
+  "source": "images/device/stock-app1-7.5.4.bin",
+  "note": "The OTA the device took on 2026-09-07: app1 (flash 0x7F0000) of images/device/flash-2026-09-07-a.bin, booting (otadata entry 1 seq 2). Segments moved: DROM loads at 0x3c340020 (0x1d8f4c bytes, +184 KB), IROM at 0x42000020 with 0x33ad2c bytes (244 KB smaller than 7.2.4) at file 0x1e0020, so app file offset = VA - 0x41e20000 for IROM. Every site below was re-located from the 7.2.4 identity with tools/ghidra_stock.py --version 7.5.4 (session 8, docs/stock-7.5.4.md) and confirmed by a boot in the emulator with all three patches applied: Home, the 7-row nav menu (Read / Preload List / Statistics / All Files / USB / Cloud / Mini Apps) and the Mini Apps page listing an unsigned card app.",
+
+  "dev_stub": {
+    "app_offset": "0x4edad4",
+    "va": "0x4230dad4",
+    "stub": "36 41 00 0c 02 1d f0",
+    "movi_index": 4,
+    "unpatched": "0x02",
+    "patched": "0x12",
+    "evidence": "The 7.2.4 wrapper that reads the stub (entry / l32i a8,a2,84 / l32i a10,a8,176 / l32r / callx8 / s8i a10,a2,32 / retw.n, FUN_4213c6ac) exists in 7.5.4 as the 20-byte FUN_4214ab34 at file 0x32ab34 with the same shape (the presenter field moved 84 -> 88); its l32r literal is 0x4230dad4, a 7-byte compile-time stub (entry a1,32 / movi.n a2,0 / retw.n) with exactly that one caller in calls.txt, in the same stub cluster (0x4230bxxx-0x4230dxxx) that 7.2.4 keeps at 0x4233axxx. The wrapper's caller FUN_4214b2b4 (335 bytes) has the callee pattern of 7.2.4's light-panel opener FUN_4213ce68 (memcpy + the widget helpers)."
+  },
+
+  "patches": {
+    "developer-menu": {
+      "app_offset": "0x4edad4",
+      "va": "0x4230dad4",
+      "original": "36 41 00 0c 02 1d f0",
+      "patched": "36 41 00 0c 12 1d f0",
+      "description": "developer mode: Memory / Developer / Screen Capture in the light panel",
+      "detail": "movi.n a2,0 -> movi.n a2,1 in the developer-mode predicate stub (byte +4)",
+      "docs": "docs/xic.md; docs/stock-7.5.4.md",
+      "evidence": "Same site as dev_stub. tools/appdis.py at 0x4230dad4 shows entry a1,32 / movi.n a2,0 / retw.n, the same instruction as 7.2.4's 0x4233abe0."
+    },
+    "hidden-menu-rows": {
+      "app_offset": "0x4f951a",
+      "va": "0x4231951a",
+      "original": "b6 29 07",
+      "patched": "b6 29 ff",
+      "description": "nav menu: unhide the Preload List and Statistics rows (gate A)",
+      "detail": "bltui a9,2,+7 -> bltui a9,2,+255 in the menu-slot predicate at VA 0x42319508: slots 1 and 2 stop being skipped",
+      "docs": "docs/stock-firmware.md, \"Probed in session 7\"; docs/stock-7.5.4.md",
+      "evidence": "The menu-slot predicate is the only 31-byte function in 7.5.4 IROM matching 7.2.4's 0x42345158 byte for byte except its last load (l8ui a2,a8,176 instead of 172): FUN_42319508 at file 0x4f9508, called from the nav-menu builder FUN_4214bce8, whose loop reads the slot -> page-id table 02 1c 16 09 0b 0a 0d 01 (DROM 0x3c3a6e80, unchanged from 7.2.4's 0x3c3dc8b0). The bltui a9,2,+7 (b6 29 07) sits at +0x12 = 0x4231951a. Emulator: the menu grows by Preload List and Statistics."
+    },
+    "lua-apps-row": {
+      "app_offset": "0x4f9522",
+      "va": "0x42319522",
+      "original": "22 08 b0",
+      "patched": "22 a0 01",
+      "description": "nav menu: a \"Mini Apps\" row that opens the Lua app list (page 0x09)",
+      "detail": "l8ui a2,a8,176 -> movi a2,1 in the menu-slot predicate: slot 3 is always shown",
+      "docs": "docs/lua-apps.md; docs/stock-7.5.4.md",
+      "evidence": "7.5.4's builder FUN_4214bce8 no longer skips slot 3 and appends it behind presenter+172: it walks all eight slots through the order table 00 01 02 04 05 06 03 07 (DROM 0x3c3a6e78) and the predicate alone gates slot 3 with the byte at presenter+176 (l8ui a2,a8,176 at 0x42319522, the same flag 7.2.4 tested at +172 in FUN_4213d834 and which nothing writes). The 7.2.4 site (l8ui a8,a2,172 in the builder) has no counterpart, so the equivalent edit is this load. Emulator: a \"Mini Apps\" row (label group 12, 7.2.4's \"Lua Apps\" renamed) between Cloud and Settings, entering the app list page, which lists the unsigned hello app from the card."
+    }
+  },
+
+  "packs": {
+    "counts": {
+      "groups": 18,
+      "limit_va": "0x3c3e712c",
+      "header_va": "0x3c3e6de0",
+      "what": "count formats (%d books, %d/%d)",
+      "evidence": "Found by scanning DROM for the header shape (u16 groups, u16 4, lang ids 00 01 02 03, u16 blob_size) and validating every offset; header at file 0xa6de0, blob 689 bytes at 0x3c3e6e7a ending at 0x3c3e712b, one byte before the label pack's header -- identical content to 7.2.4."
+    },
+    "labels": {
+      "groups": 269,
+      "limit_va": "0x3c3eb918",
+      "header_va": "0x3c3e712c",
+      "what": "every menu / settings / panel label",
+      "evidence": "Same scan: header at file 0xa712c, 269 groups x 4 languages, blob 16,248 bytes at 0x3c3e799e ending at 0x3c3eb916; two alignment zeros follow and the DROM bitmap directory (30 00 00 00 2c 00 00 00 ...) starts at 0x3c3eb918, so the stock free tail is 2 bytes as in 7.2.4. 7.5.4 inserted three groups at 5-7 and more later, so every label id from 5 up moved (difflib alignment: 225 of the 234 old groups map 1:1; see known_groups and docs/stock-7.5.4.md)."
+    }
+  },
+  "lang_count": 4,
+  "known_groups": {
+    "0": "Bookshelf",
+    "9": "Read",
+    "11": "Extensions",
+    "12": "Mini Apps",
+    "13": "All Files",
+    "14": "USB",
+    "16": "Settings",
+    "55": "Bluetooth",
+    "69": "Developer",
+    "70": "Memory",
+    "72": "Boost",
+    "73": "Full Refresh",
+    "74": "Light",
+    "76": "Screen Capture",
+    "77": "Sleep Lock",
+    "103": "Language",
+    "152": "Cloud",
+    "184": "Upgrade",
+    "185": "Device information",
+    "207": "System Font"
+  },
+
+  "toasts_not_loadable": {
+    "why": "The headerless toast pack changed format in 7.5.4: its offset table is u32 per slot (the blob outgrew the u16 ceiling), which stockstrings.py's u16 PackSpec cannot describe, so no `packs.toasts` entry is given -- a u16 parse of this table would be wrong, not merely refused. Numbers for a future u32-aware reader:",
+    "groups": 874,
+    "offset_width": 4,
+    "offsets_va": "0x3c47fb10",
+    "blob_va": "0x3c4831b0",
+    "blob_size": 72033,
+    "limit_va": "0x3c494b11",
+    "evidence": "The 7.2.4 blob head (NUL, 取消, Cancel, キャンセル, 国内 / Domestic ...) is at DROM 0x3c4831b0 (file 0x1431b0); walking back in 16-byte steps while all four u32 words are 0 or point at a string start gives 874 groups starting at 0x3c47fb10 (preceded by a table of IROM function pointers); the highest offset is 0x11919 and the last string ends at 0x3c494b10, where the ordinary string table's user_config begins. Group 0 = Cancel, 3 = 'Region set successfully', 873 = 'TF card unavailable; cannot export the report'. 2,813 distinct strings in 3,496 slots."
+  },
+  "label_group_moves": {
+    "what": "7.2.4 label id -> 7.5.4 label id for the groups stockstrings.py names (difflib alignment of the 4-language tuples); 'Lua Apps' 9 -> 12 'Mini Apps', 'USB Mode' 11 -> 14 'USB', 'Cloud Sync' 137 -> 152 'Cloud', 'About Device' 169 -> 185 'Device information' are renames at the aligned position",
+    "6": 9, "8": 11, "9": 12, "10": 13, "11": 14, "13": 16, "50": 55, "64": 69, "65": 70, "66": 72,
+    "67": 73, "68": 74, "70": 76, "71": 77, "91": 103, "137": 152, "168": 184, "169": 185, "192": 207
+  }
+}
