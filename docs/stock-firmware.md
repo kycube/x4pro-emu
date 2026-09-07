@@ -314,6 +314,13 @@ Capture 70, Sleep Lock 71, Language 91, Cloud Sync 137, Upgrade 168, About Devic
 successfully") to ~0x3c4ac000 (same four languages, e.g. "No usable SD card was detected…"); its
 header differs (offsets reach 0xf0a5) and was not parsed. Languages: zh-CN, en, zh-TW, ja (NVS `language`; `fbLangDone`).
 
+**Correction (tools/stockstrings.py, session 7):** the "~1 KB of padding" below does not exist — the label
+blob ends at 0x3c3fb986 and the DROM bitmap directory starts at 0x3c3fb988, so the free tail is 2 bytes
+(labels), 1 (counts), 0 (toasts); the packs are fully deduplicated (936 label slots, 752 strings). The tool's
+`compact` suffix-merges the label blob and frees 497 bytes, after which appended labels work (verified in the
+emulator). The toast pack (688 groups, offsets at 0x3c490124, blob 0x3c4916a4..0x3c4a0e31, max offset
+0xf76e) has no header and no size field: edit in place only.
+
 **Changing a label is a data patch.** Same length or shorter: overwrite in the blob (NUL-pad).
 Longer: the blob is followed by ~1 KB of padding before the bitmaps at 0x3c3fc020 (blob end 0x3c3fb986)
 — append the new text there and point the group's u16 at it (offsets are relative to the blob start and
