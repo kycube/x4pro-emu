@@ -302,8 +302,16 @@ def test_stock_idle_dims_frontlight_and_keeps_ticking(stock):
     assert lit['ledc']['fades'] >= 2, lit['ledc']
 
 
-def tap(name, x, y, quiet=1, wait=20):
-    x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait))
+def tap(name, x, y, quiet=1, wait=20, tries=2):
+    """Tap (x, y) once the panel is idle and require the refresh it triggers (`--wait`); a tap the stock
+    dropped (docs/log.md 2026-09-06 session 4, sessions 5-6: one lost tap per full-suite run under a loaded
+    host, never when the test runs alone) is repeated once."""
+    for attempt in range(tries):
+        r = x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait), check=False)
+        if r.returncode == 0:
+            return r
+        if attempt == tries - 1:
+            raise AssertionError(f'tap ({x},{y}) drew nothing in {tries} tries:\n{r.stdout}\n{r.stderr}')
 
 
 def settle(name, seconds=1.5, timeout=60):
