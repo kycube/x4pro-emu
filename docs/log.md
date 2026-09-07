@@ -667,10 +667,10 @@ timer with ~1 ms slack, so a 12 ms frame took 1.5 s and the test's button press 
 window (CrossPoint polls no input while writing the panel). Transfers under 1 ms complete at once again.
 `tools/tcbwalk.py --region FILE:BASE` reads task stacks that live in PSRAM (`pmemsave 0x3C6C0000 0x200000`).
 
-**State at the end of session 4:** `make test` 17/17 (12 CrossPoint + 5 stock, 4 min 25 s) on QEMU with
-patches 0001–0012, the stock tests on the full device card. Squad S1 started (two Opus agents:
-`--boot-hold-power`, `nvsedit set-str/erase/redact`); their results, if not merged here, are described in
-`docs/NEXT_PHASE.md` §0.5 for the next session to review. Nothing committed in the main repo (owner's call).
+**State at the end of session 4:** `make test` 20/20 (12 CrossPoint + 5 stock + 3 nvsedit, 4 min 34 s) on
+QEMU with patches 0001–0012, the stock tests booting cold (`--boot-hold-power`) on the full device card.
+Squad S1's Opus half is merged and committed; its coordinator half (the PHY cold-boot block, RTC IO,
+the Home-pad key byte) is the next session's first work (`docs/NEXT_PHASE.md` §0.5, §3.2.6).
 - **`nvsedit.py set-str / erase / redact`** (Opus agent, squad S1): strings are type 0x21, chunk 0xff,
   span = 1 + ceil(size/32), data field `<u16 size><u16 0xffff><u32 crc32(data)>` with the bytes in the
   following span-1 entries (0xff-padded, size counts the NUL); every entry of a span shares one state.
@@ -678,3 +678,19 @@ patches 0001–0012, the stock tests on the full device card. Squad S1 started (
   really leaves the image. `redact` = erase `user_config/{sta_ssid,sta_pwd,wifi_creds}` + `net_en = 0`;
   the redacted dump boots to Home pixel-identical to the golden (`tests/test_nvsedit.py`, 3 cases,
   9 s). Recipe in the module docstring; a redacted image may leave `images/`.
+- **`x4emu run --boot-hold-power [MS]`** (Opus agent, squad S1): QEMU starts with `-S`, the power button is
+  set over QMP before the first instruction, `cont`, release after MS (default 3000: early boot runs at
+  about half real time here, the preflight wants 600 ms held when it samples GPIO3 at ~530 ms; 1800 is the
+  measured threshold). The stock's preflight then logs `source=1 … hold=600ms decision=0 reason=11` and
+  boots straight to Home: 7.3 s to a quiet Home against 8.1–9.4 s through deep sleep and a wake. The
+  `stock` fixture uses it; `boot_to_home(name, wake=True)` keeps the old path. **Found on the way:** with
+  `net_en=1` a POWERON cold boot makes ESP-IDF run the *full* PHY calibration (a DSLEEP wake reuses the
+  calibration kept in RTC memory), and that path blocks after three `pll_cal exceeds 2ms` lines — the
+  radio task stops with `ana_i2c`/`rf`/`saradc` frozen at analog-master transaction m1 block 0x6b reg
+  0x02 = 0x4e while everything else runs. So `test_stock_wifi_fails_fast` alone still boots through the
+  wake; answering that register (with the PLL lock flag, §3.2.6) is the coordinator's S1 item.
+- **`swipe` holds every point until the firmware reads it.** The light-panel test failed once in the
+  suite after the cold-boot change: the pull-down never opened, the trace showed no update after Home.
+  The swipe streamed 31 points over 600 ms blind, and the GT911 model keeps only the latest point, so a
+  late read collapses the gesture; each point is now held until consumed (0.5 s cap), the release too,
+  and `swipe` takes `--quiet`/`--wait` like `tap`. Two runs green afterwards.

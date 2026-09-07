@@ -117,18 +117,18 @@ def launch(name, cmd, boot_hold_power=None):
         if os.path.exists(os.path.join(d, 'qmp.sock')):
             try:
                 q = QMP(os.path.join(d, 'qmp.sock')); st = q.cmd('query-status')
-                if boot_hold_power:
-                    st = boot_hold(q, boot_hold_power)
-                q.close()
-                console = os.path.join(d, 'console.log')
-                if boot_hold_power:
-                    out.line(f'{name}: held power for {boot_hold_power} ms from reset')
-                out.line(f'{name}: pid {p.pid}, qmp ok, status {st["status"]}, console {console}')
-                out.set(name=name, pid=p.pid, status=st['status'], console=console,
-                        boot_hold_power_ms=boot_hold_power)
-                return
             except (OSError, EOFError):
-                pass
+                time.sleep(0.1)
+                continue                  # the socket exists but QEMU is not listening yet
+            if boot_hold_power:           # the VM is halted (-S): press power, `cont`, release
+                st = boot_hold(q, boot_hold_power)
+                out.line(f'{name}: held power for {boot_hold_power} ms from reset')
+            q.close()
+            console = os.path.join(d, 'console.log')
+            out.line(f'{name}: pid {p.pid}, qmp ok, status {st["status"]}, console {console}')
+            out.set(name=name, pid=p.pid, status=st['status'], console=console,
+                    boot_hold_power_ms=boot_hold_power)
+            return
         time.sleep(0.1)
     sys.exit('qemu did not answer on QMP within 15 s')
 
@@ -447,18 +447,30 @@ def cmd_tap(a):
 
 
 def cmd_swipe(a):
+    """A drag from (x1,y1) to (x2,y2) in landscape pixels: one GT911 point every ~20 ms over --ms,
+    each held until the firmware has consumed its frame (up to 0.5 s; the model keeps only the latest
+    point, so a point the firmware never read would be lost and the gesture misread), the last one
+    released only once read as well. Firmware sees a complete, evenly sampled gesture whatever its
+    polling cadence."""
     q = connect(a.name)
+    if getattr(a, 'quiet', 0):
+        wait_quiet(q, a.quiet, 30)
+    n0 = refresh_count(q)
     steps = max(2, a.ms // 20)
+    per_ms = a.ms / steps
+    unread = 0
     for i in range(steps + 1):
         x = a.x1 + (a.x2 - a.x1) * i // steps
         y = a.y1 + (a.y2 - a.y1) * i // steps
         rx, ry = to_gt911(x, y)
+        c0 = gt911_clears(q)
         q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
-        time.sleep(a.ms / 1000.0 / steps)
+        if hold_until_read(q, per_ms, c0, max_s=0.5) is None:
+            unread += 1
     q.qom_set(INPUT, 'touch', '[]')
-    out.line(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2})')
-    out.set(x1=a.x1, y1=a.y1, x2=a.x2, y2=a.y2, ms=a.ms, steps=steps)
-
+    out.line(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2}) in {steps + 1} points' + (f', {unread} not read by the firmware' if unread else ', every point read by the firmware'))
+    out.set(x1=a.x1, y1=a.y1, x2=a.x2, y2=a.y2, points=steps + 1, unread=unread)
+    after_input(q, n0, a)
 
 def cmd_home(a):
     """The capacitive Home pad (GT911 key bit): held for at least --ms and until the firmware reads it."""

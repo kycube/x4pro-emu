@@ -11,13 +11,13 @@ What the stock does here (docs/log.md 2026-09-06): boot-preflight rejects a plai
 the power button held for its "effective" 600 ms when it samples GPIO3 at ~530 ms) and deep sleeps.
 `x4emu run --boot-hold-power` holds the button from reset instead, so the preflight accepts the cold
 boot (`hold=600ms decision=0 reason=11`) and the deep-sleep/wake detour is gone; a power press after
-the deep sleep is the other way in (`test_stock_boots_to_home_lights_and_reacts_to_touch` no longer
-takes it either). It then mounts the card, loads NVS, initialises the UC8279 through
-ESP-IDF's interrupt+GDMA spi_master driver, paints its home screen ("Bookshelf") and lights the warm
-frontlight channel. With WiFi enabled the PHY calibrates against the analog-master I2C block, the SENS
-temperature sensor and the radio register stub, the driver prints "wifi:mode : sta" as on the device,
-then finds no air: "TX Q not empty" at +7.5 s, "force witi stop", and the stock deinitialises WiFi at
-+17 s while the UI keeps running (no radio is modelled; docs/NEXT_PHASE.md). The golden is
+the deep sleep is the other way in, which only `test_stock_wifi_fails_fast` still takes (a cold boot
+makes ESP-IDF run the full PHY calibration, which blocks here — see that test). It then mounts the
+card, loads NVS, initialises the UC8279 through ESP-IDF's interrupt+GDMA spi_master driver, paints
+its home screen ("Bookshelf") and lights the warm frontlight channel. With WiFi enabled the PHY
+calibrates against the analog-master I2C block, the SENS temperature sensor and the radio register
+stub, the driver prints "wifi:mode : sta" as on the device, then finds no air: "TX Q not empty" at
++7.5 s, "force witi stop", and the stock deinitialises WiFi at +17 s while the UI keeps running (no radio is modelled; docs/NEXT_PHASE.md). The golden is
 emulator-made (no device oracle for this screen yet; the device shows the same empty bookshelf). The
 status bar (clock, battery, WiFi glyph) is excluded from the comparison.
 
@@ -73,12 +73,16 @@ def stock_card(tmp_path_factory):
 
 @pytest.fixture
 def stock(tmp_path, request, stock_card):
-    """A scratch copy of the dump (user_config/net_en = request.param, default 0) and of the full
-    device card with the test book on it, booted with the power button held from reset
-    (`--boot-hold-power`) so the boot-preflight accepts the cold boot; see `boot_to_home`."""
+    """A scratch copy of the dump and of the full device card with the test book on it, booted with
+    the power button held from reset (`--boot-hold-power`) so the boot-preflight accepts the cold
+    boot; see `boot_to_home`. `request.param` is user_config/net_en (default 0), or the pair
+    (net_en, boot_hold): `boot_hold=False` boots without the flag, i.e. through the preflight's deep
+    sleep and a power press (`boot_to_home(name, wake=True)`) — the only caller is the WiFi test,
+    see there."""
     if not os.path.exists(DUMP):
         pytest.skip('device dump not available')
-    net_en = getattr(request, 'param', 0)
+    param = getattr(request, 'param', 0)
+    net_en, boot_hold = param if isinstance(param, tuple) else (param, True)
     name = 'pytest-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')   # '=' breaks -qmp unix:PATH
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(DUMP, flash)
@@ -88,7 +92,7 @@ def stock(tmp_path, request, stock_card):
     shutil.copyfile(stock_card, sd)
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--trace-epd', str(tmp_path / 'epd.jsonl'),
-          '--boot-hold-power')
+          *(['--boot-hold-power'] if boot_hold else []))
     yield name, tmp_path
     x4emu(name, 'stop', check=False)
 
@@ -115,10 +119,11 @@ def golden_check(shot, name, cols=(STATUS_BAR_COLS, PANEL_W)):
 
 def test_stock_boots_to_home_lights_and_reacts_to_touch(stock):
     name, tmp = stock
-    # 1. boot-preflight rejects the cold boot and deep-sleeps; the power button wakes it
-    wait_for(lambda: 'deep sleep' in x4emu(name, 'status').stdout, 60, 'preflight deep sleep')
-    x4emu(name, 'press', 'power')
+    # 1. the fixture held the power button from reset (`--boot-hold-power`), so boot-preflight
+    #    accepted the cold boot (hold=600ms decision=0) instead of deep-sleeping
     x4emu(name, 'wait-text', 'main_task: Returned from app_main()', '--timeout', '60')
+    log = x4emu(name, 'log').stdout
+    assert 'decision=0' in log and 'enter deep sleep' not in log, 'boot-preflight rejected the cold boot'
     # 2. panel init + home paint through spi_master + GDMA: refresh 1 (init, three 60,000-byte planes)
     #    and 2 (Home); the third is the clock at the next minute (see boot_to_home)
     st = wait_for(lambda: (s := state(name))['refresh_count'] >= 2 and s, 90, 'home paint')
@@ -147,14 +152,18 @@ def test_stock_boots_to_home_lights_and_reacts_to_touch(stock):
     assert after['gpio_irqs'] > before['gpio_irqs']
 
 
-def boot_to_home(name):
-    """Preflight deep sleep, power press, Home painted (refresh 2: the panel init's full refresh is 1,
-    Home's plane is 2) and the panel idle. Refresh 3 is the status-bar clock, which the stock completes
-    at the next wall-clock minute: it pre-sends the old plane right after every refresh and sends the
-    new plane + DRF when the minute changes (or at once for a UI event), so waiting for a third
-    refresh takes 0..60 s. Returns the state after the paint."""
-    wait_for(lambda: 'deep sleep' in x4emu(name, 'status').stdout, 60, 'preflight deep sleep')
-    x4emu(name, 'press', 'power')
+def boot_to_home(name, wake=False):
+    """Home painted (refresh 2: the panel init's full refresh is 1, Home's plane is 2) and the panel
+    idle. The `stock` fixture ran with `--boot-hold-power`, so the boot-preflight accepted the cold
+    boot and there is nothing to wake: the app runs straight through. With `wake=True` (a fixture
+    booted with `boot_hold=False`) the old path is taken instead: the preflight deep-sleeps and a
+    power press starts the second, DSLEEP boot. Refresh 3 is the status-bar clock, which the stock
+    completes at the next wall-clock minute: it pre-sends the old plane right after every refresh and
+    sends the new plane + DRF when the minute changes (or at once for a UI event), so waiting for a
+    third refresh takes 0..60 s. Returns the state after the paint."""
+    if wake:
+        wait_for(lambda: 'deep sleep' in x4emu(name, 'status').stdout, 60, 'preflight deep sleep')
+        x4emu(name, 'press', 'power')
     x4emu(name, 'wait-text', 'main_task: Returned from app_main()', '--timeout', '60')
     st = wait_for(lambda: (s := state(name))['refresh_count'] >= 2 and s, 90, 'home paint')
     x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '30')
@@ -169,14 +178,22 @@ def hot_polls(st):
     return rows
 
 
-@pytest.mark.parametrize('stock', [1], indirect=True, ids=['wifi_on'])
+@pytest.mark.parametrize('stock', [(1, False)], indirect=True, ids=['wifi_on'])
 def test_stock_wifi_fails_fast(stock):
     """With the device's NVS (WiFi on) the radio start must not park core 0: the PHY's polls on the
     analog-master I2C block (0x6000E050), the temperature sensor (SENS 0x50) and the radio blocks
     (FE 0x174, MAC 0xD14) are answered, the driver reaches "wifi:mode : sta" and gives up the way
-    ESP-IDF does without a link. Regression guard for docs/log.md 2026-09-06 (WiFi start)."""
+    ESP-IDF does without a link. Regression guard for docs/log.md 2026-09-06 (WiFi start).
+
+    This is the one stock test that still takes the deep-sleep/wake boot (`boot_hold=False` above,
+    `wake=True` below): after a DSLEEP wake ESP-IDF reuses the PHY calibration in RTC memory, while
+    a POWERON cold boot makes it run the *full* calibration — and that one blocks in the emulator
+    after three "pll_cal exceeds 2ms" lines (the radio_wifi task stops: `ana_i2c`, `rf` and `saradc`
+    counters freeze at the analog-master transaction m1 0x6b/0x02=0x4e while the rest of the system
+    keeps running). Booting this case cold is for whoever answers the PLL lock flag
+    (docs/NEXT_PHASE.md §3.2.6)."""
     name, tmp = stock
-    boot_to_home(name)
+    boot_to_home(name, wake=True)
     # 1. the PHY and the driver come up exactly as on the device (docs/device/boot-stock-7.2.4.log)
     x4emu(name, 'wait-text', 'phy_init: phy_version 711', '--timeout', '60')
     x4emu(name, 'wait-text', 'wifi:mode : sta (98:c3:77:be:ea:30)', '--timeout', '60')

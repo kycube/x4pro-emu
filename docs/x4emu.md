@@ -102,12 +102,45 @@ rotated on it.
 
 | Command | Arguments | `--json` object |
 |---|---|---|
-| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console"}`; with `--dry-run` `{"name", "dry_run": true, "cmd": [...]}` |
+| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
 | `stop` | — | `{"name", "pid", "stopped", "running": false}` (`stopped: false` when it was not running) |
 | `reset` | — | `{"name", "reset": true}` |
 | `status` | — | `{"name", "pid", "status", "running", "deep_sleep"}`; not running: `{"name", "pid": null, "status": "not running", "running": false, "deep_sleep": false}` |
 | `state` | — | the board's whole state object (uptime, panel, `refresh_count`, `last_mode`, `busy`, GPIO, buttons, touch, `gt911`, battery, `rtc`, `ledc`, `sleep`, `ana_i2c`, `saradc`, `rf`, `iolog_hot`, …) — the same JSON the human mode pretty-prints |
-| `flash-app` | `--app APP.bin`, `--build DIR` (bootloader + partition table + app) | `{"flash", "parts": [{"offset", "size", "path"}], "name", "pid", "status", "console"}` — the instance is stopped, patched in place (NVS/otadata/SD survive) and relaunched with its old command line |
+| `flash-app` | `--app APP.bin`, `--build DIR` (bootloader + partition table + app) | `{"flash", "parts": [{"offset", "size", "path"}], "name", "pid", "status", "console"}` — the instance is stopped, patched in place (NVS/otadata/SD survive) and relaunched with its old command line (a `--boot-hold-power` run holds the button again) |
+
+#### `run --boot-hold-power [MS]` — a cold boot the stock firmware accepts
+
+The stock `xteink_app` runs a **boot-preflight** about 550 ms after every reset: it samples the power
+button (GPIO3, active-low) and boots only if the button is still held when its window closes. On a
+plain power-on it prints
+
+```
+boot-preflight: source=1 validation=2 gate=0 configured=1000ms effective=600ms hold=0ms decision=2 reason=3
+```
+
+and deep-sleeps; the way in used to be `x4emu press power` (a 1.5 s hold), which wakes it into a
+second boot. With `--boot-hold-power` the button is held from the first instruction instead: QEMU is
+started halted (`-S`), `btn-power` is set over QMP, the CPUs are released (`cont`), and the button is
+released MS milliseconds later. The preflight then measures its full window and accepts the cold
+boot — `hold=600ms decision=0 reason=11` — so there is no deep sleep, no wake and no second boot
+(about 1–2 s and one `press power` saved per script; `tests/test_stock.py` boots this way).
+
+`MS` is optional and defaults to **3000**: it is wall-clock time, and early boot (ROM, flash) runs at
+roughly half real time here, so the guest reaches the end of the 600 ms window after ~1.8 s of wall
+time — 3000 leaves margin without costing anything, since the guest boots on while `run` waits and
+Home is painted about 5 s in. On a slower or heavily loaded host, raise it: the preflight's own
+`hold=…ms decision=…` line in `console.log` says exactly what the guest measured (`decision=2
+reason=3` means the hold was too short). The flag cannot be combined with `--gdb`, which owns the
+halted start. `flash-app` repeats the hold when it relaunches such an instance.
+
+One caveat: the stock's **WiFi start does not survive a cold boot** in the emulator today. After a
+deep-sleep wake ESP-IDF reuses the PHY calibration kept in RTC memory; after a POWERON it runs the
+full calibration, and that blocks here after three `phy: error: pll_cal exceeds 2ms!!!` lines (the
+`radio_wifi` task stops — `state.ana_i2c`, `state.rf` and `state.saradc` stop counting at the
+analog-master transaction `m1 0x6b/0x02=0x4e` — while the rest of the system keeps running). With
+`user_config/net_en = 1` and the radio wanted, boot through the deep sleep and `press power`
+(`tests/test_stock.py::test_stock_wifi_fails_fast` does); everything else is happier cold.
 
 ### Console
 
@@ -162,6 +195,13 @@ x4emu --json --name dev0 wait-text "Entering activity: Home" --timeout 60
 x4emu --json --name dev0 wait-quiet --seconds 2
 x4emu --json --name dev0 tap 345 350 --quiet 2 --wait 20 | jq .refresh_after_s
 x4emu --json --name dev0 screenshot /tmp/browse.png --diff tests/golden/device-home-screenshot-3824.bmp
+
+# the stock firmware, cold boot: no deep-sleep/wake detour, Home is refresh 2 plus an idle panel
+x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img --boot-hold-power
+x4emu --name stock wait-text "main_task: Returned from app_main()" --timeout 60
+x4emu --name stock wait-refresh --total 2 --timeout 90    # 1 = panel init, 2 = Home; 3 is the clock
+x4emu --name stock wait-quiet --seconds 2
+x4emu --name stock screenshot /tmp/stock-home.png
 
 # how bright is the frontlight, and what is the panel doing?
 x4emu --json light | jq .warm

@@ -90,8 +90,11 @@ Stock firmware: `tools/mkflash.py images/stock.bin --raw images/device/flash-202
 `tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0` to skip its 18 s WiFi start), a card built
 from the device's files (`tools/mksd.py images/sd-full.img --src images/device/sd-files`: the stock's external
 font and cache plans live there; `images/sd-device.img` lacks them), then `x4emu --name stock run --flash
-images/stock.bin --sd images/sd-full.img`. Its boot-preflight rejects a cold boot and deep-sleeps;
-`x4emu --name stock press power` wakes it and Home (refresh 2) follows in ~5 s. Refresh 3 is the status-bar
+images/stock.bin --sd images/sd-full.img --boot-hold-power`. Its boot-preflight rejects a cold boot unless
+the power button is held (`--boot-hold-power [MS]`, default 3000: pressed over QMP before the first
+instruction); without the flag it deep-sleeps and `x4emu --name stock press power` wakes it. Home (refresh 2)
+follows in ~5 s. A cold boot with WiFi on (`net_en=1`) blocks in the PHY's full calibration (NEXT_PHASE §3.2.6):
+boot that case through the wake. Refresh 3 is the status-bar
 clock, completed at the next minute: the stock pre-sends the old plane after every refresh, so a trace ending
 in DTM1 is idle, and "wait for three refreshes" takes 0..60 s (`tests/test_stock.py` boots scratch copies).
 
@@ -112,7 +115,7 @@ the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 
 | Command | Effect |
 |---|---|
-| `run --flash F [--sd IMG] [--efuse F] [--panel ssd1677\|uc8179\|uc8279] [--fast-epd] [--gdb] [--trace-epd F] [--trace-i2c F] [--icount N] [--no-usb-host]` | start QEMU detached; `.x4emu/NAME/` holds qmp.sock, console.log (USB Serial/JTAG), uart0.log, qemu.log, pid, run.json |
+| `run --flash F [--sd IMG] [--efuse F] [--panel ssd1677\|uc8179\|uc8279] [--fast-epd] [--gdb] [--trace-epd F] [--trace-i2c F] [--icount N] [--no-usb-host] [--boot-hold-power [MS]]` | start QEMU detached; `.x4emu/NAME/` holds qmp.sock, console.log (USB Serial/JTAG), uart0.log, qemu.log, pid, run.json |
 | `stop` / `reset` / `status` | quit; system_reset; pid + run state (+ "deep sleep" when paused by the sleep model) |
 | `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2 (`busy`, `transfer_ms`)/i2c0 counters, buttons, touch, gt911 (`frames`, `clears`), battery, rtc, ledc channels (`fading`, `target_permille`), sleep, ana_i2c (analog-master transactions), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), iolog_hot (unmodelled registers polled past the log cap) |
 | `log [--follow] [--since N] [--file uart0.log]` / `wait-text TEXT [--timeout S]` | console access; never blocks past the timeout |
@@ -120,7 +123,7 @@ the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 | `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |
 | `press left\|right\|power [--ms 120] [--wait S] [--quiet S]` / `hold BTN --ms 3000` | active-low buttons; `--wait` reports the refresh that follows, `--quiet` first waits for an idle panel; a power press while sleeping is extended to 1.5 s |
 | `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
-| `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (the stock ignores it). `tap`/`home` stay down for at least `--ms` **and until the firmware has read the frame** (`state.gt911.clears`; up to 5 s), so a tap into CrossPoint's multi-second rendering pass is not lost; the output says when it was read |
+| `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms] [--wait] [--quiet]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (the stock ignores it). `tap`/`home` stay down for at least `--ms` **and until the firmware has read the frame** (`state.gt911.clears`; up to 5 s), so a tap into CrossPoint's multi-second rendering pass is not lost; the output says when it was read. `swipe` holds every point until read (the GT911 model keeps only the latest point) |
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
 | `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
 | `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |

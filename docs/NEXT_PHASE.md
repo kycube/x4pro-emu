@@ -11,7 +11,7 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 (this session's model tier) forms the next squad from §10.3, delegating to Opus 5 where the brief has
 a mechanical acceptance check and keeping symbol-less firmware reading and new models on Fable 5.1.
 
-1. `cd /Users/mini/x4pro-emu && make test` — 17 cases (12 CrossPoint + 5 stock), about 6 minutes, all green
+1. `cd /Users/mini/x4pro-emu && make test` — 20 cases (12 CrossPoint + 5 stock + 3 nvsedit), about 5 minutes, all green
    at the end of session 4. Needs the built QEMU (`qemu/build/qemu-system-xtensa`, rebuilt in session 4
    with patch 0011), the CrossPoint build (`firmware/.pio/build/x4pro`) and the gitignored `images/`
    (device dump, `sd-device.img`, ROM ELF); all present on this Mac. If `qemu/` were ever missing:
@@ -43,11 +43,9 @@ a mechanical acceptance check and keeping symbol-less firmware reading and new m
    touched in session 4; §1's device state still holds.
 5. **Squad S1 was started at the end of session 4** (two Opus agents, see §10): (a) `x4emu run
    --boot-hold-power MS` (cold boot with the power button held so the stock skips its deep-sleep detour;
-   owner of `x4emu/commands.py`, `x4emu/cli.py`, `docs/x4emu.md`, the boot path in `tests/test_stock.py`);
-   (b) ~~`tools/nvsedit.py set-str / erase / redact`~~ done and committed. If (a)'s files show in
-   `git status`, review the diff, run `make test`, and merge its report into `docs/log.md` first. Still open in S1: the RTC IO stored-value overlay (a QEMU
-   change: never rebuild while a suite runs), the PLL lock flag 0x62/0x0c, the GT911 key byte for the
-   stock's Home pad. Then S2 (§10.3).
+   done and committed); (b) ~~`tools/nvsedit.py set-str / erase / redact`~~ (done and committed). Still open in S1 (coordinator, QEMU changes: never rebuild
+   while a suite runs): the PHY cold-boot block / PLL lock flag (§3.2.6, now the first item), the RTC IO
+   stored-value overlay, the GT911 key byte for the stock's Home pad. Then S2 (§10.3).
 6. Commit `c3e908a` (owner, 20:18) holds the first half of session 4: patch 0011 (LEDC fades), `tcbwalk.py`,
    the tap/Home changes in `tools/x4emu`, the stock screen tests and their six goldens, the docs to that
    point. **Uncommitted** (the QEMU clone has commit cdc5268 on `x4pro`, `qemu-patches/0012` is exported):
@@ -171,13 +169,18 @@ Next, in the order that serves the owner's goal (a usable stock in the emulator)
    `tools/device.py console --reset --seconds 40`. Compare by eye (layout, glyph shapes, the status bar)
    and by timing (device `wifi:mode : sta` at 13.6 s, emulator 14.5 s). Photos go to
    `docs/device/photos/`, the log next to `boot-stock-7.2.4.log` (redact SSID/BSSID/IP).
-6. **Cosmetic PHY artefact**: `phy: error: pll_cal exceeds 2ms!!!` x6. The PHY writes the RF PLL cap to
-   analog block 0x62 reg 0x01 (0..0x0a) and reads reg 0x0c for a lock flag; find the expected bit
-   (`tools/appdis.py` at the PC while it loops, `x4pro.ana-i2c:` lines in qemu.log) and answer it in
-   `x4pro_ana_i2c.c` (a per-(block, reg) read hook). The device log has no such line.
-7. `x4emu run --boot-hold-power MS`: drive GPIO3 low for the first N ms so the stock's preflight
-   accepts a cold boot without the deep-sleep/wake detour (saves ~2 s and a `press power` in every
-   script; `tests/test_stock.py::boot_to_home` is where it pays off).
+6. **PHY on a cold boot — no longer cosmetic.** After a DSLEEP wake the PHY reuses the calibration in RTC
+   memory and only prints `phy: error: pll_cal exceeds 2ms!!!` x6 (the RF PLL cap is written to analog
+   block 0x62 reg 0x01, 0..0x0a, and reg 0x0c is read for a lock flag that is never set). On a POWERON
+   cold boot with `net_en=1` (`--boot-hold-power`) ESP-IDF runs the *full* calibration and **blocks** after
+   three of those lines: the radio task stops with `state.ana_i2c`/`rf`/`saradc` frozen at analog-master
+   transaction m1 block 0x6b reg 0x02 = 0x4e, the rest of the system alive. Find the expected bit
+   (`tools/appdis.py` at the PC over QMP, `x4pro.ana-i2c:` lines in qemu.log, `tools/tcbwalk.py` for the
+   radio task's frame) and answer it in `x4pro_ana_i2c.c` (a per-(block, reg) read hook); then boot
+   `test_stock_wifi_fails_fast` cold too. Coordinator item (symbol-less).
+7. ~~`x4emu run --boot-hold-power MS`~~ **done** (S1): the `stock` fixture boots cold; only
+   `test_stock_wifi_fails_fast` still wakes from the preflight's deep sleep, because a cold boot with
+   WiFi on runs ESP-IDF's full PHY calibration, which blocks in the emulator (see 6).
 8. ~~**NVS shareable image**~~ **done** (S1): `tools/nvsedit.py set-str / erase / redact`, slots blanked,
    `tests/test_nvsedit.py`; recipe in the module docstring.
 9. **RTC IO pads**: `RTC_IO_TOUCH_PAD3/14`, `XTAL_32N`, `TOUCH_PAD0..` hold/pull writes (sleep
