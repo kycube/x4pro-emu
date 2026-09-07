@@ -13,6 +13,29 @@ and are gone when it is cleaned. No `xtfont.py build` was run.
 > at 3x, with the device's current font on top as the baseline to beat. Judge from that sheet, never
 > from a specimen rendered on the Mac — anti-aliased at 40 px, everything looks good.
 
+## Decision (2026-09-07)
+
+**The interface font stays MiSans Demibold** — the owner's call after seeing every candidate drawn
+by the device's own rasteriser at the real 20 px and 24 px cells, and the whole switch demonstrated
+end to end (Georgia Bold built from their own TTF, installed on the card, chosen in Settings → System
+Font, the device restarting into it). MiSans is heavier than anything shortlisted, it is the only
+face here that covers CJK, and it was drawn for this screen. Nothing in the repo changes it; the
+machinery to change it is proven and sits ready in `tools/xtfont.py` + `tools/fontcompare.py`.
+
+What that leaves open is the **reading** font — the type in a book, a different mechanism in this
+firmware (`docs/reading-fonts.md`). The shortlist below is therefore now mainly a reading-font
+shortlist, and the UI analysis stands as the record of why the incumbent won.
+
+Two things worth remembering from the comparison, since they are counter-intuitive:
+
+* **Georgia Bold and Bookerly Bold were the strongest candidates** and both are the owner's own
+  licensed copies — usable on their device, not redistributable, which is why `fonts/` is local-only.
+* **Literata was the weakest row on the sheet**, despite being the face Google commissioned for
+  reading and Kobo ships. Its Google Fonts build carries no hinting program, and at 20 px with no
+  anti-aliasing that is decisive. Reputation did not survive contact with the hardware.
+* Both Georgia and Bookerly use **old-style figures** (`63%`, `12:04` dip below the baseline), which
+  reads as restless in a status bar. Worth checking by eye on any book face too.
+
 ## 0. What the device actually constrains
 
 Two different problems, and they must not be confused:
