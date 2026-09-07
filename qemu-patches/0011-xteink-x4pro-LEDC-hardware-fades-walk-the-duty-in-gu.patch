@@ -1,7 +1,7 @@
 From 5422572e79221829e452a6b5f6f99bb911265716 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 20:03:30 -0500
-Subject: [PATCH 11/15] xteink-x4pro: LEDC hardware fades walk the duty in
+Subject: [PATCH 11/17] xteink-x4pro: LEDC hardware fades walk the duty in
  guest time
 
 The model completed every DUTY_START at once and raised DUTY_CHNG_END without

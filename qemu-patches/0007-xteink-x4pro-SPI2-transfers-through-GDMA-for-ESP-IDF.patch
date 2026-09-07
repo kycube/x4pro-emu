@@ -1,7 +1,7 @@
 From 3196a35bedd6d15c292da756c4b0d3cfa0d0efc5 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 17:40:37 -0500
-Subject: [PATCH 07/15] xteink-x4pro: SPI2 transfers through GDMA for ESP-IDF's
+Subject: [PATCH 07/17] xteink-x4pro: SPI2 transfers through GDMA for ESP-IDF's
  spi_master
 
 DMA_CONF.DMA_TX_ENA / DMA_RX_ENA route the data phase through the GDMA

@@ -779,3 +779,66 @@ menu, light panel, Settings, All Files, a reader page — `tests/data/stock-home
 `tests/golden/stock-*.png` goldens rotated `ROTATE_270`), the owner judged them **1:1 with the device**. That is
 the device oracle for the stock firmware at the level of the eye; a pixel-exact `.xic` capture from the device
 (S2-device) stays optional and needs the developer-patched stock on the device.
+
+## 2026-09-07 — Session 6: squad S5 (grey fidelity, SDMMC noise, window tests) and the interface polish
+
+Cost-balanced squad, as the owner asked: one Fable agent for the model whose behaviour had to be inferred
+(grey), three Opus agents for the mechanical C work (SDMMC trace patch, window tests, then the SSD1677 fixes
+the tests uncovered), one Sonnet agent for the Python interface polish. One agent per file set; QEMU work in
+`qemu/build-s1` / `build-s2`, models work in per-agent `BUILD=` directories.
+
+- **Grey shading, waveform level (Fable; repo `cbfe81e`, QEMU patch 0017, `docs/grayscale.md`).** The
+  UC8279 X4 LUT tables are 7 groups × 7 bytes (header, four `level<<6 | frames` phases, repeat, tail); the
+  family datasheet's 6-byte groups do not fit (0x86 would be 134 frames) and the 7-byte reading makes the
+  five tables of a bank agree on their frame totals. CrossPoint's AA page: base frame with every glyph pixel
+  black, then DTM1 = ~(base|lsb), DTM2 = ~(plane0^msb), PSR 0x37, the 49-byte AA bank, CDI 0x97, DRF, then
+  both planes restored to the base without a refresh (page turns add a 42-byte settle bank). The model keeps
+  a reflectance per pixel and maps it through the pixel's transition class (WW/BW/WB/BB by CDI's DDX
+  polarity) with a saturating step `gray_k` per frame at VDH/VDL (default 28; the settle bank's 25 frames
+  must saturate). **Finding:** the AA bank for LUT_VER 0x68 has BW and WB byte-identical, so anti-aliased
+  text on this panel has three levels (0 / 84 / 255), not four; the old fixed table showed the dark-grey
+  glyph pixels lighter (170) than the light-grey ones (85). Off by default (`waveform-gray`); 14,967 px of
+  the reader page change when it is on, black and white counts identical. The owner was sent the crops.
+- **SDMMC log noise (Opus; QEMU patch 0016, an Espressif file).** 0x800 is the ESP32-specific SDMMC_CLOCK
+  register (card clock divider/phase), read-modify-written on every card operation; it and CLKDIV, CLKENA,
+  TMOUT (reset 0xffffff40), CTYPE, UHS_REG, BMOD (SWR self-clearing), CARDTHRCTL, EMMC_DDR are stored now,
+  CDETECT/WRTPRT answer from the SD bus, the compiled-out DEBUG macro became ten `dwc_sdmmc_*` trace events.
+  A stock boot's qemu.log: 484,963 → 1,788 lines; CrossPoint 1,005 → 718. Next noisiest: `esp32s3.gpspi
+  unhandled read +0x38` (SPI_DMA_INT_CLR, 608 per stock boot) and the `x4pro/iomux` logger (525 + 525).
+- **Window and data-entry tests (Opus; `models/tests/test_windows.c`, repo `904d051`).** 28 cases, 115
+  checks from the SSD1677/UC8279 datasheets and the freeink drivers. Twelve checks record model gaps:
+  X-decrement windows (0x44 given high address first, as `Ssd1677Driver::setRamArea` sends with mirrorX)
+  collapse to one column because `ssd_ram_write` wraps against `x_start`; the AM bit of 0x11 is ignored
+  (modes 4..7 act like 0..3); the gate-scan byte of 0x01 never mirrors the glass. None reachable by
+  CrossPoint or the stock as configured (X4 profiles NO_FLIP, data entry 0x01, the desk unit a UC8279); a
+  ROTATE_180 SSD1677 board would render garbage. Also: "the post-refresh RED/DTM1 resync is modelled" was
+  an overstatement — the drivers send it themselves. An Opus fix followed (below).
+- **SSD1677 addressing fixed (Opus; repo `5f26ba3`).** `ssd_ram_write` follows the SSD16xx rule: AM (0x11 bit 2)
+  picks Y as the fast axis, 0x44/0x45 are start and end in the direction of travel (so the driver's mirrored
+  windows walk the whole window), a terminus is an equality in byte columns / rows, the fast axis returns to
+  its start when the slow one steps; the 0x01 scan byte's TB bit reverses the gate scan in compose. The
+  twelve XFAILs pass; NO_FLIP boards unchanged (`tests/test_panels.py` green on the rebuilt binary).
+- **Interface polish (Sonnet; repo `6ec624f`).** `x4emu/api.py` runs a command in-process and returns its
+  JSON object or human text (an `Out` collect mode); `x4emu shell` is a REPL with the CLI's exact output;
+  `x4emu watch` a stdlib HTTP live view (`/`, `/panel.png`, `/state.json`; short QMP connections, so other
+  commands keep working while it runs); the MCP server imports the package instead of shelling out, passes
+  `efuse` (it was dropped before), takes `boot_hold_power`/`deterministic` on `emu_run` and adds
+  `emu_record`/`emu_replay`/`emu_wait_guest_ms`. Two buffering bugs found and fixed on the way (block-buffered
+  stdout hid the URL line from a pipe; a stray `{}` at shell exit in JSON mode). Human output of every
+  existing command byte-identical, checked against the committed package. The cheapest model did this
+  cleanly against a precise spec with mechanical acceptance — the right split.
+- Skipped on purpose: the per-opcode BUSY timing table (§4). The device logs only carry PON 40 ms and DRF
+  483 / 1327 ms, which are already the defaults; the stock logs no timings. Nothing to extract.
+
+Lessons: a console line or a driver comment names a symptom, the datasheet names the mechanism — the AA bank
+being three-level was in the driver's own comment ("BW/WB carry the dark-gray channel") all along; tests
+written from the datasheet instead of from the model found three real gaps in an hour; one model owner per
+file plus per-agent build directories let four agents share one checkout and one QEMU source tree without a
+single collision.
+
+**State at the end of session 6:** `make test` 44 cases in 6 min 53 s on QEMU with patches 0001–0017 (13
+CrossPoint, 4 interface, 8 stock, 19 fast). The full run lost the first menu tap of `test_stock_screens_walk`:
+`x4emu tap` reported "read by the firmware after 0.03s" and no refresh followed within 20 s — the stock read
+the GT911 frame and did nothing with it, the second time in three full-suite runs (always the first or second
+tap after Home, never alone). The stock tests' `tap()` retries once now, like `tap_repaints`; whether the
+device drops such taps is an open parity question (`docs/NEXT_PHASE.md` §0.4). Device untouched.

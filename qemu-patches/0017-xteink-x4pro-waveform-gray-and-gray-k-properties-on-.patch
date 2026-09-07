@@ -1,0 +1,93 @@
+From 786d8c855926cea227d37d0641ba41bcb5862e4b Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 7 Sep 2026 00:55:38 -0500
+Subject: [PATCH 17/17] xteink-x4pro: waveform-gray and gray-k properties on
+ the panel device, gray_model in the state
+
+-global driver=x4pro.epd,property=waveform-gray,value=on switches the panel core's waveform-level
+grey model on (default off: the fixed two-plane table); gray-k overrides the per-frame reflectance
+step (0 = the core default). state.gray_model reads "approx" or "waveform".
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/display/x4pro_epd.c         | 11 +++++++++++
+ hw/xtensa/xteink_x4pro.c       |  4 ++--
+ include/hw/display/x4pro_epd.h |  4 ++++
+ 3 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/hw/display/x4pro_epd.c b/hw/display/x4pro_epd.c
+index 40e5c51..18a1dfd 100644
+--- a/hw/display/x4pro_epd.c
++++ b/hw/display/x4pro_epd.c
+@@ -192,6 +192,11 @@ const EpdCore *x4pro_epd_core(X4ProEpdState *s)
+     return &s->core;
+ }
+ 
++const char *x4pro_epd_gray_model(const X4ProEpdState *s)
++{
++    return s->core.waveform_gray ? "waveform" : "approx";
++}
++
+ static void epd_realize(SSIPeripheral *dev, Error **errp)
+ {
+     X4ProEpdState *s = X4PRO_EPD(dev);
+@@ -211,6 +216,8 @@ static void epd_realize(SSIPeripheral *dev, Error **errp)
+     if (s->half_ms) s->core.timing.half_us = s->half_ms * 1000;
+     if (s->gray_ms) s->core.timing.gray_us = s->gray_ms * 1000;
+     if (s->power_ms) s->core.timing.power_us = s->power_ms * 1000;
++    s->core.waveform_gray = s->waveform_gray;
++    if (s->gray_k) s->core.gray_k = (int)s->gray_k;
+     s->core.trace = epd_trace;
+     s->core.trace_opaque = s;
+     if (s->trace_path && s->trace_path[0]) {
+@@ -261,6 +268,10 @@ static Property epd_properties[] = {
+     DEFINE_PROP_UINT32("half-ms", X4ProEpdState, half_ms, 0),
+     DEFINE_PROP_UINT32("gray-ms", X4ProEpdState, gray_ms, 0),
+     DEFINE_PROP_UINT32("power-ms", X4ProEpdState, power_ms, 0),
++    /* grey model: off = the fixed two-plane approximation (state.gray_approx);
++     * on = the LUT interpreter + reflectance model (docs/grayscale.md) */
++    DEFINE_PROP_BOOL("waveform-gray", X4ProEpdState, waveform_gray, false),
++    DEFINE_PROP_UINT32("gray-k", X4ProEpdState, gray_k, 0),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 0e6e486..587ee6b 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -394,11 +394,11 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+     if (c) {
+         g_string_append_printf(j,
+             "\"panel\":\"%s\",\"refresh_count\":%" PRIu64 ",\"last_mode\":\"%s\",\"last_ctrl2\":\"0x%02x\","
+-            "\"busy\":%s,\"gray_approx\":%s,\"probe_reads\":%" PRIu64 ",\"epd_bytes\":%" PRIu64 ","
++            "\"busy\":%s,\"gray_approx\":%s,\"gray_model\":\"%s\",\"probe_reads\":%" PRIu64 ",\"epd_bytes\":%" PRIu64 ","
+             "\"epd_cmds\":%" PRIu64 ",\"epd_unknown_cmds\":%" PRIu64 ",\"epd_last_unknown\":\"0x%02x\","
+             "\"epd_resets\":%" PRIu64 ",\"epd_deep_sleep\":%s,\"fast_epd\":%s,\"last_refresh_us\":%" PRId64 ",",
+             epd_variant_name(c->variant), c->refresh_count, epd_mode_name(c->last_mode), c->last_ctrl2,
+-            c->busy ? "true" : "false", c->image_gray_approx ? "true" : "false", c->probe_reads, c->bytes_in,
++            c->busy ? "true" : "false", c->image_gray_approx ? "true" : "false", x4pro_epd_gray_model(b->epd), c->probe_reads, c->bytes_in,
+             c->cmds_in, c->unknown_cmds, c->last_unknown_cmd, c->resets, c->deep_sleep ? "true" : "false",
+             b->epd->fast_epd ? "true" : "false", b->epd->last_refresh_ns / 1000);
+     }
+diff --git a/include/hw/display/x4pro_epd.h b/include/hw/display/x4pro_epd.h
+index c2718fc..e0c734e 100644
+--- a/include/hw/display/x4pro_epd.h
++++ b/include/hw/display/x4pro_epd.h
+@@ -41,6 +41,8 @@ struct X4ProEpdState {
+     bool fast_epd;        /* 2 ms refreshes */
+     char *trace_path;
+     uint32_t full_ms, fast_ms, half_ms, gray_ms, power_ms;
++    bool waveform_gray;   /* LUT refreshes go through the per-pixel waveform model (docs/grayscale.md) */
++    uint32_t gray_k;      /* its reflectance step per driven frame; 0 = the core's default */
+ 
+     FILE *trace;
+     uint64_t busy_intervals;
+@@ -49,3 +51,5 @@ struct X4ProEpdState {
+ };
+ 
+ const EpdCore *x4pro_epd_core(X4ProEpdState *s);
++/* "approx" (the fixed two-plane table) or "waveform" (the LUT model), for the JSON state */
++const char *x4pro_epd_gray_model(const X4ProEpdState *s);
+-- 
+2.50.1 (Apple Git-155)
+

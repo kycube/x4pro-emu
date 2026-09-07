@@ -16,8 +16,10 @@ for symbol-less firmware reading and new models).
   PLL lock flag and the DC-offset comparator the full PHY calibration polls), so ESP-IDF's driver comes up on
   a cold boot or a wake alike, finds no air and stops itself about 8 s after `wifi:mode : sta`; nothing
   enumerates on the network side. BLE is untested.
-- **Grayscale**: the two-plane 4-level rendering is an approximation (`state.gray_approx` is true
-  after such a refresh); anti-aliased text will not look exactly like the glass.
+- **Grayscale**: by default the two-plane rendering is a fixed table (`state.gray_approx` true after such
+  a refresh). A waveform-level model exists behind `-global driver=x4pro.epd,property=waveform-gray,value=on`
+  (`state.gray_model`; `docs/grayscale.md`): it interprets the uploaded LUTs and finds that CrossPoint's AA
+  text has three levels on this panel, not four. Default flips once the owner confirms it against the glass.
 - **Deep sleep**: modelled as a paused VM followed by a system reset with reset cause 5 (DSLEEP),
   EXT1 wake status = the power button. RTC-domain retention beyond RTC RAM, power draw, and GPIO
   hold latches are not simulated; the guest's `millis()` keeps counting across the modelled reset.
@@ -106,7 +108,9 @@ in DTM1 is idle, and "wait for three refreshes" takes 0..60 s (`tests/test_stock
 `claude mcp add x4emu -- .venv/bin/python tools/x4emu_mcp.py`). Tools mirror the CLI: `emu_run`,
 `emu_wait_text`, `emu_wait_quiet`, `emu_tap`/`emu_press`/`emu_hold`/`emu_chord`/`emu_home`,
 `emu_screenshot` (image inline, optional diff), `emu_state`, `emu_console`, `emu_trace_tail`,
-`emu_battery`, `emu_light`, `emu_qmp`, `emu_console_send`, `emu_flash_app`; `build_firmware`, `build_flash_image`, `build_sd_image`;
+`emu_battery`, `emu_light`, `emu_qmp`, `emu_console_send`, `emu_flash_app`, `emu_record`, `emu_replay`,
+`emu_wait_guest_ms` (`emu_run` takes `boot_hold_power` and `deterministic`; the emulator tools run the package
+in-process through `x4emu/api.py`); `build_firmware`, `build_flash_image`, `build_sd_image`;
 `device_status`, `device_console`, `device_fetch_screenshots`, and the guarded
 `device_flash_crosspoint` / `device_restore_stock` (plan only unless `confirm=true`).
 
@@ -127,6 +131,7 @@ the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 | `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
 | `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms] [--wait] [--quiet]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (Back in the stock). `tap`/`home` stay down for at least `--ms` **and until the firmware has read the frame** (`state.gt911.clears`; up to 5 s), so a tap into CrossPoint's multi-second rendering pass is not lost; the output says when it was read. `swipe` holds every point until read (the GT911 model keeps only the latest point) |
 | `record FILE` / `record --stop` / `replay FILE [--timeout S] [--no-wait]` / `wait-guest-ms N` / `wait-guest-until MS` | journal this instance's inputs (press/hold/chord/tap/swipe/home/battery/console-send/reset) as `{t_ms, cmd, args}` lines at the guest time they were issued; `replay` waits for the guest clock to reach each `t_ms` and performs the step in-process with the recorded args; the `wait-guest-*` commands wait on `state.uptime_us`, not the host clock (`tests/test_replay.py`: a journal replayed onto two fresh `--deterministic` boots, 0 px apart) |
+| `shell` / `watch [--port 8420] [--seconds S] [--out FILE]` | `shell`: one command per stdin line, same output as the CLI (JSON per line with `--json`), `name NEW` switches instances, `exit`/EOF ends; `watch`: a live view at `http://127.0.0.1:PORT/` (stdlib HTTP server; the page reloads `/panel.png` when `refresh_count` changes, `/state.json` is `state`; short QMP connections, so other commands keep working), `--out` also rewrites a PNG on every change |
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
 | `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
 | `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |

@@ -1,7 +1,7 @@
 From cdc52682a886d7cebf8d06b440ecf1ed2cd3b999 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 21:20:15 -0500
-Subject: [PATCH 12/15] xteink-x4pro: GP-SPI transfers take their time at the
+Subject: [PATCH 12/17] xteink-x4pro: GP-SPI transfers take their time at the
  CLOCK register's rate
 
 A transfer used to complete inside the CMD.USR write. Now the bytes still reach

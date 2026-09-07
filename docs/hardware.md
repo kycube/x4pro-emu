@@ -126,7 +126,20 @@ of slack that would stretch a 940-chunk frame to over a second. The frontlight d
 Command set (`Uc8279X4Driver.cpp`): 0x00 PSR, 0x02 POF, 0x03 PFS, 0x04 PON, 0x07 DSLP (0xA5), 0x10 DTM1 (old
 plane), 0x12 DRF, 0x13 DTM2 (new plane), 0x30 PLL, 0x50 CDI, 0x61 TRES, 0x65 GSST, 0x90 PTL, 0x91 PTIN,
 0x92 PTOUT, 0xE0 CCSET, 0xE1 gate scan, 0xE5 TSSET, 0x20..0x24 LUT banks (49 or 42 bytes). BUSY_N idle HIGH,
-polled with `delay(1)`. Full details are read at M2/M6 when the model is written.
+polled with `delay(1)`.
+
+**LUT layout (UC8279 X4, `docs/grayscale.md`):** each of the five tables (0x20 VCOM, 0x21 WW, 0x22 BW,
+0x23 WB, 0x24 BB) is 7 groups × 7 bytes: a group header (0x01 populated, 0x00 skipped), four phase bytes of
+`level << 6 | frames` (level 00 GND/VCOM_DC, 01 VDH, 10 VDL, 11 float), a repeat count, and a tail byte
+(0x01/0x00, role unknown); the family datasheet's 6-byte groups do not fit these tables (a phase byte 0x86
+would be 134 frames), the 7-byte reading makes the five tables of a bank agree on their frame totals
+(CrossPoint's AA bank 7 frames in all five, its 42-byte settle bank 25). CDI 0x97 (the MTP default, byte 8
+of the MTP block; bytes 12–15 are TRES 800×600): DDX `01` = KW mode with NEW/OLD planes, RAM 1 = white;
+PLL 0x0E = FRS 1110 = 150 Hz in the UC8179c table (not timed on the device). CrossPoint's AA bank for
+LUT_VER 0x68 has **BW and WB byte-identical** ("BW/WB carry the dark-gray channel" in the driver), so its
+anti-aliased text has three levels on this panel: black, one grey, white. The emulator's waveform model
+(`-global driver=x4pro.epd,property=waveform-gray,value=on`) integrates the phases per transition class;
+the default remains the fixed two-plane table until a device photo settles the grey level.
 
 ## Touch: GT911
 

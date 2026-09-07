@@ -1,0 +1,300 @@
+From 46865e23403273c5f811c12a87c1935f7e092a42 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 7 Sep 2026 00:47:52 -0500
+Subject: [PATCH 16/17] hw/sd/dwc_sdmmc: store the configuration registers and
+ trace instead of DEBUG
+
+The ESP-IDF driver touches SDMMC_CLOCK (ESP32-specific, 0x800: card clock divider and phase),
+CLKDIV, CLKENA, TMOUT, CTYPE, UHS_REG, BMOD, CARDTHRCTL, EMMC_DDR and CDETECT/WRTPRT on every
+card operation; all fell through to the LOG_UNIMP default (483,175 log lines in a 5-second
+boot of the Xteink stock firmware). Store the configuration-only ones (BMOD's self-clearing
+SWR excepted, TMOUT reset 0xffffff40) and answer card detect / write protect from the SD bus.
+Replace the compiled-out DEBUG macro with hw/sd trace events (dwc_sdmmc_irq, _cmd, _cmd_error,
+_cmd_end, _bytes_left, _data_over, _desc_data, _dma_idle, _dma_desc, _dma_end) so the same
+information is available through trace-event-set-state.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/sd/dwc_sdmmc.c         | 107 ++++++++++++++++++++++++++++++++------
+ hw/sd/trace-events        |  12 +++++
+ include/hw/sd/dwc_sdmmc.h |  12 +++++
+ 3 files changed, 114 insertions(+), 17 deletions(-)
+
+diff --git a/hw/sd/dwc_sdmmc.c b/hw/sd/dwc_sdmmc.c
+index 8fcc652..c520c49 100644
+--- a/hw/sd/dwc_sdmmc.c
++++ b/hw/sd/dwc_sdmmc.c
+@@ -46,7 +46,7 @@
+  * - FIFO is not implemented.
+  * - No error interrupts or conditions are generated.
+  * - Boot mode is not implemented.
+- * - Clock settings are ignored.
++ * - Clock settings, timeouts and bus width are stored and read back, but ignored.
+  *
+  * The hardware seems to work in a manner very similar to Allwinner SD Host controller (allwinner-sdhost.c),
+  * notable exceptions being:
+@@ -56,12 +56,6 @@
+  * or is heavily inspired by it.
+  */
+ 
+-#ifdef DWC_SDMMC_DEBUG
+-#define DEBUG(...) qemu_log(__VA_ARGS__)
+-#else
+-#define DEBUG(...)
+-#endif
+-
+ typedef struct {
+     uint32_t reserved1: 1;
+     uint32_t disable_int_on_completion: 1;
+@@ -141,7 +135,9 @@ REG32(SDMMC_RINTSTS, 0x44)
+ REG32(SDMMC_STATUS, 0x48)
+ REG32(SDMMC_FIFOTH, 0x4c)
+ REG32(SDMMC_CDETECT, 0x50)
++    FIELD(SDMMC_CDETECT, CARDS, 0, 2);
+ REG32(SDMMC_WRTPRT, 0x54)
++    FIELD(SDMMC_WRTPRT, CARDS, 0, 2);
+ REG32(SDMMC_GPIO, 0x58)
+ REG32(SDMMC_TCBCNT, 0x5c)
+ REG32(SDMMC_TBBCNT, 0x60)
+@@ -152,6 +148,7 @@ REG32(SDMMC_HCON, 0x70)
+ REG32(SDMMC_UHS_REG, 0x74)
+ REG32(SDMMC_RST_N, 0x78)
+ REG32(SDMMC_BMOD, 0x80)
++    FIELD(SDMMC_BMOD, SWR, 0, 1);
+ REG32(SDMMC_PLDMND, 0x84)
+ REG32(SDMMC_DBADDR, 0x88)
+ REG32(SDMMC_DBADDRU, 0x8c)
+@@ -168,6 +165,12 @@ REG32(SDMMC_UHS_REG_EXT, 0x108)
+ REG32(SDMMC_EMMC_DDR_REG, 0x10c)
+ REG32(SDMMC_ENABLE_SHIFT, 0x110)
+ 
++/* ESP32-specific register (not part of the Designware IP): clock divider and
++ * phase settings for the card clock. The ESP-IDF driver touches it through
++ * read-modify-write of its bit fields on every card operation.
++ */
++REG32(SDMMC_CLOCK, 0x800)
++
+ #define SDMMC_INTMASK_IO_SLOT1  BIT(17)
+ #define SDMMC_INTMASK_IO_SLOT0  BIT(16)
+ #define SDMMC_INTMASK_EBE       BIT(15)
+@@ -226,7 +229,7 @@ static void dwc_sdmmc_update_irq(DWCSDMMCState *s)
+         irq = s->rintsts & s->intmask;
+         irq |= (s->idsts & s->idinten) << 16;
+     }
+-    DEBUG("%s: mask=0x%04x, sts=0x%04x irq=%d\n", __func__, s->intmask, s->rintsts, irq);
++    trace_dwc_sdmmc_irq(s->intmask, s->rintsts, irq);
+     qemu_set_irq(s->irq, irq);
+ }
+ 
+@@ -235,7 +238,7 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
+     SDRequest request;
+     uint8_t resp[16];
+     int rlen;
+-    DEBUG("%s: hw_cmd=0x%08x\n", __func__, s->cmd);
++    trace_dwc_sdmmc_cmd(s->cmd);
+     sdmmc_hw_cmd_t hw_cmd = dwc_sdmmc_get_hw_cmd(s);
+     if (hw_cmd.update_clk_reg) {
+         goto done;
+@@ -247,7 +250,7 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
+     rlen = sdbus_do_command(&s->sdbus, &request, resp);
+     s->rintsts |= SDMMC_INTMASK_CMD_DONE;
+     if (rlen < 0) {
+-        DEBUG("%s: error: rlen=%d\n", __func__, rlen);
++        trace_dwc_sdmmc_cmd_error(rlen);
+     } else {
+         if (hw_cmd.response_expect) {
+             if (rlen == 4 && !hw_cmd.response_long) {
+@@ -267,7 +270,7 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
+     }
+ 
+ done:
+-    DEBUG("%s: ending with rinsts=0x%04x\n", __func__, s->rintsts);
++    trace_dwc_sdmmc_cmd_end(s->rintsts);
+     s->cmd = FIELD_DP32(s->cmd, SDMMC_CMD, START, 0);
+     dwc_sdmmc_update_irq(s);
+ }
+@@ -279,9 +282,9 @@ static void dwc_sdmmc_update_bytes_left(DWCSDMMCState *s, size_t bytes_done)
+     } else {
+         s->bytes_left = 0;
+     }
+-    DEBUG("%s: bytes_left = %d\n", __func__, (unsigned) s->bytes_left);
++    trace_dwc_sdmmc_bytes_left((uint32_t) s->bytes_left);
+     if (s->bytes_left == 0) {
+-        DEBUG("%s: bytes_left = 0, setting SDMMC_INTMASK_DATA_OVER\n", __func__);
++        trace_dwc_sdmmc_data_over();
+         s->rintsts |= SDMMC_INTMASK_DATA_OVER;
+     }
+ }
+@@ -309,7 +312,7 @@ static size_t dwc_sdmmc_handle_one_desc(DWCSDMMCState *s, hwaddr desc_addr, sdmm
+         if (buf_bytes > sizeof(buf)) {
+             buf_bytes = sizeof(buf);
+         }
+-        DEBUG("%s: %sing %d bytes from descr 0x%08x\n", __func__, is_write?"write":"read", buf_bytes, (uint32_t) desc_addr);
++        trace_dwc_sdmmc_desc_data(is_write ? "write" : "read", buf_bytes, (uint32_t) desc_addr);
+         /* Write to SD bus */
+         if (is_write) {
+             dma_memory_read(&address_space_memory,
+@@ -349,7 +352,7 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
+ 
+     if (s->bytcnt == 0 || s->blksiz == 0 ||
+         !FIELD_EX32(s->ctrl, SDMMC_CTRL, DMAEN)) {
+-        DEBUG("%s: nothing to do (bytcnt=%d, blksiz=%d)\n", __func__, s->bytcnt, s->blksiz);
++        trace_dwc_sdmmc_dma_idle(s->bytcnt, s->blksiz);
+         return;
+     }
+ 
+@@ -358,7 +361,7 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
+     }
+ 
+     while (s->bytcnt > 0) {
+-        DEBUG("%s: handling descriptor @0x%0x, bytcnt=%d\n", __func__, (uint32_t) desc_addr, s->bytcnt);
++        trace_dwc_sdmmc_dma_desc((uint32_t) desc_addr, s->bytcnt);
+         bytes_done = dwc_sdmmc_handle_one_desc(s, desc_addr, &desc, is_write, s->bytcnt);
+         dwc_sdmmc_update_bytes_left(s, bytes_done);
+ 
+@@ -375,7 +378,7 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
+             s->dscaddr = desc_addr;
+         }
+     }
+-    DEBUG("%s: finished with bytcnt=%d at dscaddr=0x%08x\n", __func__, s->bytcnt, s->dscaddr);
++    trace_dwc_sdmmc_dma_end(s->bytcnt, s->dscaddr);
+ }
+ 
+ static void dwc_sdmmc_maybe_autostop(DWCSDMMCState *s)
+@@ -475,6 +478,44 @@ static void dwc_sdmmc_write(void *opaque, hwaddr offset,
+             s->blksiz = value;
+             break;
+ 
++        /* Configuration-only registers: stored, read back, but not acted on. */
++        case A_SDMMC_CLKDIV:
++            s->clkdiv = value;
++            break;
++
++        case A_SDMMC_CLKENA:
++            s->clkena = value;
++            break;
++
++        case A_SDMMC_TMOUT:
++            s->tmout = value;
++            break;
++
++        case A_SDMMC_CTYPE:
++            s->ctype = value;
++            break;
++
++        case A_SDMMC_UHS_REG:
++            s->uhs = value;
++            break;
++
++        case A_SDMMC_BMOD:
++            /* The IDMAC software reset bit is self-clearing */
++            s->bmod = FIELD_DP32(value, SDMMC_BMOD, SWR, 0);
++            break;
++
++        case A_SDMMC_CARDTHRCTL:
++            s->cardthrctl = value;
++            break;
++
++        case A_SDMMC_EMMC_DDR_REG:
++            s->emmc_ddr = value;
++            break;
++
++        case A_SDMMC_CLOCK:
++            s->clock = value;
++            break;
++
+         default:
+             qemu_log_mask(LOG_UNIMP, "%s: write@0x%02x value=0x%08x\n", __func__, (uint32_t) offset, (uint32_t) value);
+     }
+@@ -514,6 +555,29 @@ static uint64_t dwc_sdmmc_read(void *opaque, hwaddr offset,
+             return s->dbaddr;
+         case A_SDMMC_DSCADDR:
+             return s->dscaddr;
++        case A_SDMMC_CDETECT:
++            /* Card detect is active low: a slot reads 0 while a card is in it */
++            return sdbus_get_inserted(&s->sdbus) ? 0 : R_SDMMC_CDETECT_CARDS_MASK;
++        case A_SDMMC_WRTPRT:
++            return sdbus_get_readonly(&s->sdbus) ? R_SDMMC_WRTPRT_CARDS_MASK : 0;
++        case A_SDMMC_CLKDIV:
++            return s->clkdiv;
++        case A_SDMMC_CLKENA:
++            return s->clkena;
++        case A_SDMMC_TMOUT:
++            return s->tmout;
++        case A_SDMMC_CTYPE:
++            return s->ctype;
++        case A_SDMMC_UHS_REG:
++            return s->uhs;
++        case A_SDMMC_BMOD:
++            return s->bmod;
++        case A_SDMMC_CARDTHRCTL:
++            return s->cardthrctl;
++        case A_SDMMC_EMMC_DDR_REG:
++            return s->emmc_ddr;
++        case A_SDMMC_CLOCK:
++            return s->clock;
+         default:
+             qemu_log_mask(LOG_UNIMP, "%s: read@0x%02x\n", __func__, (uint32_t) offset);
+     }
+@@ -565,6 +629,15 @@ static void dwc_sdmmc_reset(DeviceState *dev)
+     s->bytcnt = 0;
+     s->dbaddr = 0;
+     s->pldmnd = 0;
++    s->clkdiv = 0;
++    s->clkena = 0;
++    s->tmout = 0xffffff40;      /* reset value: response 0x40, data 0xffffff */
++    s->ctype = 0;
++    s->uhs = 0;
++    s->bmod = 0;
++    s->cardthrctl = 0;
++    s->emmc_ddr = 0;
++    s->clock = 0;
+     memset(s->resp, 0, sizeof(s->resp));
+ }
+ 
+diff --git a/hw/sd/trace-events b/hw/sd/trace-events
+index db06442..eff11ca 100644
+--- a/hw/sd/trace-events
++++ b/hw/sd/trace-events
+@@ -73,3 +73,15 @@ pl181_data_engine_idle(void) "data engine idle"
+ # aspeed_sdhci.c
+ aspeed_sdhci_read(uint64_t addr, uint32_t size, uint64_t data) "@0x%" PRIx64 " size %u: 0x%" PRIx64
+ aspeed_sdhci_write(uint64_t addr, uint32_t size, uint64_t data) "@0x%" PRIx64 " size %u: 0x%" PRIx64
++
++# dwc_sdmmc.c
++dwc_sdmmc_irq(uint32_t mask, uint32_t sts, uint32_t irq) "mask 0x%08" PRIx32 " sts 0x%08" PRIx32 " irq 0x%08" PRIx32
++dwc_sdmmc_cmd(uint32_t hw_cmd) "hw_cmd 0x%08" PRIx32
++dwc_sdmmc_cmd_error(int rlen) "sdbus command failed, rlen %d"
++dwc_sdmmc_cmd_end(uint32_t rintsts) "rintsts 0x%08" PRIx32
++dwc_sdmmc_bytes_left(uint32_t bytes_left) "bytes_left %" PRIu32
++dwc_sdmmc_data_over(void) "bytes_left 0, setting DATA_OVER"
++dwc_sdmmc_desc_data(const char *dir, uint32_t bytes, uint32_t desc_addr) "%s %" PRIu32 " bytes, descriptor 0x%08" PRIx32
++dwc_sdmmc_dma_idle(uint32_t bytcnt, uint32_t blksiz) "nothing to do, bytcnt %" PRIu32 " blksiz %" PRIu32
++dwc_sdmmc_dma_desc(uint32_t desc_addr, uint32_t bytcnt) "descriptor 0x%08" PRIx32 " bytcnt %" PRIu32
++dwc_sdmmc_dma_end(uint32_t bytcnt, uint32_t dscaddr) "finished with bytcnt %" PRIu32 " at dscaddr 0x%08" PRIx32
+diff --git a/include/hw/sd/dwc_sdmmc.h b/include/hw/sd/dwc_sdmmc.h
+index 4a762e1..2c50a7e 100644
+--- a/include/hw/sd/dwc_sdmmc.h
++++ b/include/hw/sd/dwc_sdmmc.h
+@@ -49,6 +49,18 @@ typedef struct DWCSDMMCState {
+     uint32_t idinten;
+     uint32_t idsts;
+ 
++    /* Configuration-only registers: stored and read back, no effect on the
++     * emulated transfers (clocks, timeouts and bus width are not modelled). */
++    uint32_t clkdiv;
++    uint32_t clkena;
++    uint32_t tmout;
++    uint32_t ctype;
++    uint32_t uhs;
++    uint32_t bmod;
++    uint32_t cardthrctl;
++    uint32_t emmc_ddr;
++    uint32_t clock;
++
+     size_t bytes_left;
+ 
+ 
+-- 
+2.50.1 (Apple Git-155)
+

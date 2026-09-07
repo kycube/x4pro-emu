@@ -5,50 +5,40 @@ Goal of the next phase, in the owner's words: run the **stock Xteink firmware** 
 **world class**. This document is the whole context you need; the previous agent's context is gone.
 Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
 
-## 0. Resume here (end of session 5, 2026-09-06)
+## 0. Resume here (end of session 6, 2026-09-07)
 
-**Work is organised as squads: read §10 before starting anything.** Session 5 ran the protocol with four
-agents in parallel (two Fable for the symbol-less firmware work, two Opus for the mechanical items; one QEMU
-owner building in its own directory); what worked is in §10.2 and in the session-5 entry of `docs/log.md`.
+**Work is organised as squads: read §10 before starting anything.** Sessions 5 and 6 ran the protocol with
+four to five agents in parallel; session 6 balanced cost as the owner asked (one Fable for the model that
+had to be inferred, Opus for the C work, Sonnet for the Python polish against a precise spec) — see the
+session-6 entry of `docs/log.md` for what each tier delivered.
 
-1. `cd /Users/mini/x4pro-emu && make test` — 40 cases (13 CrossPoint incl. record/replay, 8 stock incl. Screen
-   Capture, 19 fast: `nvsedit`, `stockdev`, `.xic`), 7 min 15 s, green at the end of session 5 (one menu tap
-   was dropped by the stock under the full-suite load and passed alone; the stock tests now retry a tap that
-   drew nothing, `tap_repaints`). Needs the built QEMU
-   (`qemu/build/qemu-system-xtensa`, patches 0001–0015), the CrossPoint build (`firmware/.pio/build/x4pro`) and
-   the gitignored `images/` (device dump, `sd-device.img`, ROM ELF); all present on this Mac. If `qemu/` were
-   ever missing: `make setup && make build` (`qemu/.x4pro-patched` marks an applied series; the clone carries
-   the patches as commits on branch `x4pro`). After exporting a patch, `touch qemu/.x4pro-patched`.
-   `qemu/build-s1/` is a second, complete build directory an agent used
-   (`X4EMU_QEMU=/Users/mini/x4pro-emu/qemu/build-s1/qemu-system-xtensa` runs it; `tests/conftest.py` honours
-   the variable): the pattern for QEMU work beside other agents — rebuild it before use, or delete it.
-2. **Session 5 in one line:** S1 closed — the cold-boot "PLL" block was the PHY's DC-offset comparator at
-   0x6000E04C and the real RF PLL lock flag is analog 0x62/0x07 bit 1 (both answered: WiFi fails fast on a
-   cold boot too and no `pll_cal` line remains anywhere), the stock's Home pad is Back via the GT911 key byte
-   at 0x814F, RTC IO is a stored-value overlay, the RTC has `base-epoch`; S2's emulator half closed — the
-   stock's Developer menu is a compile-time stub in 7.2.4 (`tools/stockdev.py` patches one byte in an image
-   copy), Screen Capture writes `.xic` (decoded, `tools/xic2png.py`, 0 px from the panel, `docs/xic.md`); S3
-   green on the first Linux run (12 min); S4's `record` / `replay` / `wait-guest-ms` / `run --deterministic`
-   done (two replays 0 px apart). Everything is committed on `main`; the owner pushes (GitHub Desktop; this
-   Mac has no push credential and no `gh`; the public Actions API answers without a login, the logs do not).
-3. **Device oracle for a stock screen — settled by eye, pixel capture optional.** At the end of session 5
-   the owner looked at the emulator's stock screens (Home, menu, light panel, Settings, All Files, reader,
-   rotated upright) and judged them 1:1 with the device. A pixel-exact capture from the device is now
-   optional; if ever wanted, Screen Capture is unreachable on an unpatched device and there are two ways: (a) the patched stock on the device: `tools/stockdev.py -o
-   images/stock-app-dev.bin images/device/stock-app0-7.2.4.bin`, written into an app slot through a guarded
-   `tools/device.py` path (to add: `flash-crosspoint --firmware F` writes app0 from an arbitrary image after the
-   backup check — make sure it accepts the 5.5 MB stock app and the slot boots it; otadata untouched), then on
-   the device: pull the light panel down, Screen Capture, File Transfer → copy `/screenshots/*.xic` →
-   `tools/xic2png.py capture.xic out.png --diff tests/golden/stock-home.png` (expect the clock and battery to
-   differ, nothing else; every other difference is a model finding). (b) Photos of Home and one more screen,
-   compared by eye. Nothing was written to the device in session 5; §1's device state holds.
-4. Carried over: the 4-level grey `.xic` (levels 4, planes 2, a second appended plane) is inferred from the
-   writer, never observed — a GC refresh of anti-aliased text would produce one; a QMP `pmemsave` of DRAM from
-   the running stock returned 44 of 120 pages zero (`tcbwalk.py` found no task) — pause the VM first, or find
-   out why; `x4emu watch` / `shell` (S4 leftovers); `tools/x4emu_mcp.py` should import the package instead of
-   shelling out and expose `record`/`replay`; D1–D4 (§9).
-5. Next squads, in order (§10.3): S5 fidelity, S6 custom firmware, S7 upstream; S2-device only if a
-   pixel-exact device capture is ever wanted (item 3).
+1. `cd /Users/mini/x4pro-emu && make test` — 44 cases (13 CrossPoint, 4 interface, 8 stock, 19 fast), 6 min 53 s, green at the end of
+   session 6 (one stock tap per full-suite run is read by the firmware and ignored — see the log; the stock
+   tests retry such a tap once). Needs the built QEMU
+   (`qemu/build/qemu-system-xtensa`, patches 0001–0017), the CrossPoint build and the gitignored `images/`;
+   all present on this Mac. If `qemu/` were ever missing: `make setup && make build`. After exporting a
+   patch, `touch qemu/.x4pro-patched`. `qemu/build-s1/` and `qemu/build-s2/` are agents' complete build
+   directories (`X4EMU_QEMU=/Users/mini/x4pro-emu/qemu/build-sN/qemu-system-xtensa`; `tests/conftest.py`
+   honours the variable): the pattern for QEMU work beside other agents — rebuild before use, or delete.
+2. **Session 6 in one line:** a waveform-level grey model (UC8279 LUT interpreter + per-pixel reflectance,
+   `docs/grayscale.md`, off by default behind `waveform-gray`) that finds CrossPoint's anti-aliased text is
+   three-level on this panel because its AA bank has BW == WB; the SDMMC log noise gone (patch 0016, an
+   Espressif file: 484,963 → 1,788 lines per stock boot); 28 window/addressing tests that found and then
+   fixed three SSD1677 addressing gaps; `x4emu shell`, `x4emu watch`, the MCP server in-process with
+   record/replay. Everything committed on `main`; the owner pushes.
+3. **Open and the owner's to answer:** which of the two grey renderings matches the glass (the side-by-side
+   crops in the session-6 log; a photo of a book page on the device would settle `gray-k` too). If the
+   waveform model wins: set `waveform_gray` default true in `epd_core_init`, regenerate
+   `tests/golden/reader-page*.png`, tick the §8 item. If the old table wins: keep the default, record why.
+4. Carried over: **the stock ignores a tap now and then** — `x4emu tap` reports "read by the firmware after
+   0.03s" and no repaint follows (twice in three full-suite runs, always the first or second tap after Home,
+   never when the test runs alone; the tests retry). Unknown whether the device does the same: a question for
+   the parity harness (S6) — if the device never drops one, the emulator's timing around the pre-sent old
+   plane is suspect. The 4-level grey `.xic` (never observed); the QMP `pmemsave` zero pages (pause first); the
+   device oracle for a pixel-exact stock capture (optional, §0.3 of session 5 — needs the patched stock on
+   the device); D1–D4 (§9); the `esp32s3.gpspi +0x38` noise and an IO_MUX overlay (§10.3 S5 row).
+5. Next squads, in order (§10.3): S6 custom firmware (D1–D4) if the owner plans to write firmware, else S7
+   upstream; either way the grey default flip first once the owner answers.
 
 ## 1. Where things stand (2026-09-06)
 
@@ -194,25 +184,28 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
 
 ## 4. Goal B — fidelity ("world class" model quality)
 
-- **Waveform-level grayscale**: today a custom-LUT refresh composes 4 levels from two planes with a
-  fixed table (`state.gray_approx`). Proper: interpret the uploaded LUT tables (SSD1677 0x32 105-byte
-  LUT; UC81xx 0x20..0x24 × 49 bytes, `xtfAa` sets, `prebw_mid` 42-byte settle tables) as frame
-  sequences per (old,new) pixel state and integrate per-pixel voltage-time into a gray value with a
-  simple electrophoretic model. Validate against device photos of AA text. Keep it optional and
-  slow-path.
+- ~~**Waveform-level grayscale**~~ **built** (session 6, behind a flag): the UC8279 LUT interpreter and a
+  per-pixel reflectance model live in `models/epd_core.c` (`docs/grayscale.md`); `waveform-gray` / `gray-k`
+  properties on `x4pro.epd`, `state.gray_model`. Finding: CrossPoint's AA bank has BW == WB, so its text is
+  three-level on this panel; the old table drew the two greys the wrong way round. **Open:** the owner's
+  verdict (a photo of a book page, or the side-by-side crops) decides the default and `gray-k`; the 150 Hz
+  frame period and ghosting in OTP DUs are not modelled; SSD1677's 105-byte LUT keeps the approximation.
 - **Timing table**: per-mode BUSY durations from the device (`Wait complete` lines) for every
   waveform the stock uses; `full-ms/fast-ms/…` properties exist, extend per opcode value.
-- **Partial-window fidelity**: PTL windows, SSD1677 windowed writes with `mirrorX/Y`, and the
-  post-refresh RED/DTM1 resync are modelled; add core tests for windows at the edges and for
-  data-entry modes 0..7.
+- **Partial-window fidelity**: ~~add core tests~~ done (session 6, `models/tests/test_windows.c`: 28 cases,
+  115 checks). Open: the three SSD1677 gaps the tests record as XFAIL — X-decrement windows collapse to one
+  column, the AM bit of 0x11 is ignored, the gate-scan mirror byte is ignored (unreachable by CrossPoint or
+  the stock as configured; an Opus fix flips the XFAILs). The drivers send the RED/DTM1 resync themselves;
+  the core does not copy planes at refresh.
 - ~~**Determinism**~~ **done** (session 5, S4): `x4emu run --deterministic` (`-icount 3` + the RTC pinned by
   `base-epoch`), `x4emu record` / `replay` journals with guest timestamps, `tests/test_replay.py` (two
   replays of one journal, 0 px apart). Reproduced to the pixel, not to the microsecond: the replay's waits
   are host-paced polls of the guest clock; QEMU's own `rr=record` mode would be the bit-exact step if ever
   needed.
-- **SDMMC**: `hw/sd/dwc_sdmmc.c` prints DEBUG lines on every access (Espressif's DEBUG macro is on);
-  a patch that makes it a trace event would clean qemu.log; also model card-detect and 4-bit width
-  if any firmware asks.
+- ~~**SDMMC**~~ done (session 6, patch 0016): the ESP32-specific SDMMC_CLOCK and the other configuration
+  registers are stored, CDETECT/WRTPRT come from the SD bus, DEBUG became `dwc_sdmmc_*` trace events; a
+  stock boot's qemu.log went from 484,963 to 1,788 lines. Next noisiest: `esp32s3.gpspi unhandled read
+  +0x38` (SPI_DMA_INT_CLR, 608 per stock boot) and the `x4pro/iomux` logger (525 reads + 525 writes).
 - **USB Serial/JTAG input**: RX path exists (`OUT_RECV_PKT`); wire `x4emu console-send TEXT` so
   firmware CLIs can be driven (the stock's `boot-preflight … auth=` hints at a service console).
 - **GPIO fidelity**: open-drain, per-pin pull registers from IO_MUX (today idle levels are a board
@@ -223,9 +216,8 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
 ## 5. Goal C — developer experience
 
 - ~~`x4emu` as a package (`pipx install .`), `--json` on every command~~ done (session 4: `x4emu/` package,
-  `tools/x4emu` shim, `docs/x4emu.md`); `record/replay` done (session 5); still open: `x4emu shell` REPL,
-  `x4emu watch` (live PNG refresh on each panel update), and letting `tools/x4emu_mcp.py` import the
-  package instead of shelling out to the shim (and expose `record`/`replay`/`wait-guest-ms`).
+  `tools/x4emu` shim, `docs/x4emu.md`); `record/replay` done (session 5); `x4emu shell`, `x4emu watch` (HTTP live view) and the MCP server
+  importing the package with `emu_record`/`emu_replay`/`emu_wait_guest_ms` done (session 6).
 - Optional SDL window (`configure --enable-sdl`) and a documented `-display sdl` mode; keep
   headless as the default.
 - ~~CI~~ **green** (session 5): the first Linux run of `.github/workflows/ci.yml` passed on b7f5918 in
@@ -316,7 +308,8 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
   stock on the device); the emulator side of that is proven (`tests/test_stock_capture.py`).
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle.
 - [x] Deterministic replay of an input script yields identical screenshots run to run (`tests/test_replay.py`, session 5).
-- [ ] Waveform-aware grayscale validated against device photos.
+- [ ] Waveform-aware grayscale validated against the device (built in session 6 behind `waveform-gray`; the
+  owner's photo or verdict on the crops decides the default).
 - [x] `make setup && make build && make test` verified on Ubuntu 24.04 in CI (first run green, session 5) and on macOS.
 - [x] `x4emu` installable, JSON everywhere, documented in one page (`docs/x4emu.md`, session 4).
 - [ ] Generic S3 models proposed upstream; board file and panel cores stay here.
@@ -440,8 +433,8 @@ edit CLAUDE.md or docs/*.md except [own page]. Time box: [N] minutes. Final repo
 | ~~**S2 oracle**~~ (emulator half) | **done** (session 5): `.xic` decoded and verified, `tools/xic2png.py`, `tools/stockdev.py`, `tests/test_stock_capture.py`, `docs/xic.md` | met in the emulator: a capture equals the panel in 0 px |
 | **S2-device** (optional) | owner + coordinator, only if a pixel-exact capture is wanted: the developer-patched stock into an app slot through a guarded `tools/device.py` path, one capture copied off the card, `xic2png.py --diff` against the emulator's screen (§0.3). The owner already judged the screens 1:1 by eye (session 5) | one stock screen diffed against a device capture with every difference explained |
 | ~~**S3 ci-green**~~ | **done** (session 5): first Linux run green without iteration | met; keep an eye on cache hits and run time |
-| **S4 determinism** | ~~Opus: `--deterministic` · Opus: `record/replay`~~ done (session 5) · Opus: `x4emu watch` and `x4emu shell`, `x4emu_mcp.py` importing the package | met for replay (`tests/test_replay.py`); `watch`/`shell` open |
-| **S5 fidelity** | **Fable**: waveform-level grayscale design and core (§4) · Opus: core tests for edge windows and data-entry modes 0..7 · Opus: per-opcode BUSY timing table from `docs/device/*.log` · Opus: `dwc_sdmmc` DEBUG-to-trace patch | grayscale validated against a device photo of AA text; `qemu.log` free of `dwc_sdmmc_` lines |
+| ~~**S4 determinism**~~ | **done** (sessions 5–6): `--deterministic`, `record/replay`, `watch`, `shell`, the MCP server in-process | met (`tests/test_replay.py`, `tests/test_cli_polish.py`) |
+| **S5 fidelity** | ~~Fable: waveform grey core · Opus: window tests · Opus: `dwc_sdmmc` trace patch~~ done (session 6); the BUSY timing table was skipped (the device logs hold only what the defaults already are); **open**: the grey validation against the glass (owner) and then the default flip + `gray-k`; a follow-up Opus item: the `esp32s3.gpspi +0x38` (SPI_DMA_INT_CLR) unhandled-read noise and an IO_MUX stored-value overlay (525 + 525 logger lines per stock boot) | `qemu.log` free of `dwc_sdmmc_` lines ✓; grayscale validated against the device ☐ |
 | **S6 custom-firmware** (§9 D1–D4) | **Fable**: the `X4>` console protocol design in the custom firmware · Opus: `x4emu console-expect`, `tools/x4target.py`, the `--target emu\|device` pytest · **Fable**: the parity harness and its "explain every difference" assertions · Opus: `--speed` (D3; `wait-guest-ms` done in session 5) | one script runs on emulator and device and the diff is 0 or explained |
 | **S7 upstream** | Opus: split the generic S3 models (GPIO, GP-SPI, I2C, LEDC, USJ, cache DONE, intmatrix/GDMA/SPI fixes) into espressif/qemu-style patches with tests and cover letters · **Fable**: review before submission | patches apply to `esp-develop` HEAD and pass `make test` here |
 
