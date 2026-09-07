@@ -37,8 +37,16 @@ session-6 entry of `docs/log.md` for what each tier delivered.
    plane is suspect. The 4-level grey `.xic` (never observed); the QMP `pmemsave` zero pages (pause first); the
    device oracle for a pixel-exact stock capture (optional, §0.3 of session 5 — needs the patched stock on
    the device); D1–D4 (§9); the `esp32s3.gpspi +0x38` noise and an IO_MUX overlay (§10.3 S5 row).
-5. Next squads, in order (§10.3): S6 custom firmware (D1–D4) if the owner plans to write firmware, else S7
-   upstream; either way the grey default flip first once the owner answers.
+5. **The owner's direction (2026-09-07): enhance the stock firmware** — "making it prettier with better UX" —
+   with the emulator as the workbench. So S6 is re-scoped from "a custom firmware's debug console" to
+   **modding the closed-source stock app**: a survey of its UI layer first (`docs/stock-firmware.md`, a Fable
+   agent started at the end of session 6: binary shape, C++ classes from the mangled names, the drawing and
+   font path, `.xtf`/`.xic` formats, assets, strings, layout constants, risks, tooling), then a patch-manifest
+   tool generalising `tools/stockdev.py` (offset + expected bytes + new bytes, checksum/SHA-256 recompute,
+   apply/check/revert, a boot test), then data-only enhancements (fonts, wallpapers, splash, strings) before
+   code patches. Device rules unchanged: every modification is verified in the emulator, and the device only
+   through the guarded tools after the backup check. S7 upstream stays after that; the grey default flip
+   happens as soon as the owner answers on the crops.
 
 ## 1. Where things stand (2026-09-06)
 
