@@ -395,6 +395,19 @@ verification loop is cheap (patch → `stockdev.refresh_image` → boot → `x4e
 
 ## 9. Tooling
 
+**Installed (session 7):** Ghidra 12.1.3 and openjdk@21 through Homebrew *formulae* (the casks need an
+interactive sudo / do not exist); Ghidra 12 ships the Xtensa processor (`Xtensa:LE:32:default`, prebuilt
+SLEIGH, function-start patterns for `entry`/`retw.n`), so no community module is needed.
+`tools/ghidra_stock.py analyze` builds the project in about a minute and exports 24,781 functions, 435,031
+xrefs, 96,532 call edges and 9,762 strings to `images/ghidra/stock-7.2.4/`; `func`/`callers`/`xrefs` answer
+from the exports in 0.1 s, `decompile ADDR` in ~3 s. First answers: FUN_42021c58 (the boot shell factory)
+constructs **every** page presenter unconditionally and registers 65 pages (`FUN_42024944(router, records,
+0x41)`, records `{u16 id|kind, presenter, view}`): **page 0x08 = ScriptHostPagePresenter, 0x09 =
+AppsPagePresenter** — so the Lua host is registered and constructed, and the block is in the menu builder /
+router gate, not registration (session 7's "not registered" branch was wrong). `xrefs` to an address inside
+the index-addressed toast pack finds nothing by design (the pack base 0x3c4916a4 is what code loads).
+
+
 `tools/appdis.py` (raw objdump windows) plus the Python scans used here got: segments, strings, class
 list, vtables, the i18n packs, the wallpapers, the fonts. It could **not** cheaply answer "which
 function draws the Settings row and where does its y come from": that needs cross-references from
