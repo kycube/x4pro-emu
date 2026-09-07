@@ -519,6 +519,30 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
   page id 0x09 (router 0x420249fc), and the compile-time stub on the standby path that skips mode 2 —
   a Ghidra job (call graph over 5 MB of Xtensa) rather than an `appdis.py` one.
 
+- **The Lua Apps page opened; a script ran (Ghidra, session 7).** The nav-menu builder FUN_4213d834 skips
+  slot 3 in its loop (`if (i == 3) i = 4`) and appends it only behind one byte, `presenter+0xac`, which the
+  stub at 0x4233abe8 writes — and that write itself is skipped when `presenter+140 == 0`, which is why the
+  stub flip did nothing. **Patch P1**: VA 0x4213d873 (app file 0x2ed873), `82 02 ac` (`l8ui a8,a2,172`) →
+  `82 a0 01` (`movi a8,1`): a sixth row **"Lua Apps"** with its own icon, entering page 0x09
+  (AppsPagePresenter). The router registers all 65 pages unconditionally; the tap handler at 0x4213dd2e
+  just navigates to `table_0x3c3dc8b0[slot]`, so repointing a slot's page id (e.g. Cloud Sync 0x0d → 0x08)
+  also enters a page (0x08 shows "No app selected"). **The app list wants a container:** FUN_421c37e8
+  enumerates `/sdcard/XTApps`, builds `%s/%.190s/app.xtapp` and drops any directory where FUN_42066898
+  fails; FUN_420664d8 reads `app.xtapp` = a 0x80-byte header + the plain JSON manifest: `"XTAP"`, u16 1,
+  u16 0x80, u32 flags at 0x0c, u32 manifest offset at 0x10 (0x80), u32 manifest length at 0x14, u32 at
+  0x34 = 0 (unencrypted); **no signature, no DEK**. FUN_4206645c rejects any `permissions` entry other
+  than `sys.battery` / `sys.status` (the earlier `"lockscreen"` permission was the rejection). With that
+  313-byte container beside `index.lua`, the page listed "Hello Lua" and the script ran: rectangle, text,
+  circle, line drawn; `on_load/on_enter/on_tick/on_input/on_draw` fire (a tap arrives as a table);
+  drawing on the global `g` (clear/line/rect/circle/text/image/layer/size), services on `ctx`
+  (invalidate, request_refresh, save, set_tick_rate, `ctx.display.{full_refresh, defer_auto_full,
+  flush_once}`, `ctx.log.info`, `ctx.sys.{millis, battery, …}`, `ctx.system.{set_as_lockscreen_app,
+  quit}`, assets/data/fonts/i18n/input/screen); `print` never reaches the console. The lock screen stays
+  blocked: `set_as_lockscreen_app` raises a dialog and writes `lockscrMode` 2 / `lockscrIdle` 2 /
+  `lockscrLuaApp`, the standby path reads mode 2 (its `form` changes 5 → 1) but constructs no presenter.
+  Tools follow: `tools/stockpatch.py` (named patches), `tools/xtapp.py` (container, install, scaffold),
+  `docs/lua-apps.md`.
+
 ### What this map still lacks
 The icon table and image-blit call signatures (§5), the second string pack's header (§6), the exact
 `.xtf` metric-byte order and the `.hot.xtfp` body (§4), the accessor of the i18n packs, whether the
