@@ -42,9 +42,9 @@ Two different problems, and they must not be confused:
 
 | | UI font (`system_small.xtf` / `system_medium.xtf`) | Reader font |
 |---|---|---|
-| rendering | **1 bpp, no anti-aliasing** — `_rasterise` sets `fontmode='1'` and thresholds at 128 | anti-aliased through the reader's own path; three levels on this panel (`CLAUDE.md`, grayscale note) |
-| size | fixed cells **20x20** and **24x24**, baseline row 17 / 20 | user-chosen, typically 30 px+ |
-| what wins | hinting, big x-height at 14–22 ppem, sturdy stems, tight vertical metrics | shape, colour, texture — the usual book-typography criteria |
+| rendering | **1 bpp, no anti-aliasing** — `_rasterise` sets `fontmode='1'` and thresholds at 128 | **also 1 bpp bitmaps** — corrected 2026-09-07: every reader screenshot uses only levels {0,255}, and the reader loads the same `.xtf` cells (or a raw `.bin` grid). There is no outline rendering anywhere in this firmware (`docs/reading-fonts.md`) |
+| size | fixed cells **20x20** and **24x24**, baseline row 17 / 20 | **the cell is the size** — the reader has no font-size control at all; a bigger typeface means shipping a bigger cell (32x32 works) |
+| what wins | hinting, big x-height at 14–22 ppem, sturdy stems, tight vertical metrics | the same things, one cell size up: at 32 px there is more room, but it is still 1 bpp and unhinted faces still suffer |
 
 Measured consequences of `fit_size()` (tools/xtfont.py:361) that shape every recommendation:
 
