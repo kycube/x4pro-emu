@@ -253,6 +253,16 @@ u32 1|6, u32 xtf_size, 8-byte xtf hash, u32, u32 2, u16 1, u16 2, u8 cell_w, u8 
 size, u16 1, 32-byte SHA-256 of the `.xtf` (= the `asset_id`), 32-byte set hash …` — a resident hot
 set of pre-selected glyphs.
 
+**Correction (tools/xtfont.py, session 7):** the 4 metric bytes are `advance_x, advance_y, x_offset,
+y_offset` (offsets int8; rendering "Bookshelf" from `system_medium.xtf` reproduces the Home title in 0 of
+2260 pixels); header 0x14 is the range *count* (416), 0x2c the glyph-data *length* (`glyph_count ×
+record_size`) and the file ends there (no tail section); 0x06 (0x140), 0x08 (3), 0x0e/0x0f, the line height,
+descent and the placement baseline (17/20) are copied per cell. The `.hot.xtfp` is **not** required (a hot-less
+package of the card's own `.xtf` bytes switches; the app writes `selection.config` and the `.base.xtfp`
+caches itself and restarts). A generated `.xtf` is listed correctly but **refused at load** ("External font
+failed to load", "Failed to switch system font") — the 8-byte word at header 0x30 (also in the `.xtfp`
+header) is the remaining suspect; an agent is tracing the loader.
+
 **Is adding a font data-only? Yes by design, with a converter to write.** The path is Settings →
 System Font → a `.xtfont` ZIP in `XTCache/system_font_downloads/` (or the installed directory under
 `XTData/system_fonts/<id>/` + `selection.config`). A converted TTF needs: two `.xtf` files rendered at
