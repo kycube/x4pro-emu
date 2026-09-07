@@ -31,7 +31,9 @@ into those cells, write the two files, the manifest and the package, and the sto
     0x2c  u32 glyph data bytes     glyph_count * record size -- the file ends there, so the survey's
                                    "tail section offset (size 0x1c00)" is this length, and the 0x1c00
                                    is the *gap* in front of the records, not a trailer
-    0x30  8-byte hash                               (COPIED FORM: we write sha256(body)[:8])
+    0x30  u32 crc32 of the glyph records            zlib CRC-32 of `data[glyph_offset:+glyph_bytes]`
+    0x34  u32 crc32 of the header so far            zlib CRC-32 of `data[0:0x34]` -- the 52 bytes in
+                                                    front of this field, so it covers 0x30 as well
     0x38  u32 advance table offset, u32 count       0x1a40, 95  (u8 advance_x for U+0020..U+007E)
 
 Range table entries are 16 bytes, sorted by codepoint: `u32 first_codepoint, u32 count, u32
@@ -61,7 +63,7 @@ and the stock generates its own `.base.xtfp` cache on the card.
 `Xtf.from_bytes(data)`, `Xtf.glyph(cp)`, `Xtf.render(text)`, `build_xtf`, `build_package` and
 `install_package` are importable; `tests/test_xtfont.py` is the check.
 """
-import argparse, hashlib, io, json, os, shutil, struct, subprocess, sys, zipfile
+import argparse, hashlib, io, json, os, shutil, struct, subprocess, sys, zipfile, zlib
 
 MAGIC = b'XTF0'
 HEADER = 0x40
@@ -452,7 +454,12 @@ def build_xtf(ttf_path, cell, codepoints, size=None):
     struct.pack_into('<hh', head, 0x10, prof['line_height'], prof['descent'])
     struct.pack_into('<7I', head, 0x14, len(entries), len(records), range_offset, 0, glyph_offset,
                      record_size, glyph_bytes)
-    head[0x30:0x38] = hashlib.sha256(bytes(body)).digest()[:8]      # form copied, value ours
+    # The two CRC-32s the stock's header parser (app VA 0x4210db20) checks. 0x30 is the zlib CRC-32
+    # of the glyph records alone; 0x34 is the zlib CRC-32 of the 52 header bytes in front of it,
+    # compared at 0x4210e553 (the parser memcpy's the header, zeroes 0x30..0x37 and CRC-32s it for
+    # its own cache key, so only these two words must be right). Both are little-endian.
+    struct.pack_into('<I', head, 0x30, zlib.crc32(bytes(body[glyph_offset - HEADER:])) & 0xffffffff)
+    struct.pack_into('<I', head, 0x34, zlib.crc32(bytes(head[:0x34])) & 0xffffffff)
     struct.pack_into('<II', head, 0x38, advance_offset, ASCII_COUNT)
     return bytes(head) + bytes(body), {'size_px': size, 'glyph_count': len(records),
                                        'ranges': len(entries)}

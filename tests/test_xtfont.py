@@ -11,22 +11,26 @@ stock's Home title in `tests/data/stock-home-panel.png` in **every one of its 22
 total advance 115). The survey's other reading -- byte 1 as a per-glyph height -- cannot hold: `.` and
 `B` would then be the same height.
 
-**What the stock does with a built package** (`test_stock_font_package_installs_and_renders`, and the
-session's scratch boots ft1..ft5): a package with no `.hot.xtfp` is *not* refused -- switching to a
-hot-less package whose `.xtf` files are the card's own bytes succeeds, the app writes its own
-`system_{small,medium}.base.xtfp` next to them and rewrites `selection.config`, so `hot` is optional
-exactly as `required_features` suggested. Our *generated* `.xtf` is a different matter: the stock
-lists it correctly in Settings -> System Font (display name, style and "S/M 1169/1169 glyph" read out
-of the package, so the manifest and both files are opened and their glyph counts trusted) but
-switching to it ends in the toast "Failed to switch system font", and a boot with
-`selection.config` already pointing at it falls back to the built-in base font without a word in the
-console. Padding the range/advance tables out to the card font's own offsets (0x1a40 / 0x1c00) and
-covering 35635 codepoints from Arial Unicode both failed the same way, so it is neither the table
-layout nor the coverage. The remaining untested difference is the 8-byte hash at header 0x30, whose
-algorithm is unknown. Until that is pinned, the emulator test asserts what is reproducible: the
-package installs, the stock boots clean with it on the card, and its System Font page lists it.
+**The 8-byte word at header 0x30 is two CRC-32s, and it is what used to fail.**
+`test_header_crc32_words` pins the rule against the card's own pair: `0x30` is the zlib CRC-32 of the
+glyph records (`data[glyph_offset : glyph_offset + glyph_bytes]`) and `0x34` the zlib CRC-32 of the 52
+header bytes in front of it, `data[0:0x34]`. The stock's header parser (app VA 0x4210db20) checks the
+second one at 0x4210e553 -- it CRC-32s 52 bytes of the header and compares them with the `0x34` word --
+and refuses the font when they differ, which is why every earlier generated package (which wrote
+`sha256(body)[:8]` there) ended in "Failed to switch system font".
+
+**What the stock does with a built package** (`test_stock_font_package_installs_and_renders`): a
+package with no `.hot.xtfp` is not refused -- with the two CRC-32s right, Settings -> System Font
+lists it (display name, style and "S/M 1169/1169 glyph" read out of the package), selecting it shows
+"Applying system font. The device will restart automatically...", and after the restart the whole UI
+is drawn in the converted TTF. The app writes its own `system_{small,medium}.base.xtfp` next to the
+`.xtf` files and rewrites `selection.config` and `.cache/system-font-boot-plan.xbgp`, so `hot` is
+optional exactly as `required_features` suggested. **Writing `selection.config` from the host is not
+enough**: a boot whose `selection.config` already names a package with no `.base.xtfp` sidecars falls
+back to the built-in base font silently (no console line, no toast, and deleting the stale boot plan
+does not change it), so the test switches through the UI the way a user would.
 """
-import hashlib, json, os, shutil, struct, subprocess, sys, zipfile
+import hashlib, json, os, shutil, struct, subprocess, sys, zipfile, zlib
 import pytest
 from conftest import ROOT, PY, x4emu
 
@@ -100,6 +104,31 @@ def test_card_font_header(path, cell, advance_y, record_size):
     assert sum(r[1] for r in f.ranges) == GLYPH_COUNT
     assert all(r[3] == 0 and r[4] == r[1] for r in f.ranges)     # the u16 pair: 0, then the count
     assert f.ranges[0][:3] == (0x20, 95, 0)                      # ASCII first, at glyph index 0
+
+
+def header_crc32s(data):
+    """The two words the stock checks: (crc32 of the glyph records, crc32 of `data[0:0x34]`)."""
+    glyph_offset, _record_size, glyph_bytes = struct.unpack_from('<III', data, 0x24)
+    return (zlib.crc32(data[glyph_offset:glyph_offset + glyph_bytes]) & 0xffffffff,
+            zlib.crc32(data[:0x34]) & 0xffffffff)
+
+
+@pytest.mark.parametrize('path,stored', [(SMALL, (0x57ddf6f8, 0xffe29784)),
+                                         (MEDIUM, (0x1f64e27f, 0x09897cb4))])
+def test_header_crc32_words(path, stored):
+    """The 8 bytes at 0x30 are two little-endian CRC-32s, not a hash: 0x30 covers the glyph records
+    and 0x34 covers the 52 header bytes in front of it (so it signs the 0x30 word too). The stock's
+    header parser at app VA 0x4210db20 recomputes the 0x34 one over 52 bytes at 0x4210e553 and
+    refuses the file when it differs; `build_xtf` writes both."""
+    d = card_font(path).data
+    assert struct.unpack_from('<II', d, 0x30) == stored == header_crc32s(d)
+
+
+def test_build_writes_both_header_crc32s(built):
+    for _, filename, _ in xtfont.ROLES:
+        d = xtfont.Xtf.open(os.path.join(built['dir'], filename)).data
+        assert struct.unpack_from('<II', d, 0x30) == header_crc32s(d)
+        assert struct.unpack_from('<I', d, 0x30)[0] != 0        # 0 means "unsigned" to the stock
 
 
 def test_card_font_space_record_bytes():
@@ -238,13 +267,29 @@ def test_install_puts_the_package_on_a_card(built, tmp_path):
 STOCK_GOLDEN = os.path.join(ROOT, 'tests', 'golden', 'stock-home.png')
 
 
+CARD_SELECTION = os.path.join(CARD_FONT, '..', 'selection.config')
+
+
+def mtype(img, path):
+    return subprocess.run(['mtype', '-i', f'{img}@@{xtfont.PART_OFFSET}', path],
+                          capture_output=True, text=True).stdout
+
+
+def mdir(img, path):
+    return subprocess.run(['mdir', '-i', f'{img}@@{xtfont.PART_OFFSET}', path],
+                          capture_output=True, text=True).stdout
+
+
 @pytest.fixture
 def stock_font(tmp_path, request, built, stock_card):
-    """`test_stock.stock` with the built package installed `--direct` on the card copy, so the
-    stock boots with `selection.config` already pointing at it."""
+    """`test_stock.stock` with the built package unpacked into `XTData/system_fonts/test-font/` but
+    `selection.config` left on the card's own `misans-demibold`, so the stock boots in the font the
+    golden was taken with and the test can switch to the built one through the UI. (Pointing
+    `selection.config` at a package with no `.base.xtfp` sidecars from the host does nothing: the
+    stock falls back to the built-in base font silently.)"""
     if not os.path.exists(test_stock.DUMP):
         pytest.skip('device dump not available')
-    name = 'ft-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')
+    name = 'fh-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(test_stock.DUMP, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8',
@@ -252,32 +297,41 @@ def stock_font(tmp_path, request, built, stock_card):
     sd = tmp_path / 'sd.img'
     shutil.copyfile(stock_card, sd)
     xtfont.install_package(str(sd), built['report']['package'], direct=True)
+    subprocess.run(['mcopy', '-o', '-i', f'{sd}@@{xtfont.PART_OFFSET}', CARD_SELECTION,
+                    '::/XTData/system_fonts/selection.config'], check=True)
+    assert 'font_id=misans-demibold' in mtype(sd, '::/XTData/system_fonts/selection.config')
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power')
-    yield name, tmp_path
+    yield name, tmp_path, sd
     x4emu(name, 'stop', check=False)
 
 
-def test_stock_font_package_installs_and_renders(stock_font):
-    """The stock boots with the built package selected on the card, refuses it, and says so on the
-    glass: "External font failed to load. Using built-in font." is a **toast**, not a console line
-    (that is why the console is asserted clean and the toast is looked for in the Home screenshot).
-    The Home title is therefore still the built-in base font -- the same MiSans design as the card
-    package, so the title alone cannot tell the two apart; the toast can. Settings -> System Font
-    still lists the package with the name, style and glyph counts read out of it, so the manifest
-    and both `.xtf` files parse. Once a generated `.xtf` is accepted, `toast` below goes to 0 and
-    the Home comparison against tests/golden/stock-home.png becomes the assertion to flip."""
-    from test_stock import boot_to_home, masked_diff, state, tap_repaints
-    name, tmp = stock_font
+def title_ink(png):
+    """The bounding box of the Home title's ink, in upright coordinates (the title band is rows
+    60..104, well clear of the status bar above it and the empty shelf below)."""
+    up = Image.open(png).transpose(Image.Transpose.ROTATE_270).convert('1')
+    band = up.crop((0, 60, 300, 105)).point(lambda v: 255 - v)
+    return band.getbbox()
+
+
+def test_stock_font_package_installs_and_renders(stock_font, built):
+    """The whole point: a `.xtf` pair rasterised from a host TTF is **accepted** by the stock.
+
+    The card boots on its own `misans-demibold` (Home is the golden), the test walks Settings ->
+    System Font, taps the built package's row, and the stock answers with "Applying system font. The
+    device will restart automatically...", reboots, and comes back with every string on Home drawn in
+    the converted TTF -- laid out so exactly that the Home title is the built `system_medium.xtf`'s
+    own "Bookshelf" bitmap, pixel for pixel. It also writes the two `.base.xtfp` glyph caches next to
+    the `.xtf` files and moves `selection.config` onto the package, which is what the boot path needs
+    (a `selection.config` written from the host, with no caches beside it, is ignored). "External
+    font failed to load" never appears; before the two header CRC-32s were written it always did."""
+    from test_stock import boot_to_home, masked_diff, state, tap_repaints, wait_for
+    name, tmp, sd = stock_font
     st = boot_to_home(name)
     assert st['epd_unknown_cmds'] == 0, st
-    console = x4emu(name, 'log').stdout
-    assert 'External font failed to load' not in console, 'the toast reached the console after all'
     home = tmp / 'home.png'
     x4emu(name, 'screenshot', str(home))
-    toast = masked_diff(home, STOCK_GOLDEN)
-    assert toast > 4000, ('Home matches the golden: the "External font failed to load" toast is '
-                          'gone, so the generated .xtf may now be accepted -- check the screenshot')
+    assert masked_diff(home, STOCK_GOLDEN) == 0, 'the card font boot no longer matches the golden'
     # Settings -> System Font: the stock parsed manifest.json and both .xtf files to draw the row
     tap_repaints(name, 88, 38)                                  # nav menu
     x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '30')
@@ -290,5 +344,38 @@ def test_stock_font_package_installs_and_renders(stock_font):
     page = tmp / 'system-font.png'
     x4emu(name, 'screenshot', str(page))
     assert masked_diff(page, settings) > 5000, 'the System Font page never opened'
+    # row 1 is "Built-in Base Font", then the packages by display name: MiSans Demibold, Test Font
+    before = state(name)
+    tap_repaints(name, 340, 239, timeout=40)                    # the third row: Test Font
+    x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '40')
+    applying = tmp / 'applying.png'
+    x4emu(name, 'screenshot', str(applying))
+    assert masked_diff(applying, page) > 12000, \
+        'tapping the package row did not open "Applying system font" (wrong row?)'
+    # the stock restarts itself to bring the new font up; the panel is re-initialised
+    st = wait_for(lambda: (s := state(name))['epd_resets'] > before['epd_resets'] and s, 240,
+                  'the restart after the font switch')
+    wait_for(lambda: state(name)['refresh_count'] >= st['refresh_count'] + 2, 240, 'Home repainted')
+    x4emu(name, 'wait-quiet', '--seconds', '3', '--timeout', '60')
+    switched = tmp / 'home-switched.png'
+    x4emu(name, 'screenshot', str(switched))
     assert state(name)['epd_unknown_cmds'] == 0
     assert 'External font failed to load' not in x4emu(name, 'log').stdout
+    # the built font is on the glass: Home is no longer the golden, and the title is our bitmap
+    assert masked_diff(switched, STOCK_GOLDEN) > 4000, 'Home is still drawn in the card font'
+    # "Bookshelf" is now set in the built font: same left edge, the built font's own width and cap
+    # height, not the card font's (which the golden pins at 113x20 starting at upright (22, 73))
+    built_bb = xtfont.Xtf.open(os.path.join(built['dir'], 'system_medium.xtf')) \
+        .render('Bookshelf', pad=0)[1]['ink_bbox']
+    want = (built_bb[2] - built_bb[0] + 1, built_bb[3] - built_bb[1] + 1)
+    got_bb = title_ink(switched)
+    got = (got_bb[2] - got_bb[0], got_bb[3] - got_bb[1])
+    assert got_bb[0] == 20 + built_bb[0], (got_bb, built_bb)     # the pen still starts at x=20
+    assert abs(got[0] - want[0]) <= 3 and got[1] == want[1], \
+        f'the Home title is {got[0]}x{got[1]} px of ink, the built font draws {want[0]}x{want[1]}'
+    assert abs(got[0] - 113) > 4 and (got[0], got[1]) != (113, 20), \
+        'the Home title is still the card font\'s 113x20 "Bookshelf"'
+    # the card carries what only a successful load can write
+    listing = mdir(sd, '::/XTData/system_fonts/test-font')
+    assert 'system_small.base.xtfp' in listing and 'system_medium.base.xtfp' in listing, listing
+    assert 'font_id=test-font' in mtype(sd, '::/XTData/system_fonts/selection.config')
