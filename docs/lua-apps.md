@@ -242,6 +242,54 @@ with
 
 That is `tests/data/hello-app`, and `tests/golden/stock-lua-hello.png` is what it paints.
 
+## 4b. Measuring text (there is no `g:textwidth`)
+
+`g` cannot measure a string, so right-aligned and centred text has to be placed from a table of
+advance widths. Guessing does not work: `apps/status-panels` first shipped with an estimate that was
+**15 px short** for `Tue 17 Mar`, and the date ran past the right margin — which is exactly what the
+owner saw.
+
+The measurement needs no host support, only arithmetic. The ink width of *n* copies of a character
+is `(n-1) * advance + ink_width(c)`, so two cells per character are enough:
+
+```
+advance(c) = ( ink_width("cccc") - ink_width("cc") ) / 2
+```
+
+`apps/probe-metrics/` draws that: page 1 is a 6 x 32 grid with both cells for all 95 printable ASCII
+characters, page 2 handles the space (no ink of its own, so it is bracketed — `"|  |"` against
+`"|    |"`), the characters too wide for a grid cell (`W`) or too narrow to separate (`i`, `j`), and
+six validation strings. Screenshot each page, un-rotate it (`Image.rotate(-90, expand=True)`), and
+read the ink extents per cell.
+
+**The table, as measured on the stock's own rendering** (2026-09-07; it agrees with the advances in
+the device's `system_small.xtf`, which is a useful cross-check — `tools/xtfont.py` can print those):
+
+| advance | characters |
+|---|---|
+| 4 | `'` |
+| 5 | `.` `:` `I` `i` `l` \| |
+| 6 | space `,` `;` `` ` `` `j` |
+| 7 | `(` `)` `[` `]` `{` `}` |
+| 8 | `"` `\` `f` `r` `t` |
+| 9 | `*` `-` `/` `1` `^` |
+| 10 | `?` `J` `_` `s` `z` |
+| 11 | `7` `a` `c` `k` `v` `x` `y` `~` |
+| 12 | `!` `$` `2` `3` `4` `5` `9` `E` `F` `L` `b` `d` `e` `g` `h` `n` `o` `p` `q` `u` |
+| 13 | `+` `0` `6` `8` `<` `=` `>` `P` `R` `S` `T` `Z` |
+| 14 | `A` `B` `C` `K` `V` `X` `Y` |
+| 15 | `#` `&` `D` `G` `H` `N` `U` |
+| 16 | `O` `Q` |
+| 17 | `%` `@` `w` |
+| 18 | `M` `m` |
+| 20 | `W` |
+
+Validated against six real strings: the sum of advances lands **1–2 px above** the measured ink
+width every time, which is the side bearings and exactly what should happen. `apps/status-panels`
+carries this table as `ADV_BY_WIDTH` and a `textw()` over it; copy both into any app that aligns
+text. The one caveat: this is the face the host draws Lua text with today. If a future firmware or a
+different installed system font changes it, re-run `apps/probe-metrics` — that is what it is for.
+
 ## 5. What is not confirmed
 
 Shorter than it was — `apps/probe` (§7) answered the API shape, the `on_input` event and the
@@ -308,14 +356,16 @@ image byte for byte.
 
 ## 7. The apps in `apps/`
 
-Three app directories live in the repo, each one `manifest.json` + `index.lua`, ready for
-`tools/xtapp.py install`.
+Four app directories live in the repo, each one `manifest.json` + `index.lua`, ready for
+`tools/xtapp.py install`. `app_id` and the directory name are kept the same, because `install` uses
+`app_id` for the card directory and a mismatch is confusing on the device.
 
 | directory | `app_id` | what it is |
 |---|---|---|
 | `apps/probe/` | `probe` | the API dump §4 was written from: it enumerates `g`, every `ctx` sub-table and every `ctx.sys` getter, calls the ones that cannot change state, catches the error messages (a bad call's *"bad argument #2 to 'handle'"* is the only documentation the host has), and paints the lot one page per tap. The last two pages are the live `on_input` event and a set of drawing experiments. Nine pages; tap anywhere to advance |
-| `apps/status-typographic/` | `status1` | **Status, variant A.** Airy: the weekday alone at the top, a hand-drawn seven-segment `HH:MM` filling the upper third, the date spelled out under it, a battery percentage with a gauge across the page, then four quiet label/value rows (uptime, network, radio, Lua heap). White space does the work; one hairline per section |
-| `apps/status-panels/` | `status2` | **Status, variant B.** The same facts as framed cards: a solid header band, a clock card, a battery card with a wide gauge, a 2 × 2 grid of stat cards and a footer band. Denser, more "instrument panel" |
+| `apps/status-typographic/` | `status-typographic` | **Status, variant A.** Airy: the weekday alone at the top, a hand-drawn seven-segment `HH:MM` filling the upper third, the date spelled out under it, a battery percentage with a gauge across the page, then four quiet label/value rows (uptime, network, radio, Lua heap). White space does the work; one hairline per section |
+| `apps/status-panels/` | `status-panels` | **Status, variant B, the owner's pick.** The same facts as framed cards: a solid header band, a clock card, a battery card with a wide gauge, a 2 × 2 grid of stat cards and a footer band. Denser, more "instrument panel". Its geometry is a three-number scale — page margin 24, card padding 18, gap between cards 16 — and every right-aligned string is placed with the measured advance table (§4b) |
+| `apps/probe-metrics/` | `probe-metrics` | the sheet §4b is measured from: two cells per printable character, plus the space, the awkward characters and six validation strings. Tap to change page. Re-run it if a firmware update or a new system font changes the face |
 
 Both status apps are readable on purpose — the layout is a list of `g:` calls with the coordinates
 in plain sight, so retuning one is editing numbers. Both carry the same two workarounds, commented
@@ -328,8 +378,8 @@ clock is seven-segment digits made of those fills because there is only one text
 .venv/bin/python tools/xtapp.py install /path/to/sd.img apps/status-typographic
 ```
 
-That writes `/XTApps/status1/{app.xtapp, manifest.json, index.lua}` and nothing else. On the device
-the same three files are simply copied into `/XTApps/status1/` on the card — `/sdcard/XTApps` is
+That writes `/XTApps/status-typographic/{app.xtapp, manifest.json, index.lua}` and nothing else. On
+the device the same three files are simply copied into `/XTApps/<app_id>/` on the card — `/sdcard/XTApps` is
 hidden from All Files, so the card reader is the way in. Two apps installed side by side show as two
 cards on the Lua Apps page; the app list's card coordinates in the emulator are `tap 225 355` (left)
 and `tap 225 125` (right).

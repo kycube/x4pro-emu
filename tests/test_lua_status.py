@@ -40,8 +40,8 @@ from test_stock import (DUMP, PANEL_W, STATUS_BAR_COLS, boot_to_home,          #
                         settle, state, stock_card, tap)                        # noqa: F401
 
 APPS = os.path.join(ROOT, 'apps')
-TYPO = os.path.join(APPS, 'status-typographic')      # -> /XTApps/status1
-PANELS = os.path.join(APPS, 'status-panels')         # -> /XTApps/status2
+TYPO = os.path.join(APPS, 'status-typographic')      # -> /XTApps/status-typographic
+PANELS = os.path.join(APPS, 'status-panels')         # -> /XTApps/status-panels
 
 HAMBURGER = (88, 38)                 # the nav-menu icon on Home
 LUA_APPS_ROW = (585, 150)            # the sixth row, the one the patch adds
@@ -56,8 +56,8 @@ BASE_EPOCH = 1773758460
 # landscape columns == portrait rows; see the module docstring
 CLOCK_A = (150, 292)                 # apps/status-typographic: the seven-segment HH:MM
 LIVE_A = [CLOCK_A, (586, 620), (718, 752)]        # + the uptime row and the Lua heap row
-CLOCK_B = (130, 252)                 # apps/status-panels: the clock card's digits
-LIVE_B = [CLOCK_B, (524, 562)]                    # + the UPTIME / LUA HEAP card values (one row)
+CLOCK_B = (128, 232)                 # apps/status-panels: the clock card's digits
+LIVE_B = [CLOCK_B, (506, 528)]                    # + the UPTIME / LUA HEAP card values (one row)
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ def stock_status(tmp_path, request, stock_card):
                        check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
     shutil.copyfile(stock_card, sd)
-    for app, where in ((TYPO, '/XTApps/status1'), (PANELS, '/XTApps/status2')):
+    for app, where in ((TYPO, '/XTApps/status-typographic'), (PANELS, '/XTApps/status-panels')):
         rep = xtapp.install(str(sd), app)
         assert rep['card_dir'] == where and 'app.xtapp' in rep['files'], rep
     x4emu(name, 'stop', check=False)

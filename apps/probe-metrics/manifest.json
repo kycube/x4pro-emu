@@ -1,0 +1,12 @@
+{
+  "app_id": "probe-metrics",
+  "display_name": "Font metrics",
+  "version": "1.0",
+  "author": "x4pro-emu",
+  "description": "Draws the sheet that measures the advance width of every printable ASCII character in the host's font.",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ]
+}
