@@ -1,6 +1,8 @@
 """The commands themselves. Every one of them prints its human line through `out.line` and its
 machine fields through `out.set`/`out.obj`, so `--json` changes the presentation and nothing else.
 The human strings are contracts: tests/*.py and tools/x4emu_mcp.py parse some of them."""
+import argparse
+import functools
 import json
 import os
 import re
@@ -11,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from .output import out
+from .output import out, suspended
 from .paths import idir, qemu, root
 from .qmp import BOARD, INPUT, QMP, connect, pid_alive
 
@@ -25,6 +27,88 @@ PANEL_W, PANEL_H = 800, 480
 # The preflight's own `hold=…ms decision=…` console line says what the guest measured.
 BOOT_HOLD_POWER_MS = 3000
 
+# `run --deterministic` is `-icount 3` (guest time follows the instruction count) plus a fixed RTC
+# seed. The seed is not available yet: the BM8563/PCF8563 model still starts from HOST wall time and
+# the `base-epoch` QOM property on driver `x4pro.pcf8563` is being added. Set this to the epoch
+# second to pin the clock to (e.g. 1767225600 = 2026-01-01T00:00:00Z) once that property exists —
+# `cmd_run` then passes `-global driver=x4pro.pcf8563,property=base-epoch,value=N`. Until then
+# `--deterministic` leaves the RTC on host time, which only matters for firmware that draws a clock
+# (CrossPoint's Home screen does not).
+DETERMINISTIC_RTC_EPOCH = None
+
+
+# ------------------------------------------------- record / replay of input commands
+def guest_ms(q):
+    """Guest virtual time in milliseconds (`state.uptime_us`, QEMU's virtual clock)."""
+    return json.loads(q.qom_get(BOARD, 'state'))['uptime_us'] // 1000
+
+
+def record_marker(name):
+    """`.x4emu/NAME/record.json` — its existence is what "this instance is recording" means."""
+    return os.path.join(idir(name), 'record.json')
+
+
+def journal_file(name):
+    """The journal `x4emu record` is appending this instance's inputs to, or None."""
+    try:
+        with open(record_marker(name)) as f:
+            return json.load(f)['file']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def journal_append(path, t_ms, cmd, args):
+    with open(path, 'a') as f:
+        f.write(json.dumps({'t_ms': t_ms, 'cmd': cmd, 'args': args}) + '\n')
+
+
+JOURNAL = {}      # journal command name -> (the undecorated function, its argument names)
+
+
+def records(argnames, also=()):
+    """Mark a command as an *input* command: one journal line per call while the instance records.
+
+    The line carries the guest time the command was issued at (before it waits for anything), its
+    name, and the arguments exactly as it received them, so `x4emu replay` can call the same
+    function with the same arguments. The recording is invisible in human mode (`--json` gains
+    `"recorded": true`); with no recording running it costs one failed open()."""
+    def deco(fn):
+        keys = tuple(argnames.split())
+        name = fn.__name__[4:].replace('_', '-')          # cmd_console_send -> console-send
+        for n in (name,) + tuple(also):
+            JOURNAL[n] = (fn, keys)
+
+        @functools.wraps(fn)
+        def wrapped(a):
+            path = journal_file(a.name)
+            t_ms = None
+            if path:
+                try:
+                    q = connect(a.name)
+                    t_ms = guest_ms(q)
+                    q.close()
+                except (OSError, EOFError, RuntimeError, ValueError, KeyError):
+                    pass                                   # journal the step without a guest time
+            rc = fn(a)
+            if path:
+                journal_append(path, t_ms, getattr(a, 'cmd', None) or name,
+                               {k: getattr(a, k, None) for k in keys})
+                out.set(recorded=True)
+            return rc
+        return wrapped
+    return deco
+
+
+def reconnect(name, tries=10):
+    """`connect`, retried: QEMU's QMP chardev serves one client at a time, and after a close it can
+    need a moment before it accepts the next connection (replay opens one per step)."""
+    for _ in range(tries - 1):
+        try:
+            return connect(name)
+        except (OSError, EOFError):
+            time.sleep(0.2)
+    return connect(name)
+
 
 # ---------------------------------------------------------------- lifecycle
 def cmd_run(a):
@@ -32,7 +116,9 @@ def cmd_run(a):
     if pid_alive(a.name):
         sys.exit(f'instance "{a.name}" already running (pid {pid_alive(a.name)}); `x4emu stop` first')
     os.makedirs(d, exist_ok=True)
-    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log'):
+    # record.json goes too: a recording belongs to the instance that was booted, so a new boot
+    # never appends to the journal of the last one (`x4emu record` comes after `run`).
+    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'record.json'):
         try: os.remove(os.path.join(d, f))
         except FileNotFoundError: pass
     flash = os.path.abspath(a.flash)
@@ -70,8 +156,13 @@ def cmd_run(a):
         if a.gdb:
             sys.exit('--boot-hold-power cannot be combined with --gdb (gdb owns the halted start)')
         cmd += ['-S']            # start halted, press power, then `cont`: see boot_hold()
-    if a.icount:
-        cmd += ['-icount', a.icount]
+    icount = a.icount or ('3' if getattr(a, 'deterministic', False) else None)
+    if icount:
+        cmd += ['-icount', icount]
+    if getattr(a, 'deterministic', False) and DETERMINISTIC_RTC_EPOCH is not None:
+        # Hook, disabled until the property lands (see DETERMINISTIC_RTC_EPOCH): pin the RTC so the
+        # guest's wall clock is the same on every run instead of following the host's.
+        cmd += ['-global', f'driver=x4pro.pcf8563,property=base-epoch,value={DETERMINISTIC_RTC_EPOCH}']
     for k, v in (('panel', a.panel), ('fast-epd', 'on' if a.fast_epd else None),
                  ('trace-epd', os.path.abspath(a.trace_epd) if a.trace_epd else None)):
         if v:
@@ -153,6 +244,7 @@ def cmd_stop(a):
     out.set(name=a.name, pid=pid, stopped=True, running=False)
 
 
+@records('')
 def cmd_reset(a):
     q = connect(a.name); q.cmd('system_reset')
     out.line('reset')
@@ -217,6 +309,7 @@ def cmd_log(a):
     out.set(lines=collected)
 
 
+@records('text newline')
 def cmd_console_send(a):
     """Send text into the guest's USB Serial/JTAG console (RX path of the USJ model)."""
     p = os.path.join(idir(a.name), 'console.sock')
@@ -360,6 +453,7 @@ def after_input(q, n0, a):
         sys.exit(f'no refresh within {a.wait}s after the input (count still {n0})')
 
 
+@records('button ms wait quiet', also=('hold',))
 def cmd_press(a):
     q = connect(a.name)
     if a.button == 'power' and a.ms < 1500:
@@ -388,6 +482,7 @@ def to_gt911(x, y):
     return (PANEL_H - 1 - y), x
 
 
+@records('buttons ms wait quiet')
 def cmd_chord(a):
     """Press several buttons at once (e.g. power right = CrossPoint's screenshot chord)."""
     q = connect(a.name)
@@ -430,6 +525,7 @@ def _read_note(read_at):
             else ', not read by the firmware within 5 s')
 
 
+@records('x y ms wait quiet')
 def cmd_tap(a):
     q = connect(a.name)
     if getattr(a, 'quiet', 0):
@@ -446,6 +542,7 @@ def cmd_tap(a):
     after_input(q, n0, a)
 
 
+@records('x1 y1 x2 y2 ms wait quiet')
 def cmd_swipe(a):
     """A drag from (x1,y1) to (x2,y2) in landscape pixels: one GT911 point every ~20 ms over --ms,
     each held until the firmware has consumed its frame (up to 0.5 s; the model keeps only the latest
@@ -472,6 +569,7 @@ def cmd_swipe(a):
     out.set(x1=a.x1, y1=a.y1, x2=a.x2, y2=a.y2, points=steps + 1, unread=unread)
     after_input(q, n0, a)
 
+@records('ms wait quiet')
 def cmd_home(a):
     """The capacitive Home pad (GT911 key bit): held for at least --ms and until the firmware reads it."""
     q = connect(a.name)
@@ -488,6 +586,7 @@ def cmd_home(a):
 
 
 # ---------------------------------------------------------------- peripherals
+@records('soc mv charging')
 def cmd_battery(a):
     q = connect(a.name)
     if a.soc is not None: q.qom_set(BOARD, 'battery-soc', a.soc)
@@ -541,3 +640,156 @@ def cmd_qmp(a):
     r = q.cmd(msg['execute'], **msg.get('arguments', {}))
     out.line(json.dumps(r, indent=1))
     out.set(**{'return': r})
+
+
+# ---------------------------------------------------------------- record / replay / guest time
+def cmd_record(a):
+    """Start (or `--stop`, end) journalling this instance's input commands into FILE.
+
+    While the marker exists every input command (press, hold, chord, tap, swipe, home, battery,
+    console-send, reset) appends one line to FILE; nothing else is recorded and nothing is printed."""
+    marker = record_marker(a.name)
+    if a.stop:
+        path = journal_file(a.name)
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            path = None
+        if path is None:
+            out.line(f'{a.name}: not recording')
+            out.set(name=a.name, recording=False, file=None, steps=0)
+            return
+        steps = len(read_journal(path, strict=False))
+        out.line(f'{a.name}: recording stopped, {steps} steps in {path}')
+        out.set(name=a.name, recording=False, file=path, steps=steps)
+        return
+    if not a.file:
+        sys.exit('give a journal file (`x4emu record FILE`) or `--stop`')
+    path = os.path.abspath(a.file)
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    open(path, 'w').close()                     # one `record` = one journal, from scratch
+    os.makedirs(idir(a.name), exist_ok=True)
+    with open(marker, 'w') as f:
+        json.dump({'file': path}, f)
+    out.line(f'{a.name}: recording input to {path}')
+    out.set(name=a.name, recording=True, file=path, steps=0)
+
+
+def wait_guest_until(q, target_ms, timeout):
+    """Poll the board's virtual clock until it reaches `target_ms`; the guest time reached, or None
+    if `timeout` host seconds passed first (this never blocks the host past its timeout)."""
+    t0 = time.time()
+    while True:
+        now = guest_ms(q)
+        if now >= target_ms:
+            return now
+        if time.time() - t0 >= timeout:
+            return None
+        time.sleep(0.05)
+
+
+def guest_wait(a, target):
+    """Shared body of wait-guest-ms / wait-guest-until: wait for the guest clock, print where it
+    got to. `target(start_ms)` says which guest time to wait for. A host timeout is a failure
+    (exit 1), as with the other wait-* commands."""
+    q = connect(a.name)
+    start = guest_ms(q)
+    target_ms = target(start)
+    t0 = time.time()
+    now = wait_guest_until(q, target_ms, a.timeout)
+    ok = now is not None
+    if not ok:
+        now = guest_ms(q)
+    fields = dict(ok=ok, guest_ms=now, advanced_ms=now - start, target_ms=target_ms,
+                  seconds=round(time.time() - t0, 2))
+    if not ok:
+        out.set(**fields)
+        sys.exit(f'timeout: guest time reached {now} ms, not {target_ms} ms, in {a.timeout}s')
+    out.line(f'guest {now} ms (+{now - start} ms in {time.time() - t0:.1f}s)')
+    out.set(**fields)
+
+
+def cmd_wait_guest_ms(a):
+    """Wait until the guest's virtual clock has advanced by MS from now (not a host sleep)."""
+    guest_wait(a, lambda start: start + a.ms)
+
+
+def cmd_wait_guest_until(a):
+    """Wait until the guest's virtual clock reaches MS (the absolute form `replay` uses)."""
+    guest_wait(a, lambda start: a.ms)
+
+
+# What a replayed step shows in human mode after `t=… ms <cmd>` (the rest of the arguments are in
+# the journal): the values that identify the input.
+STEP_SHOW = {'tap': ('x', 'y'), 'swipe': ('x1', 'y1', 'x2', 'y2'), 'press': ('button',),
+             'hold': ('button',), 'chord': ('buttons',), 'home': (), 'reset': (),
+             'battery': ('soc', 'mv', 'charging'), 'console-send': ('text',)}
+
+
+def step_text(step):
+    args = step.get('args') or {}
+    vals = [v for k in STEP_SHOW.get(step['cmd'], ()) if (v := args.get(k)) is not None]
+    return ''.join(' ' + ('+'.join(map(str, v)) if isinstance(v, list) else str(v)) for v in vals)
+
+
+def read_journal(path, strict=True):
+    """The steps of a journal file: one {"t_ms", "cmd", "args"} object per line."""
+    steps = []
+    if not os.path.exists(path):
+        if strict:
+            sys.exit(f'no journal {path}')
+        return steps
+    with open(path) as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                step = json.loads(line)
+            except ValueError:
+                if strict:
+                    sys.exit(f'{path}:{n}: not a JSON line')
+                continue
+            if strict and step.get('cmd') not in JOURNAL:
+                sys.exit(f'{path}:{n}: {step.get("cmd")!r} is not a replayable command')
+            steps.append(step)
+    return steps
+
+
+def cmd_replay(a):
+    """Replay a journal into this instance: wait for the guest clock to reach each step's t_ms,
+    then call the same command function with the recorded arguments (in this process, so the
+    replayed commands behave exactly as they did while recording — including their own
+    `--quiet`/`--wait`). Their output is suspended; one line per step is printed instead."""
+    path = os.path.abspath(a.file)
+    steps = read_journal(path)
+    if not steps:
+        sys.exit(f'{path}: nothing to replay')
+    q = connect(a.name)
+    now = guest_ms(q)
+    first = steps[0].get('t_ms')
+    if a.wait_times and first is not None and now > first:
+        out.set(file=path, steps=0, guest_ms_end=now)
+        sys.exit(f'guest time is already {now} ms, past the first step ({first} ms): replay onto a '
+                 'freshly booted instance, or pass --no-wait to run the steps back to back')
+    done = []
+    t0 = time.time()
+    for n, step in enumerate(steps, 1):
+        t_ms = step.get('t_ms')
+        if a.wait_times and t_ms is not None and wait_guest_until(q, t_ms, a.timeout) is None:
+            out.set(file=path, steps=len(done), guest_ms_end=guest_ms(q), replayed=done)
+            sys.exit(f'step {n} ({step["cmd"]}): guest time did not reach {t_ms} ms in {a.timeout}s')
+        fn, keys = JOURNAL[step['cmd']]
+        args = step.get('args') or {}
+        ns = argparse.Namespace(name=a.name, cmd=step['cmd'],
+                                **{k: args.get(k) for k in keys})
+        q.close()                       # the command opens its own connection (one client at a time)
+        with suspended():
+            fn(ns)
+        q = reconnect(a.name)
+        out.line(f't={t_ms} ms {step["cmd"]}{step_text(step)}')
+        done.append({'t_ms': t_ms, 'cmd': step['cmd'], 'guest_ms': guest_ms(q)})
+    end = guest_ms(q)
+    out.line(f'replayed {len(done)} steps, guest {end} ms in {time.time() - t0:.1f}s')
+    out.set(file=path, steps=len(done), guest_ms_end=end, seconds=round(time.time() - t0, 2),
+            replayed=done)

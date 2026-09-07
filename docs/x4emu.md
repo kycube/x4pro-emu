@@ -1,7 +1,8 @@
 # `x4emu` — the emulator CLI
 
 One command drives the whole Xteink X4 Pro emulator: boot a firmware image, press buttons, tap the
-screen, read the console, dump the e-paper panel to PNG, ask the board for its state. Every command
+screen, read the console, dump the e-paper panel to PNG, ask the board for its state, record an
+input script and replay it onto a fresh boot for the same pixels. Every command
 is non-blocking past its timeout and needs no terminal, so it works the same from a shell, a test
 and an agent. With `--json` every command prints one JSON object and nothing else.
 
@@ -67,6 +68,7 @@ Instances are independent; several can run at once.
 | `run.json` | the exact command line, so `flash-app` can relaunch identically |
 | `efuse.bin` | the efuse replay, generated on first `run` unless `--efuse` is given |
 | `last.png` | the most recent `screenshot` |
+| `record.json` | `{"file": …}` while `record` is journalling this instance's inputs — `run` removes it |
 
 A five-command session:
 
@@ -102,7 +104,7 @@ rotated on it.
 
 | Command | Arguments | `--json` object |
 |---|---|---|
-| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
+| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
 | `stop` | — | `{"name", "pid", "stopped", "running": false}` (`stopped: false` when it was not running) |
 | `reset` | — | `{"name", "reset": true}` |
 | `status` | — | `{"name", "pid", "status", "running", "deep_sleep"}`; not running: `{"name", "pid": null, "status": "not running", "running": false, "deep_sleep": false}` |
@@ -142,6 +144,29 @@ analog-master transaction `m1 0x6b/0x02=0x4e` — while the rest of the system k
 `user_config/net_en = 1` and the radio wanted, boot through the deep sleep and `press power`
 (`tests/test_stock.py::test_stock_wifi_fails_fast` does); everything else is happier cold.
 
+#### `run --deterministic` — guest time that does not depend on the host
+
+`--deterministic` is `-icount 3` (unless `--icount N` is given explicitly, which then wins): the
+guest's virtual clock advances with the *instruction count*, not with the host's clock, so the same
+instruction stream reaches the same point at the same guest millisecond on every run and on every
+machine. That is what makes a recorded input script replayable — `x4emu replay` waits for a guest
+time, and a `--deterministic` guest arrives there having executed the same code — and it also makes
+the emulator's speed independent of how loaded the host is (`-icount 3` = 8 ns per instruction;
+CrossPoint boots to Home at guest time ≈ 1.4 s, a few host seconds).
+
+Two limits, both deliberate:
+
+- **The RTC still follows host time.** The BM8563/PCF8563 model seeds itself from the host's wall
+  clock at start, so a firmware that *draws* a clock still paints a different image every minute.
+  The fix is a `base-epoch` QOM property on driver `x4pro.pcf8563`; the CLI has the hook ready and
+  **disabled** (`DETERMINISTIC_RTC_EPOCH = None` in `x4emu/commands.py`): set it to an epoch second
+  and `--deterministic` starts passing `-global driver=x4pro.pcf8563,property=base-epoch,value=N`.
+  CrossPoint's Home screen draws no clock, so its screenshots already match to the pixel.
+- **Guest timestamps are not reproduced exactly**, only the pixels. `x4emu`'s waits are host-paced
+  polls (every 50 ms), so a replayed input lands a few milliseconds after the recorded guest time.
+  Record inputs at moments when the firmware is idle (`--quiet 2`, `wait-quiet`) and that slack
+  changes nothing; record them mid-repaint and no amount of determinism will help.
+
 ### Console
 
 | Command | Arguments | `--json` object |
@@ -176,6 +201,80 @@ that read happened, or `null` if it never did. For buttons `read_after_s` is alw
 | `home` | `--ms 250`, `--wait S`, `--quiet S` | `{"ms", "read_after_s", "refresh", "refresh_after_s"}` — the capacitive Home pad (the stock app ignores it) |
 | `swipe` | `X1 Y1 X2 Y2`, `--ms 250` | `{"x1", "y1", "x2", "y2", "ms", "steps"}` |
 
+### Guest time, record and replay
+
+`wait-guest-ms` waits on the *guest's* virtual clock (`state.uptime_us`), not on the host's, which
+is what time-driven UI needs: an inactivity timeout, a toast, the next battery poll. It polls every
+50 ms and never blocks past `--timeout` host seconds (a timeout is exit 1, like the other `wait-*`).
+
+`record` journals the instance's **input** commands so `replay` can perform them again at the same
+guest times. Only inputs are recorded — `press`, `hold`, `chord`, `tap`, `swipe`, `home`, `battery`,
+`console-send`, `reset`; `state`, `screenshot`, `wait-*` and `log` are not, since a replay repeats
+what was *done* to the firmware, not what was looked at. Recording is invisible in human mode (the
+input commands print exactly what they always printed; `--json` gains `"recorded": true`).
+
+| Command | Arguments | `--json` object |
+|---|---|---|
+| `wait-guest-ms` | `MS`, `--timeout S` (default 60) | `{"ok": true, "guest_ms", "advanced_ms", "target_ms", "seconds"}`; on timeout the same with `"ok": false` plus `"error"`, exit 1 |
+| `wait-guest-until` | `MS` (absolute guest time), `--timeout S` | as `wait-guest-ms` (this is the form `replay` uses internally) |
+| `record` | `FILE` (the journal; truncated, one `record` = one journal), `--stop` | start: `{"name", "recording": true, "file", "steps": 0}`; `--stop`: `{"name", "recording": false, "file", "steps": N}` (`file: null`, `steps: 0` when it was not recording) |
+| `replay` | `FILE`, `--timeout S` (host seconds one step may wait for the guest clock, default 120), `--no-wait` (ignore the recorded times, run the steps back to back) | `{"file", "steps", "guest_ms_end", "seconds", "replayed": [{"t_ms", "cmd", "guest_ms"}]}`; on a failure the fields gathered so far plus `"error"`, exit 1 |
+
+The journal is one JSON object per line (`.jsonl`): the guest time the command was issued at, its
+name, and the arguments exactly as it received them, so the replay calls the same function with the
+same arguments:
+
+```json
+{"t_ms": 12957, "cmd": "tap", "args": {"x": 345, "y": 350, "ms": 120, "wait": 30.0, "quiet": 2.0}}
+{"t_ms": 16992, "cmd": "home", "args": {"ms": 250, "wait": 30.0, "quiet": 2.0}}
+```
+
+`t_ms` is `state.uptime_us / 1000` at the moment the command was issued — *before* its own
+`--quiet` wait, so a replay that waits for `t_ms` and then runs the command reproduces both waits.
+The `args` keys per command are the ones the CLI takes: `press`/`hold` `button ms wait quiet`,
+`chord` `buttons ms wait quiet`, `tap` `x y ms wait quiet`, `swipe` `x1 y1 x2 y2 ms wait quiet`,
+`home` `ms wait quiet`, `battery` `soc mv charging`, `console-send` `text newline`, `reset` none.
+Journals are editable and hand-writable; `t_ms: null` is allowed and means "do not wait".
+
+`replay` runs the steps **in-process**: it calls the very functions the CLI calls, it does not shell
+out to itself, so each step behaves exactly as it did while recording — including its own `--quiet`
+(wait for an idle panel first) and `--wait` (report the refresh the input triggered, fail if none).
+It waits for `t_ms` with the same virtual-clock poll as `wait-guest-until`, prints one line per step
+in human mode, and refuses to start when the instance's guest clock is already past the first step —
+that instance is not where the recording began, and its screen would not match:
+
+```
+$ x4emu --name rpa replay flow.jsonl
+t=12957 ms tap 345 350
+t=16992 ms home
+replayed 2 steps, guest 19129 ms in 19.8s
+```
+
+A worked example — record a flow once, then reproduce its screen on a fresh boot
+(`tests/test_replay.py` is exactly this, three times over, asserting 0 differing pixels):
+
+```
+x4emu --name rec run --flash images/flash.bin --sd images/sd.img --fast-epd --deterministic
+x4emu --name rec wait-text "Entering activity: Home" --timeout 180
+x4emu --name rec wait-quiet --seconds 2
+x4emu --name rec record /tmp/flow.jsonl
+x4emu --name rec tap 345 350 --quiet 2 --wait 30      # "Browse Files"
+x4emu --name rec wait-quiet --seconds 2
+x4emu --name rec home --quiet 2 --wait 30             # back to Home
+x4emu --name rec wait-quiet --seconds 2
+x4emu --name rec record --stop                        # "rec: recording stopped, 2 steps in …"
+x4emu --name rec screenshot /tmp/a.png
+
+x4emu --name rp1 run --flash images/flash.bin --sd images/sd.img --fast-epd --deterministic
+x4emu --name rp1 wait-text "Entering activity: Home" --timeout 180
+x4emu --name rp1 replay /tmp/flow.jsonl
+x4emu --name rp1 wait-quiet --seconds 2
+x4emu --name rp1 screenshot /tmp/b.png --diff /tmp/a.png     # 0.000% of pixels differ (0), exit 0
+```
+
+Replay onto an instance that is already past the first step is an error (`--no-wait` runs the steps
+back to back instead, which is the way to reuse a journal as a plain macro on a live instance).
+
 ### Peripherals and low level
 
 | Command | Arguments | `--json` object |
@@ -202,6 +301,18 @@ x4emu --name stock wait-text "main_task: Returned from app_main()" --timeout 60
 x4emu --name stock wait-refresh --total 2 --timeout 90    # 1 = panel init, 2 = Home; 3 is the clock
 x4emu --name stock wait-quiet --seconds 2
 x4emu --name stock screenshot /tmp/stock-home.png
+
+# a deterministic run, an input script recorded and replayed onto a fresh boot
+x4emu --json --name rec run --flash images/flash.bin --sd images/sd.img --fast-epd --deterministic
+x4emu --json --name rec record /tmp/flow.jsonl
+x4emu --json --name rec tap 345 350 --quiet 2 --wait 30 | jq .recorded      # true
+x4emu --json --name rec record --stop | jq .steps
+x4emu --json --name rp1 run --flash images/flash.bin --sd images/sd.img --fast-epd --deterministic
+x4emu --json --name rp1 wait-text "Entering activity: Home" --timeout 180
+x4emu --json --name rp1 replay /tmp/flow.jsonl | jq '{steps, guest_ms_end}'
+
+# wait on the guest's clock, not the host's (inactivity timeouts, toasts, battery polls)
+x4emu --json wait-guest-ms 30000 --timeout 120 | jq .guest_ms
 
 # how bright is the frontlight, and what is the panel doing?
 x4emu --json light | jq .warm

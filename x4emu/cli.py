@@ -8,6 +8,8 @@
   x4emu screenshot out.png [--diff other.png] | wait-refresh [--count N] [--timeout S]
   x4emu press left|right|power [--ms 120] | hold power --ms 3000
   x4emu tap X Y | swipe X1 Y1 X2 Y2 [--ms 250] | home [--ms 250] [--quiet S]
+  x4emu record FILE | record --stop | replay FILE [--timeout S] [--no-wait]
+  x4emu wait-guest-ms N [--timeout S] | wait-guest-until MS [--timeout S]
   x4emu battery --soc 63 --mv 3910 [--charging on|off] | light
   x4emu mem read ADDR LEN | gdb | qmp '{"execute":...}'
 
@@ -36,6 +38,10 @@ def build_parser():
     p.add_argument('--panel', choices=['ssd1677', 'uc8179', 'uc8279']); p.add_argument('--fast-epd', action='store_true')
     p.add_argument('--gdb', action='store_true'); p.add_argument('--trace-epd'); p.add_argument('--trace-i2c')
     p.add_argument('--no-usb-host', action='store_true'); p.add_argument('--icount')
+    p.add_argument('--deterministic', action='store_true',
+                   help='guest time follows the instruction count (-icount 3 unless --icount says '
+                        'otherwise), so a replayed script lands its inputs at the same guest times '
+                        'run to run; the RTC still follows host time until base-epoch lands')
     p.add_argument('--boot-hold-power', nargs='?', type=int, const=c.BOOT_HOLD_POWER_MS, default=None, metavar='MS',
                    help='start halted, hold the power button from reset for MS ms (default '
                         f'{c.BOOT_HOLD_POWER_MS}), then release: the stock firmware boots cold '
@@ -67,6 +73,14 @@ def build_parser():
     p.add_argument('--wait', type=float, default=0, help='wait up to S seconds for a refresh to start after the input'); p.add_argument('--quiet', type=float, default=0, help='first wait until the panel has been idle for S seconds'); p.set_defaults(fn=c.cmd_swipe)
     p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=250); p.add_argument('--wait', type=float, default=0)
     p.add_argument('--quiet', type=float, default=0, help='first wait until the panel has been idle for S seconds'); p.set_defaults(fn=c.cmd_home)
+    p = sp.add_parser('record'); p.add_argument('file', nargs='?')
+    p.add_argument('--stop', action='store_true', help='end the recording (removes the marker)'); p.set_defaults(fn=c.cmd_record)
+    p = sp.add_parser('replay'); p.add_argument('file'); p.add_argument('--timeout', type=float, default=120,
+                   help='host seconds a single step may wait for the guest clock (default 120)')
+    p.add_argument('--no-wait', dest='wait_times', action='store_false',
+                   help='ignore the recorded guest times and run the steps back to back'); p.set_defaults(fn=c.cmd_replay)
+    p = sp.add_parser('wait-guest-ms'); p.add_argument('ms', type=int); p.add_argument('--timeout', type=float, default=60); p.set_defaults(fn=c.cmd_wait_guest_ms)
+    p = sp.add_parser('wait-guest-until'); p.add_argument('ms', type=int); p.add_argument('--timeout', type=float, default=60); p.set_defaults(fn=c.cmd_wait_guest_until)
     p = sp.add_parser('battery'); p.add_argument('--soc', type=int); p.add_argument('--mv', type=int); p.add_argument('--charging', choices=['on', 'off']); p.set_defaults(fn=c.cmd_battery)
     p = sp.add_parser('light'); p.add_argument('-v', '--verbose', action='store_true'); p.set_defaults(fn=c.cmd_light)
     p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=c.cmd_mem)

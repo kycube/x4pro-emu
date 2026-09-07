@@ -5,6 +5,7 @@ parse some of those lines). With `--json` the human lines are dropped and one JS
 printed on stdout instead — including for failures, which become `{"error": "..."}` (merged with
 whatever the command had already gathered) and keep the exit code they had before.
 """
+import contextlib
 import json
 import sys
 
@@ -58,3 +59,19 @@ class Out:
 
 
 out = Out()
+
+
+@contextlib.contextmanager
+def suspended():
+    """Run a command's function without letting its output escape.
+
+    `x4emu replay` calls the recorded command functions in this process: their human lines would
+    bury the one-line-per-step output and their `out.set` fields would end up in the replay's own
+    JSON object. Inside this block the human lines are dropped (as in `--json` mode) and the fields
+    go to a scratch payload, which is yielded so the caller can look at it."""
+    saved = (out.json_mode, out.data, out._raw, out._done)
+    out.json_mode, out.data, out._raw, out._done = True, {}, None, False
+    try:
+        yield out.data
+    finally:
+        out.json_mode, out.data, out._raw, out._done = saved
