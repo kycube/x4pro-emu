@@ -184,5 +184,5 @@ ESP32-S3 rev v0.2, 8 MB octal PSRAM, MAC 98:c3:77:be:ea:30. Panel **UC8279** (pr
 (files copied to `images/device/sd-files/`, including CrossPoint's `.crosspoint/` state). Oracles from
 the device: its home-screen screenshot (`tests/golden/device-home-screenshot-3824.bmp`, reproduced with
 0 pixels different), its panel command stream (`models/fixtures/`), its boot and wake logs
-(`docs/device/`). The stock's home screen golden (`tests/golden/stock-home.png`) is emulator-made; the
-device shows the same empty bookshelf. See `docs/hardware.md` and `docs/device/`.
+(`docs/device/`). The stock's screen goldens (`tests/golden/stock-*.png`) are emulator-made; the owner
+judged Home, menu, light panel, Settings, All Files and reader 1:1 with the device by eye (session 5). See `docs/hardware.md` and `docs/device/`.
