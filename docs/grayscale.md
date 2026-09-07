@@ -3,19 +3,19 @@
 The panel core (`models/epd_core.c`) has two ways to render a refresh that runs an external LUT bank
 (`PSR` REG=1 with 0x20..0x24 written since power-on, the core's `EPD_MODE_GRAY`):
 
-- **approx** (default): a fixed table maps the two RAM planes to four levels (`state.gray_approx` true
-  after such a refresh). It ignores the LUT bytes.
-- **waveform** (`waveform_gray`, off until validated against the device): the core parses the five
+- **approx** (the default until 2026-09-07): a fixed table maps the two RAM planes to four levels
+  (`state.gray_approx` true after such a refresh). It ignores the LUT bytes.
+- **waveform** (`waveform_gray`, **the default since the device photo of 2026-09-07**, §6): the core parses the five
   uploaded tables into per-transition phase sequences and moves each pixel's reflectance by the
   frames its (old, new) class is driven, with a saturating linear model. Pixels keep their
   reflectance across refreshes; an OTP refresh (no LUT, or REG=0) still drives every pixel fully to
   its new bit, exactly as before.
 
-Switch it on:
+Switch it off (the old table), or change the knob:
 
 ```
-x4emu run … -- -global driver=x4pro.epd,property=waveform-gray,value=on
-                -global driver=x4pro.epd,property=gray-k,value=28        # optional: the tunable
+x4emu run … -- -global driver=x4pro.epd,property=waveform-gray,value=off
+                -global driver=x4pro.epd,property=gray-k,value=38        # the tunable (default 38)
 ```
 
 `x4pro_epd_gray_model()` reports `"approx"` / `"waveform"` for the JSON state (`gray_model`; the
@@ -131,7 +131,8 @@ for each populated group, repeat times:
     for each phase: VDH: R = max(0, R - k*frames);  VDL: R = min(255, R + k*frames);  else hold
 ```
 
-`k` = `gray_k` (QOM `gray-k`), the reflectance change per frame at VDH/VDL, **default 28**. The
+`k` = `gray_k` (QOM `gray-k`), the reflectance change per frame at VDH/VDL, **default 38** (28 until the
+photo of 2026-09-07 put the AA rim at ~0.45 reflectance: 3 frames × 38 = 114, §6). The
 per-class result is precomputed as a 256-entry map at each LUT refresh (`gray_map[4][256]`), so a
 frame costs one lookup per pixel. `frame_us` (default 6667) only sizes `last_lut_us`.
 
@@ -167,8 +168,7 @@ a bank whose BW ≠ WB; the tunable; DDX[0] polarity; the approximation unchange
 refreshes identical with the flag on or off; SSD1677 untouched by the flag (its 0x32 LUT is still the
 fixed table). The fixture replay stays green.
 
-Not validated: the levels themselves against the glass (the owner compares `reader-waveform.png`
-with a photo of an AA page; `gray-k` is the knob), the frame rate for PLL 0x0E on a UC8279, whether
+Validated (§6): the kind of rendering and the grey level against a photo of the glass. Not validated: the frame rate for PLL 0x0E on a UC8279, whether
 an OTP DU really drives WW/BB pixels (the model, like the approximation, drives every pixel fully —
 ghost residue from AA pages is not modelled), the settle bank's exact effect, and the roles of group
 bytes 0 and 6.
@@ -184,5 +184,20 @@ device: `reader-approx.png` / `reader-waveform.png` (landscape panel), `reader-*
 portrait, the first four text lines, 3×) and `reader-crops-approx-top-waveform-bottom.png` in the
 session's scratch `gray/` directory.
 
-`make -C models test` runs the host tests; `tests/test_touch_reader.py` and `tests/test_boot.py` run
-with the default (approximation) and their goldens are unchanged.
+`make -C models test` runs the host tests. Since 2026-09-07 the waveform model is the default, so
+`tests/golden/reader-page1.png` / `reader-page2.png` are its renderings (regenerated then); the device's own
+screenshots of the same pages match the emulator's base frame in 0 pixels outside the clock
+(`tests/test_device_screenshot.py`), which is independent of the grey level.
+
+## 6. Validation against the glass (2026-09-07)
+
+The owner opened `tests/mkepub.py`'s book on the device (CrossPoint 1.6.0) and photographed the page
+(`docs/device/photos/reader-aa-text-2026-09-07.jpg`, a crop of the 4032×3024 original at full resolution,
+uprighted). What the glass shows: every glyph has **one uniform grey rim** around a solid black stroke — no
+two-tone halo, no lighter outer ring — i.e. the waveform model's rendering, not the fixed table's (which drew
+the dark-grey glyph pixels lighter than the light-grey ones). Measured in the photo over the 2–3 photo pixels
+outside every stroke (paper 193, ink 31 on the camera's scale; ~5.4 photo pixels per device pixel, so that ring
+sits inside the first device pixel outside the stroke): normalised reflectance median 0.56, darkest quartile
+0.40 — the true panel grey lies between the two (the median carries some paper through the lens blur), so
+**~0.45 ≈ 114/255**, hence `gray-k` 38 (three driven frames). The model's earlier 84 (k 28) was a shade too
+dark. Remaining doubt: ±0.05 on the level, the camera's tone curve, and one photo, one page.

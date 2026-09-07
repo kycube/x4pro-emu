@@ -61,7 +61,11 @@ def test_reader_pages_match_device_screenshots(images, emu, tmp_path):
     x4emu(emu, 'tap', 345, 350, '--quiet', 2, '--wait', 20)            # Browse Files
     x4emu(emu, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    x4emu(emu, 'tap', 140, 240, '--quiet', 1.5, '--wait', 20)          # the book
+    for attempt in range(2):                                            # the book; CrossPoint drops a tap
+        r = x4emu(emu, 'tap', 140, 240, '--quiet', 1.5, '--wait', 20, check=False)   # into a rendering pass
+        if r.returncode == 0:
+            break
+        assert attempt == 0, f'the book-row tap drew nothing twice:\n{r.stdout}'
     x4emu(emu, 'wait-text', 'Loaded ePub: /Test Book.epub', '--timeout', 90)
     x4emu(emu, 'wait-quiet', '--seconds', 3, '--timeout', 120)
     p1 = tmp_path / 'page1.png'

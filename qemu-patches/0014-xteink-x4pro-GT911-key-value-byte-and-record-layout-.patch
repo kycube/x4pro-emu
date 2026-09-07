@@ -1,7 +1,7 @@
 From fdc368296d1d828a452422cabea7c176b08cfe8e Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 23:26:56 -0500
-Subject: [PATCH 14/17] xteink-x4pro: GT911 key-value byte and record layout
+Subject: [PATCH 14/18] xteink-x4pro: GT911 key-value byte and record layout
  (the stock's Home pad), BM8563 base-epoch
 
 The stock xteink_app reads GT911 status 0x814E, sees HaveKey with no points and then reads the

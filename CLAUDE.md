@@ -16,10 +16,11 @@ for symbol-less firmware reading and new models).
   PLL lock flag and the DC-offset comparator the full PHY calibration polls), so ESP-IDF's driver comes up on
   a cold boot or a wake alike, finds no air and stops itself about 8 s after `wifi:mode : sta`; nothing
   enumerates on the network side. BLE is untested.
-- **Grayscale**: by default the two-plane rendering is a fixed table (`state.gray_approx` true after such
-  a refresh). A waveform-level model exists behind `-global driver=x4pro.epd,property=waveform-gray,value=on`
-  (`state.gray_model`; `docs/grayscale.md`): it interprets the uploaded LUTs and finds that CrossPoint's AA
-  text has three levels on this panel, not four. Default flips once the owner confirms it against the glass.
+- **Grayscale**: LUT refreshes go through a waveform-level model by default since 2026-09-07 (the UC8279
+  LUT tables interpreted per transition class, a reflectance per pixel, `gray-k` 38 = the rim level measured
+  on a photo of the glass, `docs/device/photos/`); CrossPoint's AA text is three-level on this panel (black, one
+  grey, white) because its bank drives BW and WB identically. `-global driver=x4pro.epd,property=waveform-gray,
+  value=off` restores the old fixed two-plane table (`state.gray_model`; `docs/grayscale.md`).
 - **Deep sleep**: modelled as a paused VM followed by a system reset with reset cause 5 (DSLEEP),
   EXT1 wake status = the power button. RTC-domain retention beyond RTC RAM, power draw, and GPIO
   hold latches are not simulated; the guest's `millis()` keeps counting across the modelled reset.

@@ -1,7 +1,7 @@
 From 786d8c855926cea227d37d0641ba41bcb5862e4b Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 7 Sep 2026 00:55:38 -0500
-Subject: [PATCH 17/17] xteink-x4pro: waveform-gray and gray-k properties on
+Subject: [PATCH 17/18] xteink-x4pro: waveform-gray and gray-k properties on
  the panel device, gray_model in the state
 
 -global driver=x4pro.epd,property=waveform-gray,value=on switches the panel core's waveform-level

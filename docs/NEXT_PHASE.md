@@ -27,10 +27,9 @@ session-6 entry of `docs/log.md` for what each tier delivered.
    Espressif file: 484,963 → 1,788 lines per stock boot); 28 window/addressing tests that found and then
    fixed three SSD1677 addressing gaps; `x4emu shell`, `x4emu watch`, the MCP server in-process with
    record/replay. Everything committed on `main`; the owner pushes.
-3. **Open and the owner's to answer:** which of the two grey renderings matches the glass (the side-by-side
-   crops in the session-6 log; a photo of a book page on the device would settle `gray-k` too). If the
-   waveform model wins: set `waveform_gray` default true in `epd_core_init`, regenerate
-   `tests/golden/reader-page*.png`, tick the §8 item. If the old table wins: keep the default, record why.
+3. ~~The grey verdict~~ **settled (2026-09-07):** the owner photographed the test book on the device; the glass
+   shows one uniform grey rim per glyph (the waveform model), measured at ~0.45 reflectance in the photo, so
+   the model is the default with `gray-k` 38; the CrossPoint reader goldens were regenerated.
 4. Carried over: **the stock ignores a tap now and then** — `x4emu tap` reports "read by the firmware after
    0.03s" and no repaint follows (twice in three full-suite runs, always the first or second tap after Home,
    never when the test runs alone; the tests retry). Unknown whether the device does the same: a question for
@@ -335,8 +334,9 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
   base frame in 0 pixels outside the footer clock, `tests/test_device_screenshot.py`); FileBrowser, sleep
   screen and the settings pages still lack a device shot.
 - [x] Deterministic replay of an input script yields identical screenshots run to run (`tests/test_replay.py`, session 5).
-- [ ] Waveform-aware grayscale validated against the device (built in session 6 behind `waveform-gray`; the
-  owner's photo or verdict on the crops decides the default).
+- [x] Waveform-aware grayscale validated against the device (session 7: the owner's photo of the test book on
+  the glass shows one uniform grey rim per glyph — the model, not the two-tone table; the rim measures ~0.45
+  reflectance, so `gray-k` = 38; default on since 2026-09-07, `docs/device/photos/reader-aa-text-2026-09-07.jpg`).
 - [x] `make setup && make build && make test` verified on Ubuntu 24.04 in CI (first run green, session 5) and on macOS.
 - [x] `x4emu` installable, JSON everywhere, documented in one page (`docs/x4emu.md`, session 4).
 - [ ] Generic S3 models proposed upstream; board file and panel cores stay here.

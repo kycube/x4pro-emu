@@ -905,3 +905,11 @@ frames: any ink → black, since the device BMP is the 1-bit frame CrossPoint se
 ~80,000. `tests/golden/device-reader-page{1,2}-*.bmp` and `test_reader_pages_match_device_screenshots` keep
 that. The device's screenshots cannot show the grey edges (1-bit), so the grey verdict still needs the
 owner's eye or a photo.
+
+**Grey settled (2026-09-07, later):** the owner's photo of the test book on the glass
+(`docs/device/photos/reader-aa-text-2026-09-07.jpg`) shows one uniform grey rim per glyph — the waveform
+model, not the two-tone table. The rim measures ~0.45 reflectance (median 0.56 / darkest quartile 0.40 in the
+photo; the truth between them), so `gray-k` moves from 28 to 38 (3 frames → 114) and the model becomes the
+default (`epd_core_init`, the `waveform-gray` property); `test_epd.c`'s approximation test sets the flag off
+explicitly; the CrossPoint reader goldens were regenerated under the new default. The device's own 1-bit
+screenshots could not have settled this: only the glass shows the grey.

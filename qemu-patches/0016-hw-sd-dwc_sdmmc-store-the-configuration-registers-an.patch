@@ -1,7 +1,7 @@
 From 46865e23403273c5f811c12a87c1935f7e092a42 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 7 Sep 2026 00:47:52 -0500
-Subject: [PATCH 16/17] hw/sd/dwc_sdmmc: store the configuration registers and
+Subject: [PATCH 16/18] hw/sd/dwc_sdmmc: store the configuration registers and
  trace instead of DEBUG
 
 The ESP-IDF driver touches SDMMC_CLOCK (ESP32-specific, 0x800: card clock divider and phase),

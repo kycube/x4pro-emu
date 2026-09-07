@@ -13,8 +13,9 @@ def x4emu(name, *args, check=True, timeout=120):
     return r
 
 @pytest.fixture(scope='session')
-def images(tmp_path_factory):
-    """Flash image from the firmware build, an empty MBR/FAT32 SD image, the efuse replay."""
+def images_base(tmp_path_factory):
+    """Built once per session: the flash image from the firmware build and an MBR/FAT32 SD image
+    with the test book. Tests never boot these directly (see `images`)."""
     if not os.path.exists(os.path.join(BUILD, 'firmware.bin')):
         pytest.skip('firmware not built (cd firmware && pio run -e x4pro)')
     if not os.path.exists(QEMU):
@@ -29,6 +30,17 @@ def images(tmp_path_factory):
     make_epub(str(empty / 'Test Book.epub'))
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'mksd.py'), str(sd), '--size', '64M', '--src', str(empty)], check=True, stdout=subprocess.DEVNULL)
     return {'flash': str(flash), 'sd': str(sd), 'dir': d}
+
+@pytest.fixture
+def images(images_base, tmp_path):
+    """A private copy of the flash and card images for one test. CrossPoint writes to both (NVS
+    settings in the flash, reading positions and recent books on the card), so a shared image let one
+    test's state leak into the next: a Home screen with a "recent book" card, a reader that opened on
+    page 3 (2026-09-07). Copying 16 + 64 MB takes well under a second."""
+    import shutil
+    flash = tmp_path / 'flash.bin'; sd = tmp_path / 'sd.img'
+    shutil.copyfile(images_base['flash'], flash); shutil.copyfile(images_base['sd'], sd)
+    return {'flash': str(flash), 'sd': str(sd), 'dir': images_base['dir']}
 
 @pytest.fixture
 def emu(images, request):

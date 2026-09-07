@@ -147,7 +147,7 @@ void epd_core_init(EpdCore *c, EpdVariant v)
     memset(c->plane0, 0xFF, sizeof(c->plane0));
     memset(c->plane1, 0xFF, sizeof(c->plane1));
     memset(c->image, 0xFF, sizeof(c->image));
-    c->waveform_gray = false;
+    c->waveform_gray = true;        /* default since the device photo of 2026-09-07 (docs/grayscale.md) */
     c->gray_k = EPD_GRAY_K_DEFAULT;
     c->frame_us = EPD_FRAME_US_DEFAULT;
     ssd_reset_regs(c);

@@ -1,0 +1,34 @@
+From 20b3bd583650aea0017f1ffd46d300825fabcfa3 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 7 Sep 2026 12:11:18 -0500
+Subject: [PATCH 18/18] xteink-x4pro: the waveform grey model is the panel's
+ default (waveform-gray=on)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Settled against a photo of the device's glass on 2026-09-07 (docs/grayscale.md §6): one uniform grey
+rim per glyph, the waveform model's rendering; the fixed two-plane table stays available with
+-global driver=x4pro.epd,property=waveform-gray,value=off.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/display/x4pro_epd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hw/display/x4pro_epd.c b/hw/display/x4pro_epd.c
+index 18a1dfd..0c46bb1 100644
+--- a/hw/display/x4pro_epd.c
++++ b/hw/display/x4pro_epd.c
+@@ -270,7 +270,7 @@ static Property epd_properties[] = {
+     DEFINE_PROP_UINT32("power-ms", X4ProEpdState, power_ms, 0),
+     /* grey model: off = the fixed two-plane approximation (state.gray_approx);
+      * on = the LUT interpreter + reflectance model (docs/grayscale.md) */
+-    DEFINE_PROP_BOOL("waveform-gray", X4ProEpdState, waveform_gray, false),
++    DEFINE_PROP_BOOL("waveform-gray", X4ProEpdState, waveform_gray, true),
+     DEFINE_PROP_UINT32("gray-k", X4ProEpdState, gray_k, 0),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+-- 
+2.50.1 (Apple Git-155)
+

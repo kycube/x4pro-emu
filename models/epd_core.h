@@ -39,7 +39,8 @@
 #define EPD_UC_LUT_GROUPS 7
 #define EPD_UC_LUT_PHASES_PER_GROUP 4
 #define EPD_LUT_MAX_PHASES (EPD_UC_LUT_GROUPS * EPD_UC_LUT_PHASES_PER_GROUP)
-#define EPD_GRAY_K_DEFAULT 28           /* reflectance change per frame at VDH/VDL (0..255 scale) */
+#define EPD_GRAY_K_DEFAULT 38           /* reflectance change per frame at VDH/VDL (0..255 scale): 3 AA frames
+                                         * -> 114 = 0.45, the rim level measured on the glass (docs/grayscale.md) */
 #define EPD_FRAME_US_DEFAULT 6667       /* 150 Hz: PLL 0x0E = FRS 1110 in the UC8179c table; duration estimates only */
 
 typedef enum {

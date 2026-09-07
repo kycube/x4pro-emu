@@ -450,6 +450,7 @@ static void test_waveform_off_and_otp_unchanged(void)
      * refreshes are identical with the flag on or off. */
     EpdCore *a = malloc(sizeof(*a)), *b = malloc(sizeof(*b));
     epd_core_init(a, EPD_UC8279); epd_core_init(b, EPD_UC8279);
+    a->waveform_gray = false;       /* the fixed two-plane table (the default until 2026-09-07) */
     b->waveform_gray = true;
     uint8_t base[EPD_WB], p0[EPD_WB], p1[EPD_WB];
     memset(base, 0xFF, sizeof(base));
