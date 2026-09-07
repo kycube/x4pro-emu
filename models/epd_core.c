@@ -99,7 +99,9 @@ const char *epd_mode_name(EpdRefreshMode m)
 
 static void ssd_reset_regs(EpdCore *c)
 {
-    c->data_entry = 0x03;
+    c->data_entry = 0x03;   /* 0x11 reset default (X inc, Y inc, AM = 0); also
+                             * clears the private gate-scan bit, since a SW reset
+                             * restores 0x01's default scan too */
     c->x_start = 0; c->x_end = EPD_W - 1;
     c->y_start = 0; c->y_end = EPD_H - 1;
     c->x_cnt = 0; c->y_cnt = 0;
@@ -220,25 +222,70 @@ void epd_core_flush_trace(EpdCore *c)
     trace_cmd(c);
 }
 
-/* ---- SSD1677 RAM write ---------------------------------------------------- */
+/* ---- SSD1677 RAM addressing ------------------------------------------------
+ * Datasheet (SSD16xx family) semantics of 0x11 / 0x44 / 0x45 / 0x4E / 0x4F:
+ *   0x11 bit0 = X direction (1 increment, 0 decrement)
+ *        bit1 = Y direction (1 increment, 0 decrement)
+ *        bit2 = AM: the address counter advances in the Y direction first (1),
+ *               in the X direction first (0)
+ *   0x44 / 0x45 give the window's *start* (the counter origin 0x4E / 0x4F are
+ *   set to) and its *end* (the terminus) in the direction the mode selects, so
+ *   on a decrementing axis the start is the higher address. That is exactly what
+ *   Ssd1677Driver::setRamArea() sends: mirrorX -> data entry 0x00 with
+ *   xStart = x+w-1 and xEnd = x, and the Y pair always end-first (y+h-1, then y)
+ *   for the default Y-decrement mode.
+ *   X is carried in pixels, but RAM is addressed in whole 8-pixel bytes: the low
+ *   three bits of either end select nothing (both round down to the byte that
+ *   contains them) and one X step is one byte.
+ * A RAM write (0x24 BW / 0x26 RED) stores the byte at the counter and then
+ * advances it along the fast axis until its terminus, where the fast axis
+ * returns to its start and the slow axis steps one; at the slow axis' terminus
+ * the counter wraps back to its start as well.
+ *
+ * The gate scan direction (third byte of 0x01, see ssd_byte) lives in a spare
+ * high bit of data_entry: it shares that register's reset lifetime (hardware
+ * reset and 0x12 SW reset restore both), and epd_core.h is out of scope here. */
+#define SSD_DE_MASK      0x07       /* the three bits 0x11 actually carries */
+#define SSD_DE_GATE_REV  0x80       /* private: 0x01 TB, gate scan reversed */
+
+static uint16_t ssd_step_x(const EpdCore *c, bool inc)
+{
+    return (uint16_t)((inc ? c->x_cnt + 8 : c->x_cnt - 8) & 0x3FF);   /* 10-bit counter */
+}
+
+static uint16_t ssd_step_y(const EpdCore *c, bool inc)
+{
+    return (uint16_t)((inc ? c->y_cnt + 1 : c->y_cnt - 1) & 0x3FF);
+}
+
 static void ssd_ram_write(EpdCore *c, uint8_t *plane, uint8_t b)
 {
     if (c->x_cnt < EPD_W && c->y_cnt < EPD_H) {
         plane[c->y_cnt * EPD_WB + (c->x_cnt / 8)] = b;
     }
-    /* advance per data entry mode: bit0 X dir (1 = inc), bit1 Y dir (1 = inc), bit2 = Y-first */
     bool x_inc = c->data_entry & 1;
     bool y_inc = c->data_entry & 2;
-    bool at_x_end = x_inc ? (c->x_cnt / 8 >= c->x_end / 8) : (c->x_cnt / 8 <= c->x_start / 8);
-    if (!at_x_end) {
-        c->x_cnt = x_inc ? c->x_cnt + 8 : c->x_cnt - 8;
-        return;
-    }
-    c->x_cnt = x_inc ? c->x_start : c->x_end;
-    if (y_inc) {
-        if (c->y_cnt < c->y_end) c->y_cnt++; else c->y_cnt = c->y_start;
+    bool am_y_first = c->data_entry & 4;
+    /* The terminus is a byte column (X) / a row (Y), and reaching it is an
+     * equality in the direction of travel -- not a compare -- so the same test
+     * serves both directions and a counter parked outside the window (0x4E/0x4F
+     * are only specified inside it) walks on instead of snapping into it. */
+    bool at_x_end = (c->x_cnt / 8) == (c->x_end / 8);
+    bool at_y_end = c->y_cnt == c->y_end;
+    if (!am_y_first) {
+        if (!at_x_end) {                       /* AM = 0: X is the fast axis */
+            c->x_cnt = ssd_step_x(c, x_inc);
+            return;
+        }
+        c->x_cnt = c->x_start;
+        c->y_cnt = at_y_end ? c->y_start : ssd_step_y(c, y_inc);
     } else {
-        if (c->y_cnt > c->y_end) c->y_cnt--; else c->y_cnt = c->y_start;
+        if (!at_y_end) {                       /* AM = 1: Y is the fast axis */
+            c->y_cnt = ssd_step_y(c, y_inc);
+            return;
+        }
+        c->y_cnt = c->y_start;
+        c->x_cnt = at_x_end ? c->x_start : ssd_step_x(c, x_inc);
     }
 }
 
@@ -334,7 +381,21 @@ static void ssd_byte(EpdCore *c, uint8_t b)
     switch (c->cmd) {
     case S_WRITE_RAM_BW: ssd_ram_write(c, c->plane0, b); break;
     case S_WRITE_RAM_RED: ssd_ram_write(c, c->plane1, b); break;
-    case S_DATA_ENTRY: c->data_entry = b & 7; break;
+    case S_DATA_ENTRY:
+        c->data_entry = (uint8_t)((c->data_entry & SSD_DE_GATE_REV) | (b & SSD_DE_MASK));
+        break;
+    case S_DRIVER_OUTPUT:
+        /* Bytes 1..2 are MUX (gate lines - 1); byte 3 carries the scan control.
+         * The SSD16xx datasheet numbers it B[0] GD, B[1] SM, B[2] TB, with TB = 1
+         * scanning G(n-1) -> G0; Ssd1677Driver ORs its own SCAN_TB_FLIP = 0x01
+         * into the same byte for a mirrorY mount. Either bit means "reverse the
+         * gate scan", and the X4-class NO_FLIP profiles send 0x02 (SM only, both
+         * bits clear), so honour both readings. */
+        if (c->cmd_len == 3) {
+            if (b & 0x05) c->data_entry |= SSD_DE_GATE_REV;
+            else c->data_entry &= (uint8_t)~SSD_DE_GATE_REV;
+        }
+        break;
     case S_RAM_X_RANGE:
         if (c->cmd_len == 2) c->x_start = (c->arg[0] | (c->arg[1] << 8)) & 0x3FF;
         if (c->cmd_len == 4) c->x_end = (c->arg[2] | (c->arg[3] << 8)) & 0x3FF;
@@ -585,10 +646,16 @@ void epd_core_compose(EpdCore *c)
     if (c->variant == EPD_SSD1677) {
         bool gray = c->custom_lut && !(c->ctrl1 & 0x40);
         c->image_gray_approx = gray;
+        /* Gate scan direction (0x01 third byte, TB). Clear -- the X4-class
+         * NO_FLIP profile, the only thing CrossPoint or the stock ever send --
+         * means the gates are physically reversed against the RAM rows: RAM row
+         * 479 is the top of the glass. TB set reverses the scan, so the same RAM
+         * appears mirrored vertically (the driver's mirrorY mount). */
+        bool gate_rev = (c->data_entry & SSD_DE_GATE_REV) != 0;
         for (int r = 0; r < EPD_H; r++) {
-            /* gates are physically reversed: RAM row 479 is the top of the glass */
-            const uint8_t *bw = &c->plane0[(EPD_H - 1 - r) * EPD_WB];
-            const uint8_t *red = &c->plane1[(EPD_H - 1 - r) * EPD_WB];
+            int ram_row = gate_rev ? r : (EPD_H - 1 - r);
+            const uint8_t *bw = &c->plane0[ram_row * EPD_WB];
+            const uint8_t *red = &c->plane1[ram_row * EPD_WB];
             uint8_t *dst = &c->image[r * EPD_W];
             for (int x = 0; x < EPD_W; x++) {
                 int bit = 7 - (x & 7);

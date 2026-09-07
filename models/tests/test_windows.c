@@ -12,7 +12,10 @@
  * driver but that the model does not meet yet is checked with XCHECK(): it is
  * reported and counted separately instead of failing the build, and every such
  * check carries the finding in its comment. XCHECK() that passes prints XPASS
- * (the model caught up) and does not fail either.
+ * (the model caught up) and does not fail either. No XCHECK() is in use right
+ * now -- the three findings this file recorded (X-decrement windows, the AM bit
+ * of 0x11, the gate-scan mirror byte) are all fixed in epd_core.c and are
+ * checked as ordinary assertions; the harness stays for the next gap.
  *
  * Sources used for the expectations, per test:
  *   SSD16xx datasheet semantics for 0x11 / 0x44 / 0x45 / 0x4E / 0x4F / 0x24,
@@ -250,11 +253,6 @@ static void test_data_entry_modes(void)
         /* 4 byte columns (pixels 16..47) x 3 rows (100..102), start = origin. */
         int xs = x_inc ? 16 : 47, xe = x_inc ? 47 : 16;
         int ys = y_inc ? 100 : 102, ye = y_inc ? 102 : 100;
-        /* Known model gaps: ssd_ram_write() ignores AM (bit 2) and always steps X
-         * first, and for a decrementing X it tests/wraps against x_start instead of
-         * x_end, i.e. it assumes 0x44 was given low-address-first even in
-         * X-decrement mode (the driver's mirrorX path gives it high-address-first). */
-        int known = (mode & 4) || !(mode & 1);
 
         epd_core_init(c, EPD_SSD1677);
         ssd_window(c, mode, xs, xe, ys, ye);
@@ -276,31 +274,30 @@ static void test_data_entry_modes(void)
             char msg[240];
             snprintf(msg, sizeof(msg),
                      "data-entry mode %d (x %s, y %s, AM=%d): plane0 differs at row %d byte %d "
-                     "(want %02x, got %02x)%s%s", mode, x_inc ? "inc" : "dec", y_inc ? "inc" : "dec",
+                     "(want %02x, got %02x)", mode, x_inc ? "inc" : "dec", y_inc ? "inc" : "dec",
                      (mode & 4) ? 1 : 0, d < 0 ? -1 : d / EPD_WB, d < 0 ? -1 : d % EPD_WB,
-                     d < 0 ? 0 : shadow[d], d < 0 ? 0 : c->plane0[d],
-                     x_inc ? "" : " [X decrement: the model tests and wraps against x_start, not x_end]",
-                     (mode & 4) ? " [AM is ignored: the model always steps X first]" : "");
-            expect(d < 0, known, __LINE__, msg);
+                     d < 0 ? 0 : shadow[d], d < 0 ? 0 : c->plane0[d]);
+            expect(d < 0, 0, __LINE__, msg);
         }
 
         /* The glass: RAM row 479 is the top of the panel, so the window's first
          * cell must appear at glass row 479 - ys. (The first byte written always
-         * lands at the counter origin, whatever the mode.) */
+         * lands at the counter origin, whatever the mode.) The cell is the whole
+         * 8-pixel byte that holds xs -- pixels xs & ~7 .. | 7 -- which for an
+         * X-decrement window (xs = 47) is the byte to the *left* of xs. */
         ssd_refresh(c, 0);
         CHECK(c->refresh_count == 1 && !c->image_gray_approx, "mode %d: one plain refresh", mode);
         uint8_t want = shadow[ys * EPD_WB + xs / 8];
+        int x0 = xs & ~7;
         int bad = -1;
         for (int b = 0; b < 8; b++) {
-            if (c->image[(EPD_H - 1 - ys) * EPD_W + xs + b] != pixel_of(want, xs + b)) { bad = b; break; }
+            if (c->image[(EPD_H - 1 - ys) * EPD_W + x0 + b] != pixel_of(want, x0 + b)) { bad = b; break; }
         }
         {
-            /* Only a known gap when the model already put a different byte there. */
-            int known_here = known && c->plane0[ys * EPD_WB + xs / 8] != want;
             char msg[240];
             snprintf(msg, sizeof(msg), "mode %d: glass row %d, pixel %d of byte %02x wrong",
                      mode, EPD_H - 1 - ys, bad, want);
-            expect(bad < 0, known_here, __LINE__, msg);
+            expect(bad < 0, 0, __LINE__, msg);
         }
         CHECK(c->unknown_cmds == 0, "mode %d: unknown commands %llu", mode, (unsigned long long)c->unknown_cmds);
     }
@@ -685,9 +682,8 @@ static void test_writes_outside_window(void)
 /* ==========================================================================
  * (6) Findings: the SSD1677 gate-scan byte
  * The third byte of 0x01 (driver output control) carries the gate scan
- * direction. Two readings exist and the model meets neither, because it does not
- * store that byte at all (0x01 is a no-op) and always maps RAM row 479 to the
- * top of the glass:
+ * direction. Two readings exist and the model honours both (epd_core.c keeps the
+ * bit and epd_core_compose() reverses the RAM row -> glass row mapping for it):
  *   - the driver's: Ssd1677Driver writes cfg.driverOutputScan (0x02) and ORs
  *     SCAN_TB_FLIP (0x01) for a mirrorY mount, "flips the gate scan order (TB
  *     bit) for an upside-down mount";
@@ -719,9 +715,9 @@ static void test_gate_scan_flip(void)
         ssd_window(c, 0x01, 0, 799, 479, 479);
         ssd_write_plane(c, 0x24, row, EPD_WB);
         ssd_refresh(c, 1);
-        XCHECK(c->image[479 * EPD_W] == 0 && c->image[0] == 255,
-               "6: a flipped gate scan (0x01 third byte %02x, %s) is ignored: RAM row 479 still lands "
-               "at glass row 0", scan, k ? "datasheet TB" : "the driver's mirrorY");
+        CHECK(c->image[479 * EPD_W] == 0 && c->image[0] == 255,
+              "6: a flipped gate scan (0x01 third byte %02x, %s) must move RAM row 479 to glass "
+              "row 479, not row 0", scan, k ? "datasheet TB" : "the driver's mirrorY");
     }
     free(c);
 }
