@@ -123,8 +123,9 @@ The single sample previously on the card,
 - **MSB first** within each byte (bit 7 = leftmost pixel).
 - **Polarity: a set bit (1) is a black pixel** (the writer stores the inverted pixel value).
 - **Orientation: the upright portrait UI, 480 wide × 800 tall.** The emulator's `x4emu screenshot`
-  is the landscape 800×480 panel; the `.xic` image equals that panel **rotated 90° counter-clockwise**
-  (Pillow `Image.ROTATE_90`), i.e. portrait (px, py) → landscape (py, 479 − px), the same convention
+  is the landscape 800×480 panel; the `.xic` image equals that panel **rotated 90° clockwise** (Pillow
+  `Image.ROTATE_270`; conversely the panel is the capture rotated 90° counter-clockwise, `ROTATE_90`,
+  which is what the decoder applies), i.e. portrait (px, py) → landscape (py, 479 − px), the same convention
   as the rest of the UI.
 
 Pillow one-liner: `Image.frombytes('1',(480,800),payload,'raw','1;I',60)` then `.transpose(ROTATE_90)`

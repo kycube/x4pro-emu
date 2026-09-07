@@ -746,7 +746,7 @@ mechanical acceptance each. Baseline at the start: 20/20 in 4:31.
   `tap 735 347` writes `/sdcard/logs/dev_*.log`. **`.xic` decoded and verified**: 24-byte header (`XIC\0`,
   u16 width/height, version 1, levels 1 | 4, planes 1 | 2, u32 payload = stride·height·planes, the rest 0),
   1 bpp, MSB first, 1 = black, rows top-down, the upright portrait 480×800 = the landscape panel screenshot
-  rotated 90° counter-clockwise; **0 pixels** from the panel (run 2; run 1 differed by 69 px, all the clock's
+  rotated 90° clockwise (the decoder rotates a capture 90° counter-clockwise to get the panel back); **0 pixels** from the panel (run 2; run 1 differed by 69 px, all the clock's
   minute rollover). The capture records the last fully painted base frame, not the translucent panel.
   `docs/xic.md`; `tools/xic2png.py` (decode, `--info`, `--diff`, `--encode`); `tools/stockdev.py` (the patch);
   samples under `tests/data/`. The first decoder version, written from the card's 320×96 font-preview sample

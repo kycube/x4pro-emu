@@ -14,7 +14,8 @@ three decode assumptions before any capture existed (docstring of the tool):
 tests/data/stock-home-{capture.xic,panel.png} is the oracle that settled the header: a Developer ->
 Screen Capture `.xic` the stock wrote to the emulator's card, and the `x4emu screenshot` of the same
 Home screen taken just before it. The two agree in **every** pixel, which is what fixes the
-orientation (portrait 480x800, the landscape panel rotated 90 degrees counter-clockwise) as well as
+orientation (portrait 480x800, the landscape panel rotated 90 degrees clockwise; rotating a capture 90
+degrees counter-clockwise gives the panel back) as well as
 the polarity and the bit order at screen scale. Both files are emulator-made and hold nothing of the
 owner's. `tests/test_stock_capture.py` reproduces that pair from a boot; this file only needs the
 bytes.
