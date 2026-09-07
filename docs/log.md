@@ -923,3 +923,15 @@ every next step needs (fonts, wallpapers, labels, Lua screens, the tap-parity qu
 oracles are in the suite, so `tools/device.py restore-stock --yes` put the stock back into app0 (5,503,680
 bytes written, hash verified, head read-back OK, hard reset). app1 still holds the stock copy; CrossPoint
 returns with `flash-crosspoint --yes`. Backups untouched.
+
+## 2026-09-07 — The device moves to stock 7.5.4; new backup; 7.5.4 boots in the emulator
+
+The owner updated the device through its Upgrade menu (7.5.4, released 2026-09-03; app built Sep 5 2026,
+IDF v6.0.1, 5,445,680 bytes). With the device on the adapter: `tools/device.py backup` → two identical 16 MB
+reads (`flash-2026-09-07-{a,b}.bin`, SHA-256 326f3c8f…). otadata: entry 0 seq 1, entry 1 seq 2 → **app1 boots**;
+app0 still holds 7.2.4 (restored earlier that day), app1 = 7.5.4 (`images/device/stock-app1-7.5.4.bin`,
+extracted from the dump). `tools/device.py flash-crosspoint` / `restore-stock` assume app0 boots: teach them
+otadata before any device write. The raw 7.5.4 dump boots in the emulator as-is (`--boot-hold-power`, net_en 0):
+preflight `decision=0`, Home at refresh 3, `epd_unknown_cmds` 0, `iolog_hot` only the IO_MUX logger — no new
+model gap on the boot path. Everything in `docs/stock-firmware.md` and the stock tools' offset tables is 7.2.4:
+the re-baseline (Ghidra on 7.5.4, re-located gates and packs, version-aware tools) is §0.4.0 of NEXT_PHASE.

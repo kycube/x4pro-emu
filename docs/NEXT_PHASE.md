@@ -107,8 +107,9 @@ The session-7 entries of `docs/log.md` say what each tier delivered.
   stops itself ~8 s later for lack of air; the UI never stalls
   (`tests/test_stock.py`, two cases). See §3.
 - Device: ESP32-S3 rev v0.2, 8 MB octal PSRAM, **UC8279** panel (LUT_VER 0x68), 15.7 GB card.
-  app0 = the stock 7.2.4 again since 2026-09-07 (the owner chose it: every next device step is about the
-  stock; CrossPoint returns with `flash-crosspoint --yes`), app1 = stock 7.2.4 copy, bootloader/table/otadata untouched,
+  app0 = stock 7.2.4, **app1 = stock 7.5.4 and booting** (the owner's OTA update of 2026-09-07; otadata entry 1
+  seq 2), bootloader/table untouched; `tools/device.py` still assumes app0 boots (teach it otadata before any
+  device write),
   verified double backup in `images/device/flash-2026-09-06-{a,b}.bin`. The owner, when present, can
   press buttons, enter File Transfer (card mounts on the Mac as "NO NAME"), and re-seat the pogo
   adapter; ask in plain words, one step at a time. In deep sleep the USB port vanishes; the stock app switches to a mass-storage

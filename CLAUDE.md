@@ -30,7 +30,8 @@ for symbol-less firmware reading and new models).
   CPU-frequency changes by the firmware do not change emulation speed.
 - **GPIO matrix / IO_MUX**: not modelled electrically. SPI2 always reaches the panel; pull settings
   are ignored (the GPIO model carries per-pin idle levels: buttons, MOSI, RST, CS idle HIGH).
-- **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1): runs to Home with the device's NVS as dumped; its
+- **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1 — the version every address in `docs/stock-firmware.md` and
+  the stock tools refer to; the device runs 7.5.4 since 2026-09-07, see "The real device"): runs to Home with the device's NVS as dumped; its
   WiFi start (14 s) ends in `wifi:force witi stop` at +7.5 s and a deinit at +17.5 s without stalling
   the UI (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0` skips it). It fades the frontlight out 60 s
   after the last input and back on the next touch (LEDC hardware fade, walked in guest time; `state.ledc`
@@ -168,13 +169,16 @@ In deep sleep the port disappears; only its power button brings it back. The sto
 a mass-storage personality ("XTEink X4 Pro", 0x303A:0x4002) in USB mode.
 
 1. Nothing is written to the device without a verified double backup on disk
-   (`tools/device.py backup`: two 16 MB reads, SHA-256 equal). Current backup:
-   `images/device/flash-2026-09-06-{a,b}.bin`, `docs/device/flash-backup-sha256.txt`.
+   (`tools/device.py backup`: two 16 MB reads, SHA-256 equal). Current backups:
+   `images/device/flash-2026-09-07-{a,b}.bin` (stock 7.5.4 in app1, booting) and `flash-2026-09-06-{a,b}.bin`
+   (7.2.4 era), `docs/device/flash-backup-sha256.txt`.
 2. Never `erase-flash`, never `espefuse burn-*`, never write 0x0..0x10000 (bootloader, partition
    table, otadata) except to restore the verified backup byte for byte. Writing an OTA app slot
-   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-09-07): app0 = the
-   stock 7.2.4 again (`restore-stock`, hash verified, read-back OK), app1 = the stock 7.2.4 copy, otadata
-   untouched (boots app0). `tools/device.py flash-crosspoint --yes` puts CrossPoint back into app0.
+   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-09-07, after the owner's OTA update): app0 = stock 7.2.4 (restored, then left
+   behind by the update), **app1 = stock 7.5.4** (built Sep 5 2026, IDF v6.0.1, 5,445,680 bytes,
+   `images/device/stock-app1-7.5.4.bin`), otadata entry 1 seq 2 → **app1 boots**. `tools/device.py`'s
+   `flash-crosspoint` / `restore-stock` still target app0 and assume app0 boots: **do not use them until they
+   are taught otadata** (a write to app0 would not even run now).
 3. Do not touch the device during a transfer; the magnetic pogo adapter detaches easily. If a
    transfer breaks, check the device state before retrying.
 4. GPIO19/20 are USB D-/D+: never run any pin or bus probe over them.
