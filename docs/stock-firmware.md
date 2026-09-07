@@ -259,9 +259,14 @@ y_offset` (offsets int8; rendering "Bookshelf" from `system_medium.xtf` reproduc
 record_size`) and the file ends there (no tail section); 0x06 (0x140), 0x08 (3), 0x0e/0x0f, the line height,
 descent and the placement baseline (17/20) are copied per cell. The `.hot.xtfp` is **not** required (a hot-less
 package of the card's own `.xtf` bytes switches; the app writes `selection.config` and the `.base.xtfp`
-caches itself and restarts). A generated `.xtf` is listed correctly but **refused at load** ("External font
-failed to load", "Failed to switch system font") — the 8-byte word at header 0x30 (also in the `.xtfp`
-header) is the remaining suspect; an agent is tracing the loader.
+caches itself and restarts). The "8-byte hash" at 0x30 is **two zlib CRC-32s** (loader at app VA 0x4210db20; check at
+0x4210e52e–0x4210e553, CRC routine 0x4210d754): 0x30 over the glyph records (`data[glyph_offset :
+glyph_offset + glyph_bytes]`; 0 = unsigned, refused unless a flag is set), 0x34 over the 52 header bytes
+before it. Both reproduce the card fonts' stored words (`0x57ddf6f8 / 0xffe29784`, `0x1f64e27f /
+0x09897cb4`); the FNV-1a-32 of the header at 0x4210dc69 is a cache key. With them written, a converted
+TrueType font installed through Settings → System Font makes the stock restart and draw Home in it
+(emulator, `tests/test_xtfont.py`). `install --direct` alone does not activate a font: the UI switch
+writes the `.base.xtfp` caches, `selection.config` and the boot plan.
 
 **Is adding a font data-only? Yes by design, with a converter to write.** The path is Settings →
 System Font → a `.xtfont` ZIP in `XTCache/system_font_downloads/` (or the installed directory under

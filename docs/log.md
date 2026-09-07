@@ -871,7 +871,10 @@ tools and probes, Sonnet for the tap-path hunt.
   rendering "Bookshelf" from the card's `.xtf` reproduces the Home title in 0 of 2260 pixels; header 0x14 =
   range count, 0x2c = glyph-data length, no tail; `.hot.xtfp` not required (the app generates the caches and
   restarts). A generated package is listed correctly, parses, and is **refused at load** ("External font
-  failed to load", "Failed to switch system font"); the 8-byte word at header 0x30 is the suspect.
+  failed to load", "Failed to switch system font") — until the loader (app 0x4210db20) was read: header 0x30 and
+  0x34 are zlib CRC-32s of the glyph records and of the 52 header bytes before them. Written, **a converted
+  Arial Bold installs through Settings → System Font, the stock restarts and draws Home in it** (`dd5e675`).
+  `install --direct` cannot activate a font by itself: the UI switch writes the caches and the boot plan.
 - **Lua host (Opus ×2; nothing committed).** A plain `XTApps/hello/` directory is never mentioned and All
   Files hides `/sdcard/XTApps`. The nav menu's gate A (VA 0x4234516a, `b6 29 07` → `b6 29 ff`) unhides
   **Preload List** and **Statistics** (both work); gate B (a stub twin of the developer one, 0x4233abe8) gates
