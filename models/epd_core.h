@@ -25,6 +25,44 @@
 #define EPD_UC_GATES 600                /* UC8279 X4: TRES height, visible 120..599 */
 #define EPD_UC_PLANE_BYTES (EPD_WB * EPD_UC_GATES)
 
+/* UC81xx external LUT bank (0x20 VCOM, 0x21 WW, 0x22 BW, 0x23 WB, 0x24 BB) as the
+ * UC8279 X4 receives it: up to 49 data bytes = 7 groups of 7 bytes, group g at 7g:
+ *   [0] group header (0x01 in every populated group; 0x00 = unused group, skipped)
+ *   [1..4] four phases, each byte = level << 6 | frames (0..63)
+ *   [5] repeat count of the group   [6] second repeat/tail byte (0x01 or 0x00, ignored)
+ * Levels (source tables): 00 GND (hold), 01 VDH (drives black), 10 VDL (drives white),
+ * 11 floating (hold). VCOM table: 00 VCOM_DC, 01 VCOMH, 10 VCOML, 11 floating.
+ * Evidence and doubts: docs/grayscale.md. The 42-byte settle tables are the same
+ * layout with six groups. */
+#define EPD_UC_LUT_BYTES 49
+#define EPD_UC_LUT_GROUP_BYTES 7
+#define EPD_UC_LUT_GROUPS 7
+#define EPD_UC_LUT_PHASES_PER_GROUP 4
+#define EPD_LUT_MAX_PHASES (EPD_UC_LUT_GROUPS * EPD_UC_LUT_PHASES_PER_GROUP)
+#define EPD_GRAY_K_DEFAULT 28           /* reflectance change per frame at VDH/VDL (0..255 scale) */
+#define EPD_FRAME_US_DEFAULT 6667       /* 150 Hz: PLL 0x0E = FRS 1110 in the UC8179c table; duration estimates only */
+
+typedef enum {
+    EPD_LUT_GND = 0,    /* VCOM table: VCOM_DC */
+    EPD_LUT_VDH = 1,    /* VCOM table: VCOMH */
+    EPD_LUT_VDL = 2,    /* VCOM table: VCOML */
+    EPD_LUT_FLOAT = 3,
+} EpdLutLevel;
+
+typedef struct {
+    uint8_t level;      /* EpdLutLevel */
+    uint8_t frames;     /* 0..63 */
+    uint8_t group;      /* 0..6 */
+    uint8_t repeat;     /* the group's repeat count, applied to all its phases */
+} EpdLutPhase;
+
+typedef struct {
+    int nphases;        /* phases with frames > 0, in table order (repeats not expanded) */
+    int groups;         /* populated groups */
+    uint32_t frames;    /* total frames, repeats applied */
+    EpdLutPhase phase[EPD_LUT_MAX_PHASES];
+} EpdLutSeq;
+
 typedef enum {
     EPD_SSD1677 = 0,
     EPD_UC8179 = 1,
@@ -88,6 +126,9 @@ struct EpdCore {
     uint16_t ptl[4];                /* x0, x1, y0, y1 */
     bool power_on;
     bool uc_lut_loaded;             /* any 0x20..0x24 LUT written since power-on */
+    uint8_t uc_lut[5][EPD_UC_LUT_BYTES];   /* the bank as last written (a new write zeroes its table) */
+    uint8_t uc_lut_len[5];
+    uint8_t uc_cdi;                 /* 0x50 data byte; bit 4 = DDX[0] (1: RAM bit 1 = white). MTP default 0x97 */
 
     /* planes (SSD1677: bw + red, 480 rows; UC: old(DTM1) + new(DTM2), 600 rows) */
     uint8_t plane0[EPD_UC_PLANE_BYTES];
@@ -96,7 +137,21 @@ struct EpdCore {
     /* visible image after the last refresh: one byte per pixel, 0 = black, 255 = white */
     uint8_t image[EPD_W * EPD_H];
     bool image_dirty;
-    bool image_gray_approx;         /* last refresh composed 4 levels from two planes */
+    bool image_gray_approx;         /* last refresh composed 4 levels from two planes (fixed table) */
+
+    /* Waveform-level grey model (docs/grayscale.md), off by default. When on, a
+     * refresh that runs the external LUT bank moves each pixel's reflectance
+     * (image[] itself, 0..255) by its transition class: every frame at VDH takes
+     * gray_k off, every frame at VDL adds gray_k, GND/VCOM/floating frames hold,
+     * saturating at 0 and 255. OTP refreshes (no LUT, or PSR REG=0) drive the
+     * new bit fully, as the approximation does. */
+    bool waveform_gray;
+    int gray_k;                     /* EPD_GRAY_K_DEFAULT */
+    uint32_t frame_us;              /* EPD_FRAME_US_DEFAULT; only used for last_lut_us */
+    bool image_gray_waveform;       /* last refresh went through the waveform model */
+    uint32_t last_lut_frames;       /* frames of the last LUT refresh (VCOM table, repeats applied) */
+    uint32_t last_lut_us;           /* last_lut_frames * frame_us */
+    uint8_t gray_map[4][256];       /* per (old<<1 | new) class: reflectance in -> out (rebuilt per LUT refresh) */
 
     /* statistics */
     uint64_t refresh_count;
@@ -139,6 +194,19 @@ int epd_core_line_level(const EpdCore *c);       /* current driven level or -1 *
 
 /* Compose the visible image from the planes (called by refresh; also usable by tests). */
 void epd_core_compose(EpdCore *c);
+
+/* ---- UC81xx LUT interpreter and grey model (docs/grayscale.md) ---- */
+/* Parse one 0x20..0x24 table of len <= EPD_UC_LUT_BYTES bytes (a shorter table
+ * reads as zero-padded) into its phase sequence. */
+void epd_core_lut_phases(const uint8_t *table, size_t len, EpdLutSeq *out);
+/* Run a parsed source table over one reflectance value with the model (k per
+ * driven frame), groups repeated as their counts say, saturating at 0/255. */
+uint8_t epd_core_lut_apply(const EpdLutSeq *seq, uint8_t reflectance, int k);
+/* Which table a pixel's (old, new) RAM bits select under the current CDI DDX:
+ * 1 = WW (0x21), 2 = BW (0x22), 3 = WB (0x23), 4 = BB (0x24). */
+int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit);
+/* Rebuild gray_map[] from the loaded bank (called by compose; usable by tests). */
+void epd_core_build_gray_map(EpdCore *c);
 const char *epd_variant_name(EpdVariant v);
 const char *epd_mode_name(EpdRefreshMode m);
 

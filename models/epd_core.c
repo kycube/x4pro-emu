@@ -118,6 +118,7 @@ static void uc_reset_regs(EpdCore *c)
     memset(c->ptl, 0, sizeof(c->ptl));
     c->power_on = false;
     c->uc_lut_loaded = false;
+    c->uc_cdi = 0x97;               /* MTP "Command Default Setting" byte 8 (docs/grayscale.md) */
     c->deep_sleep = false;
 }
 
@@ -144,6 +145,9 @@ void epd_core_init(EpdCore *c, EpdVariant v)
     memset(c->plane0, 0xFF, sizeof(c->plane0));
     memset(c->plane1, 0xFF, sizeof(c->plane1));
     memset(c->image, 0xFF, sizeof(c->image));
+    c->waveform_gray = false;
+    c->gray_k = EPD_GRAY_K_DEFAULT;
+    c->frame_us = EPD_FRAME_US_DEFAULT;
     ssd_reset_regs(c);
     uc_reset_regs(c);
     c->busy = false;
@@ -468,9 +472,13 @@ static void uc_byte(EpdCore *c, uint8_t b)
         case U_VER: case U_FLG: case U_RMTP:
             uc_prepare_probe(c, b);
             break;
+        case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4:
+            /* a new table replaces the old one; bytes not sent read as zero */
+            memset(c->uc_lut[b - U_LUT0], 0, EPD_UC_LUT_BYTES);
+            c->uc_lut_len[b - U_LUT0] = 0;
+            break;
         case U_PSR: case U_PWR: case U_PFS: case U_DSLP: case U_PLL: case U_CDI:
         case U_TRES: case U_GSST: case U_PTL: case U_CCSET: case U_GSCAN: case U_TSSET:
-        case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4:
         case U_BTST: case U_TCON: case U_PWS: case U_VDCS: case U_TSC: case U_TSE: case U_LPD: case U_AUTO:
             break;
         default:
@@ -497,7 +505,16 @@ static void uc_byte(EpdCore *c, uint8_t b)
         if (c->cmd_len == 8) c->ptl[3] = ((c->arg[6] << 8) | c->arg[7]) & 0x3FF;
         break;
     case U_TSSET: c->last_ctrl2 = b; break;
-    case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4: c->uc_lut_loaded = true; break;
+    case U_CDI: if (c->cmd_len == 1) c->uc_cdi = b; break;
+    case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4: {
+        int t = c->cmd - U_LUT0;
+        if (c->cmd_len <= EPD_UC_LUT_BYTES) {
+            c->uc_lut[t][c->cmd_len - 1] = b;
+            c->uc_lut_len[t] = (uint8_t)c->cmd_len;
+        }
+        c->uc_lut_loaded = true;
+        break;
+    }
     case U_DSLP: if (b == 0xA5) { c->deep_sleep = true; c->power_on = false; } break;
     default: break;
     }
@@ -590,7 +607,12 @@ void epd_core_compose(EpdCore *c)
         /* UC: the NEW plane (DTM2) is what the panel shows after DRF, 1 = white.
          * Visible gates are 120..599 of the 600-gate scan (Uc8279X4Driver gateOffset). */
         bool gray = c->uc_lut_loaded && (c->psr[0] & 0x20);
-        c->image_gray_approx = gray;
+        bool wave = gray && c->waveform_gray;
+        c->image_gray_approx = gray && !wave;
+        c->image_gray_waveform = wave;
+        if (wave) {
+            epd_core_build_gray_map(c);
+        }
         int off = (c->tres_h > EPD_H) ? (c->tres_h - EPD_H) : 0;   /* 120 for 600 gates */
         for (int r = 0; r < EPD_H; r++) {
             const uint8_t *nw = &c->plane1[(off + r) * EPD_WB];
@@ -599,7 +621,11 @@ void epd_core_compose(EpdCore *c)
             for (int x = 0; x < EPD_W; x++) {
                 int bit = 7 - (x & 7);
                 int n = (nw[x >> 3] >> bit) & 1;
-                if (gray) {
+                if (wave) {
+                    /* the pixel keeps its reflectance; this refresh's transition class moves it */
+                    int o = (od[x >> 3] >> bit) & 1;
+                    dst[x] = c->gray_map[(o << 1) | n][dst[x]];
+                } else if (gray) {
                     /* AA planes are streamed inverted: plane0 = ~(base|lsb), plane1 = ~(plane0 ^ msb).
                      * Approximate: both 0 -> white(ish)?? keep it simple: level from the two bits. */
                     int o = (od[x >> 3] >> bit) & 1;
@@ -612,4 +638,87 @@ void epd_core_compose(EpdCore *c)
         }
     }
     c->image_dirty = true;
+}
+
+/* ---- UC81xx LUT interpreter and grey model (docs/grayscale.md) ----------- */
+void epd_core_lut_phases(const uint8_t *table, size_t len, EpdLutSeq *out)
+{
+    memset(out, 0, sizeof(*out));
+    for (int g = 0; g < EPD_UC_LUT_GROUPS; g++) {
+        size_t base = (size_t)g * EPD_UC_LUT_GROUP_BYTES;
+        uint8_t hdr = base < len ? table[base] : 0;
+        uint8_t rp = base + 5 < len ? table[base + 5] : 0;
+        if (!hdr) {
+            continue;   /* unused group (0x00 header): skipped */
+        }
+        out->groups++;
+        for (int p = 0; p < EPD_UC_LUT_PHASES_PER_GROUP; p++) {
+            size_t i = base + 1 + p;
+            uint8_t b = i < len ? table[i] : 0;
+            uint8_t frames = b & 0x3F;
+            if (!frames) {
+                continue;
+            }
+            EpdLutPhase *ph = &out->phase[out->nphases++];
+            ph->level = b >> 6;
+            ph->frames = frames;
+            ph->group = (uint8_t)g;
+            ph->repeat = rp;
+            out->frames += (uint32_t)frames * rp;
+        }
+    }
+}
+
+uint8_t epd_core_lut_apply(const EpdLutSeq *seq, uint8_t reflectance, int k)
+{
+    int v = reflectance;
+    int i = 0;
+    while (i < seq->nphases) {
+        /* one group: its phases in order, repeated as its count says */
+        int g = seq->phase[i].group;
+        int j = i;
+        while (j < seq->nphases && seq->phase[j].group == g) j++;
+        for (int r = 0; r < seq->phase[i].repeat; r++) {
+            for (int p = i; p < j; p++) {
+                int d = seq->phase[p].frames * k;
+                if (seq->phase[p].level == EPD_LUT_VDH) {
+                    v -= d;
+                    if (v < 0) v = 0;
+                } else if (seq->phase[p].level == EPD_LUT_VDL) {
+                    v += d;
+                    if (v > 255) v = 255;
+                }
+                /* GND / VCOM_DC / floating: the pixel holds */
+            }
+        }
+        i = j;
+    }
+    return (uint8_t)v;
+}
+
+int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit)
+{
+    /* DDX[0] = 1 (CDI 0x97 / 0xD7, the MTP default): RAM bit 1 = white. Cleared: 1 = black. */
+    int white_is_one = (c->uc_cdi >> 4) & 1;
+    int o = white_is_one ? old_bit : !old_bit;
+    int n = white_is_one ? new_bit : !new_bit;
+    if (o && n) return 1;       /* WW */
+    if (!o && n) return 2;      /* BW */
+    if (o && !n) return 3;      /* WB */
+    return 4;                   /* BB */
+}
+
+void epd_core_build_gray_map(EpdCore *c)
+{
+    EpdLutSeq seq;
+    for (int cls = 0; cls < 4; cls++) {
+        int t = epd_core_lut_index(c, cls >> 1, cls & 1);
+        epd_core_lut_phases(c->uc_lut[t], c->uc_lut_len[t], &seq);
+        for (int r = 0; r < 256; r++) {
+            c->gray_map[cls][r] = epd_core_lut_apply(&seq, (uint8_t)r, c->gray_k);
+        }
+    }
+    epd_core_lut_phases(c->uc_lut[0], c->uc_lut_len[0], &seq);
+    c->last_lut_frames = seq.frames;
+    c->last_lut_us = seq.frames * c->frame_us;
 }
