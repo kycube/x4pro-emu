@@ -671,3 +671,10 @@ window (CrossPoint polls no input while writing the panel). Transfers under 1 ms
 patches 0001–0012, the stock tests on the full device card. Squad S1 started (two Opus agents:
 `--boot-hold-power`, `nvsedit set-str/erase/redact`); their results, if not merged here, are described in
 `docs/NEXT_PHASE.md` §0.5 for the next session to review. Nothing committed in the main repo (owner's call).
+- **`nvsedit.py set-str / erase / redact`** (Opus agent, squad S1): strings are type 0x21, chunk 0xff,
+  span = 1 + ceil(size/32), data field `<u16 size><u16 0xffff><u32 crc32(data)>` with the bytes in the
+  following span-1 entries (0xff-padded, size counts the NUL); every entry of a span shares one state.
+  `erase` and the retirement half of the setters blank the retired 32-byte slots to 0xff, so a value
+  really leaves the image. `redact` = erase `user_config/{sta_ssid,sta_pwd,wifi_creds}` + `net_en = 0`;
+  the redacted dump boots to Home pixel-identical to the golden (`tests/test_nvsedit.py`, 3 cases,
+  9 s). Recipe in the module docstring; a redacted image may leave `images/`.

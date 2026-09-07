@@ -8,14 +8,15 @@ value: it locates the three entries by key before the edit and checks afterwards
 slots read 0xff and that no entry with those keys is left.
 
 The last test boots the redacted image the way tests/test_stock.py boots the dump (its `stock_card`
-fixture, its `boot_to_home` and `masked_diff` are imported from there) and compares Home with
+fixture, `masked_diff`, `state` and `wait_for` are imported from there; `boot_to_home` follows its
+contract but is kept local, taking either way past the boot-preflight) and compares Home with
 tests/golden/stock-home.png outside the status bar, so the redaction is proven not to cost the stock
 its NVS: an image edited this way still boots to its home screen. Skips without the dump, the device
 card files (images/device/sd-files), the built QEMU or the golden.
 """
 import os, shutil, struct, subprocess, sys, pytest
 from conftest import x4emu, ROOT, PY, QEMU
-from test_stock import DUMP, GOLDEN, boot_to_home, masked_diff, stock_card      # noqa: F401 (fixture)
+from test_stock import DUMP, GOLDEN, masked_diff, state, wait_for, stock_card   # noqa: F401 (fixture)
 
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import nvsedit                                                                 # noqa: E402
@@ -184,10 +185,27 @@ def redacted(tmp_path, request, stock_card):                                    
     x4emu(name, 'stop', check=False)
 
 
+def boot_to_home(name):
+    """tests/test_stock.py::boot_to_home's contract: Home is refresh 2 (the panel init's full refresh
+    is 1) plus an idle panel -- refresh 3 is the status-bar clock, which the stock completes at the
+    next wall-clock minute, so it is never waited for. Kept local and tolerant of either way in (the
+    preflight deep-sleeps a plain cold boot and a power press wakes it; `run --boot-hold-power` makes
+    it accept the boot instead) so this file does not depend on how test_stock.py starts its QEMU."""
+    def booted():
+        if 'main_task: Returned from app_main()' in x4emu(name, 'log').stdout:
+            return 'running'
+        return 'asleep' if 'deep sleep' in x4emu(name, 'status').stdout else None
+    if wait_for(booted, 60, "the stock's boot-preflight decision") == 'asleep':
+        x4emu(name, 'press', 'power')
+        x4emu(name, 'wait-text', 'main_task: Returned from app_main()', '--timeout', '60')
+    st = wait_for(lambda: (s := state(name))['refresh_count'] >= 2 and s, 90, 'home paint')
+    x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '30')
+    return st
+
+
 def test_redacted_image_boots_to_home(redacted):
-    """The whole point of `redact`: the stock still finds its NVS and paints Home. Same path as
-    tests/test_stock.py (preflight deep sleep, power press, refresh 2 + an idle panel -- refresh 3 is
-    the status-bar clock at the next minute and is never waited for), same golden."""
+    """The whole point of `redact`: the stock still finds its NVS and paints Home, pixel for pixel
+    against tests/golden/stock-home.png outside the status bar (clock, battery, WiFi glyph)."""
     name, tmp = redacted
     st = boot_to_home(name)
     assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']

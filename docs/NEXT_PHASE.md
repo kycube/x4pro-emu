@@ -44,9 +44,8 @@ a mechanical acceptance check and keeping symbol-less firmware reading and new m
 5. **Squad S1 was started at the end of session 4** (two Opus agents, see §10): (a) `x4emu run
    --boot-hold-power MS` (cold boot with the power button held so the stock skips its deep-sleep detour;
    owner of `x4emu/commands.py`, `x4emu/cli.py`, `docs/x4emu.md`, the boot path in `tests/test_stock.py`);
-   (b) `tools/nvsedit.py set-str / erase / redact` with `tests/test_nvsedit.py` (a credential-free stock
-   image). If their files show in `git status`, review the diffs, run `make test`, and merge their reports
-   into `docs/log.md` before anything else. Still open in S1: the RTC IO stored-value overlay (a QEMU
+   (b) ~~`tools/nvsedit.py set-str / erase / redact`~~ done and committed. If (a)'s files show in
+   `git status`, review the diff, run `make test`, and merge its report into `docs/log.md` first. Still open in S1: the RTC IO stored-value overlay (a QEMU
    change: never rebuild while a suite runs), the PLL lock flag 0x62/0x0c, the GT911 key byte for the
    stock's Home pad. Then S2 (§10.3).
 6. Commit `c3e908a` (owner, 20:18) holds the first half of session 4: patch 0011 (LEDC fades), `tcbwalk.py`,
@@ -179,8 +178,8 @@ Next, in the order that serves the owner's goal (a usable stock in the emulator)
 7. `x4emu run --boot-hold-power MS`: drive GPIO3 low for the first N ms so the stock's preflight
    accepts a cold boot without the deep-sleep/wake detour (saves ~2 s and a `press power` in every
    script; `tests/test_stock.py::boot_to_home` is where it pays off).
-8. **NVS shareable image**: give `tools/nvsedit.py` `set-str`/`erase` so `sta_ssid/sta_pwd/wifi_creds`
-   can be blanked and a stock image without the owner's credentials can leave `images/`.
+8. ~~**NVS shareable image**~~ **done** (S1): `tools/nvsedit.py set-str / erase / redact`, slots blanked,
+   `tests/test_nvsedit.py`; recipe in the module docstring.
 9. **RTC IO pads**: `RTC_IO_TOUCH_PAD3/14`, `XTAL_32N`, `TOUCH_PAD0..` hold/pull writes (sleep
    isolation); a stored-value overlay like SENS removes the last `x4pro/rtcio` lines.
 10. **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps` = 0); keep

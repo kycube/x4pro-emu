@@ -125,7 +125,7 @@ the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 | `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
 | `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |
 | `mem read ADDR LEN` / `gdb` / `qmp JSON` | human-monitor `xp`; launches `xtensa-esp-elf-gdb` on :1234 (run with `--gdb`; the pioarduino gdb builds cannot talk to this QEMU, see log); raw QMP, e.g. `{"execute":"trace-event-set-state","arguments":{"name":"m25p80_*","enable":true}}` turns QEMU trace events into `qemu.log` lines at runtime |
-| `tools/nvsedit.py IMAGE list` / `set-u8 NS KEY VALUE` | read or edit the NVS partition of a flash image (0x9000/0x5000 by default) |
+| `tools/nvsedit.py IMAGE list` / `set-u8 NS KEY VALUE` / `set-str NS KEY VALUE` / `erase NS KEY` / `redact` | read or edit the NVS partition of a flash image (0x9000/0x5000 by default); `redact` erases `user_config/sta_ssid`, `sta_pwd`, `wifi_creds` (slots blanked) and sets `net_en` 0, so a stock image can leave `images/` (`tests/test_nvsedit.py`) |
 
 ROM symbols for the stock app's PCs: `make rom-symbols` → `images/rom/esp32s3_rev0_rom.nm`; the app
 itself is disassembled with `tools/appdis.py images/device/stock-app0-7.2.4.bin 0xPC` (segments parsed
