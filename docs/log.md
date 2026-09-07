@@ -935,3 +935,11 @@ otadata before any device write. The raw 7.5.4 dump boots in the emulator as-is 
 preflight `decision=0`, Home at refresh 3, `epd_unknown_cmds` 0, `iolog_hot` only the IO_MUX logger — no new
 model gap on the boot path. Everything in `docs/stock-firmware.md` and the stock tools' offset tables is 7.2.4:
 the re-baseline (Ghidra on 7.5.4, re-located gates and packs, version-aware tools) is §0.4.0 of NEXT_PHASE.
+
+**Lua tooling landed (2026-09-07, end of session 7; Opus):** `tools/stockpatch.py` (named patches developer-menu /
+hidden-menu-rows / lua-apps-row with byte verification, checksum + SHA-256 recompute, revert), `tools/xtapp.py`
+(`app.xtapp` = 0x80-byte XTAP header + manifest JSON, unsigned; `pack` reproduces the session-7 reference
+byte-for-byte; `install`, `info`, `new` scaffold with the confirmed API), `tests/test_lua_apps.py` (the patched
+stock lists and runs the hello app, three goldens), `docs/lua-apps.md`. 27 fast tests + 1 emulator test green
+(twice by the agent, once by the coordinator). Stock oddities: `ctx.log.*` reaches nothing; `g:clear()` without an
+argument paints black; the Lua Apps page is titled "Extensions" with the bookshelf footer.

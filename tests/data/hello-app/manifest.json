@@ -1,0 +1,15 @@
+{
+  "app_id": "hello",
+  "display_name": "Hello Lua",
+  "version": "1.0",
+  "author": "lc",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ],
+  "lockscreen": {
+    "enabled": true,
+    "interval_sec": 5
+  }
+}

@@ -17,16 +17,12 @@ The session-7 entries of `docs/log.md` say what each tier delivered.
    built QEMU, the CrossPoint build and the gitignored `images/` (device dump, card mirror, ROM ELF, and now
    `images/ghidra/` — rebuilt in a minute by `tools/ghidra_stock.py analyze`). `qemu/build-s1/`,
    `build-s2/` are agents' build directories (`X4EMU_QEMU=…`): the pattern for QEMU work beside other agents.
-2. **An Opus agent was still running when session 7 ended** (started at the end of the session, 150-minute
-   box): `tools/stockpatch.py` (named patches: developer-menu, hidden-menu-rows, lua-apps-row; list/apply/
-   revert/--check), `tools/xtapp.py` (pack/info/install/new for the `app.xtapp` container),
-   `tests/test_stockpatch.py`, `tests/test_xtapp.py`, `tests/test_lua_apps.py` (boots the patched stock,
-   opens Lua Apps, runs the hello app; goldens `stock-menu-lua.png`, `stock-lua-apps.png`,
-   `stock-lua-hello.png`), `tests/data/hello-app/`, `docs/lua-apps.md`. **First thing next session:**
-   `git status` — if those files are there, read them, run their tests (fast ones twice, the emulator test
-   once), add the CLAUDE.md rows, commit; if the agent did not finish, the facts it needs are all in
-   `docs/stock-firmware.md` ("Probed in session 7") and its scratch (`…/scratchpad/lua/`, gone with the
-   session) — re-brief from the doc.
+2. ~~An Opus agent was still running~~ **landed and committed** (end of session 7): `tools/stockpatch.py`,
+   `tools/xtapp.py`, `tests/test_stockpatch.py`, `tests/test_xtapp.py`, `tests/test_lua_apps.py` (boots the patched
+   7.2.4 stock, opens Lua Apps, runs the hello app; goldens `stock-menu-lua.png`, `stock-lua-apps.png`,
+   `stock-lua-hello.png`), `tests/data/hello-app/`, `docs/lua-apps.md`. Oddities the stock showed: `ctx.log.*`
+   reaches nothing (no console, no card), `g:clear()` with no argument paints the frame black (`g:clear(0)`
+   whitens it), the Lua Apps page titles itself "Extensions" and keeps the bookshelf footer.
 3. **Session 7 in one line:** the owner's goal is modding the stock firmware (visual enhancements + a smarter
    keyboard); the survey (`docs/stock-firmware.md`) mapped it; data-only tools landed and work —
    `tools/stockstrings.py` (relabel anything), `tools/xtfont.py` (a converted TrueType font installs and
