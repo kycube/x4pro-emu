@@ -842,3 +842,48 @@ CrossPoint, 4 interface, 8 stock, 19 fast). The full run lost the first menu tap
 the GT911 frame and did nothing with it, the second time in three full-suite runs (always the first or second
 tap after Home, never alone). The stock tests' `tap()` retries once now, like `tap_repaints`; whether the
 device drops such taps is an open parity question (`docs/NEXT_PHASE.md` §0.4). Device untouched.
+
+## 2026-09-07 — Session 7: the owner's direction is the stock firmware; survey and first data-only tools
+
+The owner: "I do intend on enhancing the stock firmware with help by you. Basically making it prettier with
+better UX." The emulator becomes the workbench for modding the closed-source `xteink_app` 7.2.4; S6 is
+re-scoped accordingly (`docs/NEXT_PHASE.md` §0.5). Cost-balanced again: one Fable survey, Opus for the
+tools and probes, Sonnet for the tap-path hunt.
+
+- **Survey (Fable; `docs/stock-firmware.md`).** Binary shape and segments (app 5.5 MB in a 7.9 MB slot);
+  the C++ architecture from the typeinfo names; no FreeType — every glyph a pre-rendered 1-bpp bitmap; the
+  `.xtf`/`.xtfont` external-font system (data by design); wallpapers from the card; a four-language string
+  pack for every label; layout numbers computed from font metrics and theme structs, not immediates; risks
+  (boot-preflight, otadata VALID = no auto-rollback for app0: use app1 + pending-verify on the device); the
+  tooling gap (Ghidra + Xtensa recommended; `capstone` added to the venv); and a **Lua 5.5 app host** with
+  drawing/refresh/gesture verbs and a hidden "Lua Apps" menu entry.
+- **Labels (Opus; `tools/stockstrings.py`, `b003b01`).** list/get/set/compact/restore over three packs
+  (labels 234 groups at 0x3c3f7d54, counts 18, the headerless toasts pack 688 groups at 0x3c490124). The
+  survey's "~1 KB of padding" was wrong: 2/1/0 bytes; `compact` suffix-merges the label blob (497 bytes
+  freed). The emulator renders appended labels (`test_stock_relabelled_menu`: the nav menu differs from its
+  golden only inside the relabelled entry).
+- **Wallpaper (Sonnet; no patch).** All Files → the image → tap again → **Set as Wallpaper** writes
+  `lockscrWallp` and `shutWallp` (+ `lockscrIdle`/`lockscrShut` = 3); PNG 480×800 fits exactly, persists
+  across a cold reboot; a landscape image is scaled to width with black bars on the real sleep screen (the
+  preview rotates it — the two renderers disagree); a 100×150 one shows a placeholder and is still accepted.
+  No separate Images/Wallpapers page exists in this build. The owner can do this on the device today.
+- **Fonts (Opus; `tools/xtfont.py`, `532fb0a`).** Metric bytes `advance_x, advance_y, x_off, y_off`;
+  rendering "Bookshelf" from the card's `.xtf` reproduces the Home title in 0 of 2260 pixels; header 0x14 =
+  range count, 0x2c = glyph-data length, no tail; `.hot.xtfp` not required (the app generates the caches and
+  restarts). A generated package is listed correctly, parses, and is **refused at load** ("External font
+  failed to load", "Failed to switch system font"); the 8-byte word at header 0x30 is the suspect.
+- **Lua host (Opus ×2; nothing committed).** A plain `XTApps/hello/` directory is never mentioned and All
+  Files hides `/sdcard/XTApps`. The nav menu's gate A (VA 0x4234516a, `b6 29 07` → `b6 29 ff`) unhides
+  **Preload List** and **Statistics** (both work); gate B (a stub twin of the developer one, 0x4233abe8) gates
+  page id 0x09 but no eighth row appears. The lock-screen route: `user_config/lockscrLuaApp` (str) +
+  `lockscrMode` = 2 is exactly what `set_as_lockscreen_app` writes, yet four boots painted the byte-identical
+  "Get Started" guide — the loader path (`ScriptHostPagePresenter` 0x42129ea4 → `app.xtapp` → `assets.xtab`
+  → plain `manifest.json` at 0x42064b50 → `index.lua`/`lockscreen.lua`) is complete and supports unwrapped
+  directories, but nothing on the standby path constructs the presenter. Verdict: shipped disabled at build
+  time; finding the stub is a call-graph job (Ghidra).
+
+Lessons: the survey's guesses ("~1 KB padding", "an Images page") each cost an agent an hour — a survey
+should mark every unverified number as such (it mostly did); a probe that reads the firmware's own writer
+(what `set_as_lockscreen_app` stores) is worth more than trying values; `appdis.py` + capstone got the
+agents to the gates, but "who calls this presenter" across 5 MB is where a disassembler with a call graph
+is the cheaper tool.
