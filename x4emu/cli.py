@@ -40,8 +40,8 @@ def build_parser():
     p.add_argument('--no-usb-host', action='store_true'); p.add_argument('--icount')
     p.add_argument('--deterministic', action='store_true',
                    help='guest time follows the instruction count (-icount 3 unless --icount says '
-                        'otherwise), so a replayed script lands its inputs at the same guest times '
-                        'run to run; the RTC still follows host time until base-epoch lands')
+                        'otherwise) and the RTC starts from a fixed epoch, so a replayed script lands '
+                        'its inputs at the same guest times and sees the same clock run to run')
     p.add_argument('--boot-hold-power', nargs='?', type=int, const=c.BOOT_HOLD_POWER_MS, default=None, metavar='MS',
                    help='start halted, hold the power button from reset for MS ms (default '
                         f'{c.BOOT_HOLD_POWER_MS}), then release: the stock firmware boots cold '

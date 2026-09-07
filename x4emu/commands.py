@@ -28,13 +28,10 @@ PANEL_W, PANEL_H = 800, 480
 BOOT_HOLD_POWER_MS = 3000
 
 # `run --deterministic` is `-icount 3` (guest time follows the instruction count) plus a fixed RTC
-# seed. The seed is not available yet: the BM8563/PCF8563 model still starts from HOST wall time and
-# the `base-epoch` QOM property on driver `x4pro.pcf8563` is being added. Set this to the epoch
-# second to pin the clock to (e.g. 1767225600 = 2026-01-01T00:00:00Z) once that property exists —
-# `cmd_run` then passes `-global driver=x4pro.pcf8563,property=base-epoch,value=N`. Until then
-# `--deterministic` leaves the RTC on host time, which only matters for firmware that draws a clock
-# (CrossPoint's Home screen does not).
-DETERMINISTIC_RTC_EPOCH = None
+# seed: `cmd_run` passes `-global driver=x4pro.pcf8563,property=base-epoch,value=N` so the BM8563
+# model starts from this epoch second instead of the host's wall clock (0 = host time). None disables
+# the seed (a QEMU without the property rejects the -global).
+DETERMINISTIC_RTC_EPOCH = 1767225600      # 2026-01-01T00:00:00Z (the property landed with QEMU patch 0014)
 
 
 # ------------------------------------------------- record / replay of input commands
@@ -160,8 +157,8 @@ def cmd_run(a):
     if icount:
         cmd += ['-icount', icount]
     if getattr(a, 'deterministic', False) and DETERMINISTIC_RTC_EPOCH is not None:
-        # Hook, disabled until the property lands (see DETERMINISTIC_RTC_EPOCH): pin the RTC so the
-        # guest's wall clock is the same on every run instead of following the host's.
+        # pin the RTC (see DETERMINISTIC_RTC_EPOCH) so the guest's wall clock is the same on every
+        # run instead of following the host's
         cmd += ['-global', f'driver=x4pro.pcf8563,property=base-epoch,value={DETERMINISTIC_RTC_EPOCH}']
     for k, v in (('panel', a.panel), ('fast-epd', 'on' if a.fast_epd else None),
                  ('trace-epd', os.path.abspath(a.trace_epd) if a.trace_epd else None)):

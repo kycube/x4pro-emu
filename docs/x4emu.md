@@ -104,7 +104,7 @@ rotated on it.
 
 | Command | Arguments | `--json` object |
 |---|---|---|
-| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
+| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count and the RTC starts from a fixed epoch, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
 | `stop` | — | `{"name", "pid", "stopped", "running": false}` (`stopped: false` when it was not running) |
 | `reset` | — | `{"name", "reset": true}` |
 | `status` | — | `{"name", "pid", "status", "running", "deep_sleep"}`; not running: `{"name", "pid": null, "status": "not running", "running": false, "deep_sleep": false}` |
@@ -156,12 +156,11 @@ CrossPoint boots to Home at guest time ≈ 1.4 s, a few host seconds).
 
 Two limits, both deliberate:
 
-- **The RTC still follows host time.** The BM8563/PCF8563 model seeds itself from the host's wall
-  clock at start, so a firmware that *draws* a clock still paints a different image every minute.
-  The fix is a `base-epoch` QOM property on driver `x4pro.pcf8563`; the CLI has the hook ready and
-  **disabled** (`DETERMINISTIC_RTC_EPOCH = None` in `x4emu/commands.py`): set it to an epoch second
-  and `--deterministic` starts passing `-global driver=x4pro.pcf8563,property=base-epoch,value=N`.
-  CrossPoint's Home screen draws no clock, so its screenshots already match to the pixel.
+- **The RTC is pinned, not real.** `--deterministic` also passes `-global
+  driver=x4pro.pcf8563,property=base-epoch,value=1767225600` (2026-01-01T00:00:00Z; the constant
+  `DETERMINISTIC_RTC_EPOCH` in `x4emu/commands.py`), so the BM8563 model starts from that second on
+  every run instead of the host's wall clock and a firmware that *draws* a clock paints the same image
+  run to run. Without the flag the RTC follows host time (`base-epoch` 0).
 - **Guest timestamps are not reproduced exactly**, only the pixels. `x4emu`'s waits are host-paced
   polls (every 50 ms), so a replayed input lands a few milliseconds after the recorded guest time.
   Record inputs at moments when the firmware is idle (`--quiet 2`, `wait-quiet`) and that slack
