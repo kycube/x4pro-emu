@@ -694,3 +694,82 @@ the Home-pad key byte) is the next session's first work (`docs/NEXT_PHASE.md` §
   The swipe streamed 31 points over 600 ms blind, and the GT911 model keeps only the latest point, so a
   late read collapses the gesture; each point is now held until consumed (0.5 s cap), the release too,
   and `swipe` takes `--quiet`/`--wait` like `tap`. Two runs green afterwards.
+
+## 2026-09-06 — Session 5: squads in parallel (S1 close, S2 oracle, S4 replay), CI green
+
+First session run end to end as `docs/NEXT_PHASE.md` §10 describes: the coordinator (Fable 5.1) formed four
+agents at once — two Fable for the symbol-less firmware work, two Opus for the mechanical items — one owner
+per file, one agent allowed in the QEMU tree (building in its own `qemu/build-s1` with `X4EMU_QEMU` pointing
+at it, so the shared binary stayed stable for the others), briefs with the facts already known and a
+mechanical acceptance each. Baseline at the start: 20/20 in 4:31.
+
+- **CI (S3) went green on its first Linux run** once the owner pushed main (b7f5918): 12 min end to end,
+  `make build` 9 min (QEMU + CrossPoint from scratch), `make test` 86 s, an artifact of 178 KB of screenshots
+  and emulator logs (so the CrossPoint tests ran rather than skipped). Pushes are the owner's (GitHub Desktop):
+  this Mac has no push credential and no `gh`; the public Actions API answers run/step/artifact queries
+  without a login, the logs need one.
+- **S1 (Fable; QEMU patches 0013–0015).** (1) The cold-boot "PLL" block was not the PLL. Core 0 was
+  *spinning* at app 0x422e45ef on **0x6000E04C**: the PHY's DC-offset (DCO) calibration writes 0x113cf1 then
+  0x113cf3 (bit 1 start), polls bit 24 with no timeout and takes bits 31:30 as two comparator outputs for a
+  12-step binary search on two 9-bit codes (start 0x100, steps 124, 63, 32, 17, 9, 5, 3, 2, 1…, the last four
+  averaged), five passes per calibration (function 0x422e4558; the PHY function table at 0x3fcef3d8 resolves to
+  ROM `rom_pbus_force_test`, `rom_index_to_txbbgain`, `rom_pbus_set_dco`; the format string `dco:%d,%d,%d,%d`
+  sits next to `pll_cal exceeds`). The `pll_cal exceeds 2ms` printer (0x422e0d48) polls
+  `readReg_Mask(0x62, 0x07, 1, 1)` every 20 µs, 100 tries, after the calibration pulse on reg 0x00 bits 6/5
+  (0x422e0c80): the lock flag is **0x62/0x07 bit 1**, not 0x0c (0x0c is read in the cap search and never
+  checked). Both answered (`cal-cmp` property, `ana_answered[]`): a cold boot with `net_en=1` reaches
+  `wifi:mode : sta` at 13.3 s, `force witi stop` +7.6 s, `phy_init: Saving new calibration data`, and **zero**
+  `pll_cal` lines on both paths, as on the device (`state.ana_i2c.pll_cals` 7, `cal_starts` 168 cold; 0
+  after a wake). `test_stock_wifi_fails_fast` boots cold now. (2) **Home pad.** `--trace-i2c` on `x4emu home`:
+  the stock reads 0x814E → 0x90, then **one byte at 0x814F** every 11 ms while the pad is down — the GT911
+  key-value byte that follows the point records (0x814F + 8·count, bit 0 = key 1; Linux's goodix driver reads
+  it the same way; session 4's 0x8177 guess was wrong). A finger reads 8 bytes from 0x814F, track id first:
+  the record starts at 0x814F, CrossPoint reads from 0x8150 and so sees X at its byte 0 (`hardware.md`
+  corrected). Served → in the stock the pad is **Back, one level**: nav menu → Home (pixel-identical), reader →
+  All Files (where the book was opened; the reading menu's arrow goes to the bookshelf instead).
+  `test_stock_home_pad_acts_as_back`; `state.gt911.key_reads`. (3) **RTC IO** stored-value overlay
+  (`x4pro.rtcio` at 0x60008400, W1TS/W1TC act on OUT/ENABLE/STATUS, `state.rtcio`); the stock programs
+  TOUCH_PAD3/5/6/7/13/14, XTAL_32P/N and PAD_DAC2 (32 pad writes); no `x4pro/rtcio` line after a stock boot or
+  a CrossPoint sleep/wake, asserted in both suites. (4) BM8563 **`base-epoch`** property
+  (`x4emu run … -- -global driver=x4pro.pcf8563,property=base-epoch,value=N`, the `--` before raw QEMU
+  arguments; `test_stock_rtc_pinned_by_base_epoch` reads 2021-03-04 05:06 back over I2C). Left open: a QMP
+  `pmemsave` of DRAM from the running stock came back with 44 of 120 pages zero (`tcbwalk.py` found no task);
+  the PC sufficed, so it was not chased — pause the VM first next time.
+- **S2 (Fable, then Opus).** The stock's Developer row in the pull-down light panel (Memory / Developer /
+  Screen Capture) is gated by a predicate that is a **compile-time stub returning 0** in 7.2.4 (app
+  0x4233abe0: `entry; movi.n a2,0; retw.n`, the value the dev log prints as `developer_mode=%u`): no NVS key
+  (the app's whole key table has none), no card file, and the About Device version-tap reveal (Device ID, SN
+  Code, Build Time, Diagnostics Test → Test Mode with Factory Full Test / Aging Test) is a different mechanism.
+  One byte (file offset 0x4eabe4 of the app, 0x02 → 0x12 = `movi.n a2,1`) plus the ESP checksum and SHA-256
+  recomputed exposes the buttons; the patched app boots normally. Path: `swipe 5 240 300 240 --ms 600`,
+  `tap 735 199` → "Screenshot saved", `/sdcard/screenshots/screenshot_YYYYMMDD_HHMMSS.xic` (48,024 bytes);
+  `tap 735 347` writes `/sdcard/logs/dev_*.log`. **`.xic` decoded and verified**: 24-byte header (`XIC\0`,
+  u16 width/height, version 1, levels 1 | 4, planes 1 | 2, u32 payload = stride·height·planes, the rest 0),
+  1 bpp, MSB first, 1 = black, rows top-down, the upright portrait 480×800 = the landscape panel screenshot
+  rotated 90° counter-clockwise; **0 pixels** from the panel (run 2; run 1 differed by 69 px, all the clock's
+  minute rollover). The capture records the last fully painted base frame, not the translucent panel.
+  `docs/xic.md`; `tools/xic2png.py` (decode, `--info`, `--diff`, `--encode`); `tools/stockdev.py` (the patch);
+  samples under `tests/data/`. The first decoder version, written from the card's 320×96 font-preview sample
+  before the writer was read, took header byte 8 for bits-per-pixel and invented a packed 2-bpp format — the
+  writer says version / levels / planes and a second appended plane; corrected. Consequence for the device
+  oracle: Screen Capture is unreachable on an unpatched device, so the oracle needs either the patched stock in
+  an app slot (rule 2 allows app-slot writes after the backup — the owner's call) or photos.
+- **S4 (Opus).** `x4emu record FILE` / `record --stop` journal the input commands as `{t_ms, cmd, args}` at the
+  guest time issued; `replay FILE` waits for the guest clock and calls the same functions in-process;
+  `wait-guest-ms` / `wait-guest-until` poll `state.uptime_us`; `run --deterministic` = `-icount 3` (+ the
+  pinned RTC now that `base-epoch` exists). `tests/test_replay.py`: a CrossPoint flow replayed onto two fresh
+  boots, 0 pixels apart. Finding: QEMU's QMP chardev serves **one client at a time** — a second connection
+  blocks and times out after 5 s, sequential close/connect is free — so replay drops its connection before
+  each step. With `--deterministic --fast-epd` CrossPoint reaches Home at guest 1.4 s in ~2.4 s wall.
+
+Lessons: the console line names the wrong culprit as often as the right one — the `pll_cal` message pointed at
+block 0x62 while the spin was on 0x6000E04C; take the PC first. A "the firmware ignores X" note needs an I2C
+trace before it becomes a fact (the Home pad was reading a byte the model did not serve). A format guessed
+from one sample is a guess until the writer's code is read. Running one QEMU owner with its own build
+directory and `X4EMU_QEMU` let the other three agents boot the shared binary undisturbed for two hours.
+
+**State at the end of session 5:** `make test` 40 cases in 7 min 15 s on QEMU with patches 0001–0015 (13
+CrossPoint including `test_replay.py`, 8 stock including `test_stock_capture.py`, 19 fast). The first full run
+lost one menu tap in `test_stock_wifi_fails_fast` (the stock read nothing; the panel trace ended in its idle
+pre-sent plane) while the test passed alone in 34 s — the stock's known dropped tap under a loaded host — so
+the stock tests' menu taps now go through `tap_repaints` (one retry). CI green on b7f5918; device untouched.

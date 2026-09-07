@@ -12,8 +12,9 @@ for symbol-less firmware reading and new models).
 
 - **USB mass storage / TinyUSB**: the "File Transfer" screen does nothing; the host never sees a disk.
 - **WiFi / BLE**: no radio. The blocks a WiFi start touches are answered (analog-master I2C block, SENS
-  temperature sensor and SAR oneshot, FE/RX/BB/MAC register stub with status bits that read as set), so
-  ESP-IDF's driver comes up, finds no air and stops itself about 8 s after `wifi:mode : sta`; nothing
+  temperature sensor and SAR oneshot, FE/RX/BB/MAC register stub with status bits that read as set, the RF
+  PLL lock flag and the DC-offset comparator the full PHY calibration polls), so ESP-IDF's driver comes up on
+  a cold boot or a wake alike, finds no air and stops itself about 8 s after `wifi:mode : sta`; nothing
   enumerates on the network side. BLE is untested.
 - **Grayscale**: the two-plane 4-level rendering is an approximation (`state.gray_approx` is true
   after such a refresh); anti-aliased text will not look exactly like the glass.
@@ -32,9 +33,10 @@ for symbol-less firmware reading and new models).
   after the last input and back on the next touch (LEDC hardware fade, walked in guest time; `state.ledc`
   shows `fading`/`target_permille`). Its light panel is a pull-down from the portrait top edge
   (`x4emu swipe 5 240 300 240 --ms 600`; brightness and colour-temperature steps, Light button; `x4emu
-  light` follows). Emulator-only console line:
-  `phy: error: pll_cal exceeds 2ms!!!` (x6, RF PLL lock flag unanswered). RTC IO pads, RMT, I2S,
-  APB_SARADC DMA mode, USB OTG stay unmodelled; SAR oneshots and the temperature sensor answer fixed values.
+  light` follows). Its Home pad is Back, one level (`x4emu home`; the GT911 key byte). RMT, I2S,
+  APB_SARADC DMA mode, USB OTG stay unmodelled; SAR oneshots and the temperature sensor answer fixed values;
+  RTC IO pad writes are stored, not acted on. Its Developer menu (Screen Capture, `.xic` files) is compiled
+  out in 7.2.4: `tools/stockdev.py` patches the predicate in an image copy (`docs/xic.md`).
 
 ## Layout
 
@@ -43,8 +45,8 @@ qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (giti
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
 x4emu/         the CLI as a package (pipx install . → `x4emu`; docs/x4emu.md); tools/x4emu is its in-repo shim
-tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py, appdis.py, tcbwalk.py
-tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants)
+tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, xic2png.py, stockdev.py, device.py, epdtrace.py, appdis.py, tcbwalk.py
+tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants, stock, record/replay); fast: nvsedit, xic
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
 docs/          hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures)
 images/        gitignored: flash dumps, SD images, build outputs
@@ -93,8 +95,8 @@ font and cache plans live there; `images/sd-device.img` lacks them), then `x4emu
 images/stock.bin --sd images/sd-full.img --boot-hold-power`. Its boot-preflight rejects a cold boot unless
 the power button is held (`--boot-hold-power [MS]`, default 3000: pressed over QMP before the first
 instruction); without the flag it deep-sleeps and `x4emu --name stock press power` wakes it. Home (refresh 2)
-follows in ~5 s. A cold boot with WiFi on (`net_en=1`) blocks in the PHY's full calibration (NEXT_PHASE §3.2.6):
-boot that case through the wake. Refresh 3 is the status-bar
+follows in ~5 s; with WiFi on (`net_en=1`) the cold boot runs the full PHY calibration ("Saving new
+calibration data") and WiFi still fails fast. Refresh 3 is the status-bar
 clock, completed at the next minute: the stock pre-sends the old plane after every refresh, so a trace ending
 in DTM1 is idle, and "wait for three refreshes" takes 0..60 s (`tests/test_stock.py` boots scratch copies).
 
@@ -115,20 +117,23 @@ the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 
 | Command | Effect |
 |---|---|
-| `run --flash F [--sd IMG] [--efuse F] [--panel ssd1677\|uc8179\|uc8279] [--fast-epd] [--gdb] [--trace-epd F] [--trace-i2c F] [--icount N] [--no-usb-host] [--boot-hold-power [MS]]` | start QEMU detached; `.x4emu/NAME/` holds qmp.sock, console.log (USB Serial/JTAG), uart0.log, qemu.log, pid, run.json |
+| `run --flash F [--sd IMG] [--efuse F] [--panel ssd1677\|uc8179\|uc8279] [--fast-epd] [--gdb] [--trace-epd F] [--trace-i2c F] [--icount N] [--deterministic] [--no-usb-host] [--boot-hold-power [MS]]` | start QEMU detached (`--deterministic` = `-icount 3`: guest time follows the instruction count); `.x4emu/NAME/` holds qmp.sock, console.log (USB Serial/JTAG), uart0.log, qemu.log, pid, run.json |
 | `stop` / `reset` / `status` | quit; system_reset; pid + run state (+ "deep sleep" when paused by the sleep model) |
-| `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2 (`busy`, `transfer_ms`)/i2c0 counters, buttons, touch, gt911 (`frames`, `clears`), battery, rtc, ledc channels (`fading`, `target_permille`), sleep, ana_i2c (analog-master transactions), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), iolog_hot (unmodelled registers polled past the log cap) |
+| `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2 (`busy`, `transfer_ms`)/i2c0 counters, buttons, touch, gt911 (`frames`, `clears`), battery, rtc, ledc channels (`fading`, `target_permille`), sleep, ana_i2c (analog-master transactions, `cal_starts`, `pll_cals`), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), rtcio (`pad_writes`, `hold_mask`), gt911 `key_reads`, iolog_hot (unmodelled registers polled past the log cap) |
 | `log [--follow] [--since N] [--file uart0.log]` / `wait-text TEXT [--timeout S]` | console access; never blocks past the timeout |
 | `screenshot OUT.png [--diff OTHER.png]` | QMP screendump of the panel console (`device=epd`); `--diff` prints % pixels differing and exits 1 when they differ; a 480x800 device BMP is un-rotated automatically |
 | `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |
 | `press left\|right\|power [--ms 120] [--wait S] [--quiet S]` / `hold BTN --ms 3000` | active-low buttons; `--wait` reports the refresh that follows, `--quiet` first waits for an idle panel; a power press while sleeping is extended to 1.5 s |
 | `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
-| `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms] [--wait] [--quiet]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (the stock ignores it). `tap`/`home` stay down for at least `--ms` **and until the firmware has read the frame** (`state.gt911.clears`; up to 5 s), so a tap into CrossPoint's multi-second rendering pass is not lost; the output says when it was read. `swipe` holds every point until read (the GT911 model keeps only the latest point) |
+| `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms] [--wait] [--quiet]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (Back in the stock). `tap`/`home` stay down for at least `--ms` **and until the firmware has read the frame** (`state.gt911.clears`; up to 5 s), so a tap into CrossPoint's multi-second rendering pass is not lost; the output says when it was read. `swipe` holds every point until read (the GT911 model keeps only the latest point) |
+| `record FILE` / `record --stop` / `replay FILE [--timeout S] [--no-wait]` / `wait-guest-ms N` / `wait-guest-until MS` | journal this instance's inputs (press/hold/chord/tap/swipe/home/battery/console-send/reset) as `{t_ms, cmd, args}` lines at the guest time they were issued; `replay` waits for the guest clock to reach each `t_ms` and performs the step in-process with the recorded args; the `wait-guest-*` commands wait on `state.uptime_us`, not the host clock (`tests/test_replay.py`: a journal replayed onto two fresh `--deterministic` boots, 0 px apart) |
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
 | `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
 | `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |
 | `mem read ADDR LEN` / `gdb` / `qmp JSON` | human-monitor `xp`; launches `xtensa-esp-elf-gdb` on :1234 (run with `--gdb`; the pioarduino gdb builds cannot talk to this QEMU, see log); raw QMP, e.g. `{"execute":"trace-event-set-state","arguments":{"name":"m25p80_*","enable":true}}` turns QEMU trace events into `qemu.log` lines at runtime |
 | `tools/nvsedit.py IMAGE list` / `set-u8 NS KEY VALUE` / `set-str NS KEY VALUE` / `erase NS KEY` / `redact` | read or edit the NVS partition of a flash image (0x9000/0x5000 by default); `redact` erases `user_config/sta_ssid`, `sta_pwd`, `wifi_creds` (slots blanked) and sets `net_en` 0, so a stock image can leave `images/` (`tests/test_nvsedit.py`) |
+| `tools/xic2png.py IN.xic OUT.png [--info] [--diff OTHER.png]` / `--encode IN.png OUT.xic` | decode the stock's `.xic` image container (page caches, covers, Screen Capture `/sdcard/screenshots/*.xic`): 24-byte header (version, levels, planes, payload), 1 bpp rows MSB first, 1 = black, the upright portrait frame; `--info` prints the header as JSON, `--diff` counts differing pixels against a panel PNG (portrait captures un-rotated) and exits 1, `--encode` is the inverse (`docs/xic.md`; `tests/test_xic.py` with `tests/data/stock-home-{capture.xic,panel.png}`, 0 px apart) |
+| `tools/stockdev.py IMAGE [--check] [-o OUT]` | enable developer mode (Memory / Developer / **Screen Capture** in the pull-down light panel) in a stock 7.2.4 image, bare app or 16 MB flash image (app0 at 0x10000): the predicate at app VA 0x4233abe0 is a stub returning 0, so one byte at file offset 0x4eabe4 becomes `movi.n a2,1` and the ESP checksum byte and appended SHA-256 are recomputed and re-verified; `--check` reports patched/unpatched/unknown (exit 0/1/2), any other firmware is refused (`tests/test_stockdev.py`; `tests/test_stock_capture.py` drives a patched copy to a capture that matches the panel) |
 
 ROM symbols for the stock app's PCs: `make rom-symbols` → `images/rom/esp32s3_rev0_rom.nm`; the app
 itself is disassembled with `tools/appdis.py images/device/stock-app0-7.2.4.bin 0xPC` (segments parsed

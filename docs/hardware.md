@@ -137,15 +137,16 @@ polled with `delay(1)`. Full details are read at M2/M6 when the model is written
 | RST | GPIO4 | struct |
 | Power | GPIO2 driven LOW (active-low enable) with GPIO1 HIGH | struct `powerEnable=2, powerEnableActiveHigh=false` |
 | Mount | portrait: reports X 0..480, Y 0..800 on the landscape panel → `swapXY=true, flipX=false, flipY=true`, raw ranges X 0..799 / Y 0..479 after the swap | struct ("confirmed by corner-tap") |
-| Home pad | bit 4 of status 0x814E (capacitive key, not a GPIO) | `InputManager.cpp` |
+| Home pad | bit 4 of status 0x814E ("HaveKey", a GT911 touch key, not a GPIO); the key-value byte follows the point records at 0x814F + 8·count, bit 0 = key 1. CrossPoint acts on the status bit; the stock reads the key byte (one byte at 0x814F when no finger is down, every 11 ms while held) and treats the pad as **Back, one level** (nav menu → Home; reader → the screen the book was opened from) | `InputManager.cpp`; stock `--trace-i2c` (docs/log.md 2026-09-06 S1); Linux `goodix.c` reads the byte the same way |
 
 Bring-up (`beginGt911`): GPIO2 LOW, 50 ms; `Wire.begin(39, 38, 400000)`, timeout 10 ms; reset dance with INT
 driven to the select level: INT/RST outputs, RST LOW, INT=level, 10 ms, RST HIGH, 10 ms, INT=level, 50 ms,
 INT → INPUT, 50 ms; probe 0x5D then 0x14 by address ACK (with INT LOW first, then the HIGH level if nothing
 answered). No config upload; the chip self-loads. Polling (`pollGt911`): write 16-bit register MSB first,
 repeated start, read. 0x814E: bit 7 buffer ready, bit 4 Home down, bits 0..3 point count. Then count×8 bytes
-from 0x8150 (X lo, X hi, Y lo, Y hi, size lo, size hi, reserved, track id; coordinates at byte 0), then write
-0x00 to 0x814E.
+from 0x8150 (X lo, X hi, Y lo, Y hi, size lo, size hi, reserved; CrossPoint starts at 0x8150, so it sees the
+coordinates at byte 0 — the GT911 record actually starts at 0x814F with the track id: id, X lo/hi, Y lo/hi,
+size lo/hi, reserved, and the key-value byte comes right after the last record), then write 0x00 to 0x814E.
 
 Touch → panel mapping (`pollGt911`): `sx = swapXY ? rawY : rawX`, `sy = swapXY ? rawX : rawY`, map through
 the raw ranges, then `flipY: y = 479 - y`. The CLI inverts this: a landscape tap (px, py) becomes GT911
@@ -233,6 +234,8 @@ at the PCs of its polling loops (docs/log.md 2026-09-06, "Stock WiFi start"). Th
 | Block | Base | Behaviour the firmware relies on | Evidence |
 |---|---|---|---|
 | I2C_ANA_MST (regi2c masters) | 0x6000E000 | +0x00 / +0x04 command word `block \| reg<<8 \| data<<16`, bit 24 write, bit 25 busy, bit 26 start; a read's answer is in bits 23:16 once busy clears. Blocks: BOD/ULP 0x61, radio 0x62..0x64 (master 1), BBPLL 0x66, 0x67, SAR ADC 0x69, 0x6a, 0x6b, DIG_REG 0x6D. +0x40 ANA_CONF0 (BBPLL cal STOP_FORCE_HIGH/LOW bits 2/3, CAL_DONE bit 24), +0x44 ANA_CONFIG (block enables, cleared bit = on; the ROM writes the whole word), +0x48 ANA_CONFIG2. | ROM `rom_chip_i2c_readReg_org` 0x400354fc, `rom_chip_i2c_writeReg` 0x40035818, `rom_get_i2c_hostid` 0x400354bc, `rom_i2c_master_reset` 0x4003726c; `regi2c_defs.h` |
+| PHY calibration comparator (same block) | 0x6000E04C | bit 1 start, bit 24 done (polled with no timeout), bits 31:30 two comparator outputs the PHY's DC-offset (DCO) calibration reads for a 12-step binary search on two 9-bit codes (start 0x100, steps 124, 63, 32, 17, 9, 5, 3, 2, 1…, the last four averaged), five passes per full calibration (168 starts on a cold boot); a DSLEEP wake reuses the calibration in RTC memory and never touches it. Emulator: done after a start, comparator bits from the `cal-cmp` property (default 0). | app 0x422e4558..0x422e466e (called from 0x422e4770 / 0x422e46cc), PHY function table 0x3fcef3d8 → ROM `rom_pbus_force_test`, `rom_index_to_txbbgain`, `rom_pbus_set_dco`; format string `dco:%d,%d,%d,%d` |
+| RF PLL (analog block 0x62 behind master 1) | regi2c | calibration = reg 0x00 bit 6 / bit 5 pulsed (writeReg_Mask 6/6=1, 5/5=0, 5/5=1, 6/6=0), then `readReg_Mask(0x62, 0x07, 1, 1)` every 20 µs, 100 tries, `phy: error: pll_cal exceeds 2ms!!!` on the 100th miss; the cap search before it (reg 0x01 = 0..0x0a, reg 0x02 pulsed, reg 0x0c read) checks nothing. Emulator: reg 0x07 bit 1 reads as set (`ana_answered[]`), so no `pll_cal` line on either boot path, as on the device. | app 0x422e0c80 (pulse), 0x422e0d48 (poll and printer) |
 | SAR2 power detector (same block) | 0x6000E050.. | +0x50 bit 1 start, bits 26:24 == 7 idle/done, bits 6/7 (`rom_en_pwdet`); +0x5C low 16 bits 0x16a, bits 19/21/23 toggled around a measurement; +0x60 bits 4:3 input select, bit 1; +0x80..+0x9C eight 13-bit samples. | ROM `rom_pkdet_vol_start` 0x40036a18, `rom_pwdet_sar2_init` 0x40036470, `rom_en_pwdet` 0x40036508, `rom_get_sar2_vol` 0x40036afc, `rom_read_sar_dout` 0x40036aa4 |
 | SENS | 0x60008800 | MEAS1_CTRL2 +0x0C / MEAS2_CTRL2 +0x30: DATA [15:0], DONE bit 16, START bit 17, EN_PAD [30:19]; TSENS_CTRL +0x50: OUT [7:0], READY bit 8, CLK_DIV [21:14], POWER_UP bit 22 (the PHY polls READY with no timeout); PERI_CLK_GATE_CONF +0x104 (IOMUX_CLK_EN bit 31). | `sens_reg.h`; app 0x422aac19 |
 | FE / FE2 (RF front end) | 0x60006000 / 0x60005000 | pbus register writes through +0xC8 (command word, polled for busy) and +0xCC (data); capture: +0x140, +0x144 bit 1 start, done flag +0x174 bit 16, results +0x148..+0x154 (I/Q sums). | app 0x422e2c68..0x422e2d1d; ROM `rom_pbus_*` |
@@ -254,4 +257,8 @@ drains and ESP-IDF's own timeouts stop WiFi about 8 s after `wifi:mode : sta`.
 - USB OTG (TinyUSB MSC) and BLE are absent. WiFi has the register blocks its start touches (analog master,
   SENS, FE/RX/BB/MAC stub) but no radio: the driver comes up, finds no air and stops itself.
 - SAR ADC oneshots and the temperature sensor answer fixed values (`sar1-data`, `sar2-data`, `tsens-out`);
-  the analog registers behind the regi2c masters hold what was written (no PLL, no calibration results).
+  the analog registers behind the regi2c masters hold what was written, except the status bits the PHY waits
+  for (RF PLL lock 0x62/0x07 bit 1; the DC-offset comparator at 0x6000E04C answers done with fixed comparator
+  bits), so the full calibration runs and "succeeds" with meaningless results.
+- RTC IO (0x60008400) is a stored-value overlay: pad hold/pull/sleep-isolation writes read back (`state.rtcio`),
+  nothing electrical follows from them; the EXT1 wake goes through RTC_CNTL.
