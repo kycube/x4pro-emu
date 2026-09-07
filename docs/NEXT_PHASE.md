@@ -5,6 +5,21 @@ Goal of the next phase, in the owner's words: run the **stock Xteink firmware** 
 **world class**. This document is the whole context you need; the previous agent's context is gone.
 Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
 
+## 0. Resume here (end of session 3, 2026-09-06; its two commits are the top of `git log` on main)
+
+1. `cd /Users/mini/x4pro-emu && make test` — 14 cases (12 CrossPoint + 2 stock), about 3 minutes.
+   Needs the built QEMU (`qemu/build/qemu-system-xtensa`), the CrossPoint build
+   (`firmware/.pio/build/x4pro`) and the gitignored `images/` (device dump, `sd-device.img`, ROM ELF);
+   all three are present on this Mac. If `qemu/` were ever missing: `make setup && make build`
+   (`qemu/.x4pro-patched` marks an applied series; the tree here carries patches 0001–0010 as commits).
+2. See the stock give WiFi up: `x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img`,
+   wait for "deep sleep" in `x4emu --name stock status`, `press power`, `wait-text "wifi:force witi stop"
+   --timeout 90`, `screenshot`. `state` shows `ana_i2c`, `saradc`, `rf.hot`, `iolog_hot`. (`images/stock.bin`
+   is the dump with the device's NVS, `net_en=1`; the stock writes to it and to the SD image — regenerate
+   with `tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin` when in doubt.)
+3. Continue at §3.2 step 4 (stock screens beyond Home). The device was not touched in session 3; §1's
+   device state still holds. Session 3's findings: `docs/log.md`, last entry.
+
 ## 1. Where things stand (2026-09-06)
 
 - Repo: `/Users/mini/x4pro-emu` (symlink at `/Users/mini/xteink x4/x4pro-emu`; paths with spaces
@@ -33,9 +48,9 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
   (`tests/test_stock.py`, two cases). See §3.
 - Device: ESP32-S3 rev v0.2, 8 MB octal PSRAM, **UC8279** panel (LUT_VER 0x68), 15.7 GB card.
   app0 = CrossPoint (EpdBus-trace build), app1 = stock 7.2.4 copy, bootloader/table/otadata untouched,
-  verified double backup in `images/device/flash-2026-09-06-{a,b}.bin`. The owner is at the desk and
-  can press buttons, enter File Transfer (card mounts on the Mac as "NO NAME"), and re-seat the pogo
-  adapter. In deep sleep the USB port vanishes; the stock app switches to a mass-storage
+  verified double backup in `images/device/flash-2026-09-06-{a,b}.bin`. The owner, when present, can
+  press buttons, enter File Transfer (card mounts on the Mac as "NO NAME"), and re-seat the pogo
+  adapter; ask in plain words, one step at a time. In deep sleep the USB port vanishes; the stock app switches to a mass-storage
   personality in USB mode.
 
 ## 2. Non-negotiables
@@ -54,10 +69,10 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
 
 ## 3. Goal A — stock firmware, fully working
 
-### 3.1 What the stock app does in the emulator today (2026-09-06, after patches 0006..0009)
+### 3.1 What the stock app does in the emulator today (2026-09-06, after patches 0006..0010)
 
-`tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin`,
-`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0`, then
+`tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin` (optionally
+`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0` to skip the 18 s WiFi start), then
 `x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img --trace-epd f --trace-i2c g`:
 
 1. ROM → IDF 6.0.1 bootloader → octal PSRAM → `app_main`. `boot-preflight` rejects a plain power-on
@@ -94,25 +109,40 @@ polled past 200 k accesses, gauge alive, Home intact, menu tap repaints).
 3. ~~SAR ADC model~~ **done for SENS** (`hw/misc/esp32s3_saradc.c`: MEAS1/2 oneshot → DONE + DATA,
    TSENS always ready, storage; `sar1-data`/`sar2-data`/`tsens-out`). APB_SARADC (the DMA controller at
    0x60040000) stays a logger until a firmware uses continuous mode.
-4. **RTC IO pads**: `RTC_IO_TOUCH_PAD3/14`, `XTAL_32N`, `TOUCH_PAD0..` hold/pull writes (sleep
-   isolation); a stored-value overlay removes them from the unknowns.
-5. **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps`); keep
-   the plan to advance the virtual clock by the timer wake if it ever does.
-6. **Stock screens beyond Home**: the menu, All Files (the device card holds no books; add an EPUB
-   to the SD image), Settings (brightness slider → `x4emu light`), and a golden per screen. Compare
-   the panel stream of the full refresh with the support doc's recovered sequences.
-7. **Device oracle for the stock**: the stock has no screenshot function; a photo of the device's
-   Home compared by eye, or better: the owner boots the device into stock (`tools/device.py
-   restore-stock --yes`) and we compare its boot log + the UI timing.
-8. `x4emu run --stock` (or `--boot-hold-power MS`): drive GPIO3 low for the first N ms so the
-   preflight accepts a cold boot without the sleep/wake detour.
-9. **NVS shareable image**: `tools/nvsedit.py` can blank `sta_ssid/sta_pwd/wifi_creds` (add a
-   `set-str`/`erase` command) so a stock image without the owner's credentials can be shared.
+Next, in the order that serves the owner's goal (a usable stock in the emulator) best:
 
-Acceptance for Goal A (updated): Home renders ✓; touch navigates it ✓ (menu); the frontlight duty
-follows its slider (open Settings and check `x4emu light`); a stock screen matches a device oracle
-(photo); a pytest boots the stock and walks one screen ✓ (`tests/test_stock.py`); WiFi fails fast
-instead of hanging ✓ (`force witi stop` +7.5 s, deinit +17.5 s, UI alive; second case in `tests/test_stock.py`).
+4. **Stock screens beyond Home** (start here). Menu (`x4emu tap 88 38` repaints it; find its items by
+   tapping and diffing screenshots), All Files (the device card holds no books: build an SD image with
+   an EPUB, `tests/mkepub.py` + `tools/mksd.py --src`), Settings (brightness/warmth sliders → `x4emu
+   light` must follow; that is the open acceptance item), one reader page. One golden per screen under
+   `tests/golden/stock-*.png` and one pytest walking them (extend `tests/test_stock.py`; mask the status
+   bar as `masked_diff` does). Compare each full refresh's panel stream (`--trace-epd`,
+   `tools/epdtrace.py`) with the UC8279 sequence in `docs/hardware.md`.
+5. **Device oracle for a stock screen.** The stock has no screenshot function. Ask the owner to put the
+   stock back on the device (`tools/device.py restore-stock --yes`: app0 ← backup; CrossPoint returns
+   with `flash-crosspoint --yes`), photograph Home and one more screen, and capture a boot log with
+   `tools/device.py console --reset --seconds 40`. Compare by eye (layout, glyph shapes, the status bar)
+   and by timing (device `wifi:mode : sta` at 13.6 s, emulator 14.5 s). Photos go to
+   `docs/device/photos/`, the log next to `boot-stock-7.2.4.log` (redact SSID/BSSID/IP).
+6. **Cosmetic PHY artefact**: `phy: error: pll_cal exceeds 2ms!!!` x6. The PHY writes the RF PLL cap to
+   analog block 0x62 reg 0x01 (0..0x0a) and reads reg 0x0c for a lock flag; find the expected bit
+   (`tools/appdis.py` at the PC while it loops, `x4pro.ana-i2c:` lines in qemu.log) and answer it in
+   `x4pro_ana_i2c.c` (a per-(block, reg) read hook). The device log has no such line.
+7. `x4emu run --boot-hold-power MS`: drive GPIO3 low for the first N ms so the stock's preflight
+   accepts a cold boot without the deep-sleep/wake detour (saves ~2 s and a `press power` in every
+   script; `tests/test_stock.py::boot_to_home` is where it pays off).
+8. **NVS shareable image**: give `tools/nvsedit.py` `set-str`/`erase` so `sta_ssid/sta_pwd/wifi_creds`
+   can be blanked and a stock image without the owner's credentials can leave `images/`.
+9. **RTC IO pads**: `RTC_IO_TOUCH_PAD3/14`, `XTAL_32N`, `TOUCH_PAD0..` hold/pull writes (sleep
+   isolation); a stored-value overlay like SENS removes the last `x4pro/rtcio` lines.
+10. **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps` = 0); keep
+    the plan to advance the virtual clock by the timer wake if it ever does.
+11. **APB_SARADC continuous mode** (0x60040000, DMA) only when a firmware uses it (the logger will show).
+
+Acceptance for Goal A (updated): Home renders ✓; touch navigates it ✓ (menu); WiFi fails fast instead
+of hanging ✓ (`force witi stop` +7.5 s, deinit +17.5 s, UI alive; `test_stock_wifi_fails_fast`); a
+pytest boots the stock and walks one screen ✓ (`tests/test_stock.py`). Open: the frontlight duty
+follows its slider (step 4, Settings → `x4emu light`); a stock screen matches a device oracle (step 5).
 
 ## 4. Goal B — fidelity ("world class" model quality)
 
@@ -204,10 +234,14 @@ instead of hanging ✓ (`force witi stop` +7.5 s, deinit +17.5 s, UI alive; seco
   model before the firmware.
 - The PHY's status polls have no timeouts. Find them from `x4emu state` (`rf.hot`, `iolog_hot`: the
   addresses polled past the 32-line log cap, with counts), take the PC with `info registers -a` over
-  QMP, disassemble the app there (segments from the ESP image header: `objdump -D -b binary -m xtensa
-  --adjust-vma=LOAD_ADDR --start-address … ` on the segment bytes), and answer the bit (a sticky entry
-  in `esp32s3_rfstub.c`, or a model). Before the cap, one such poll wrote 1.9 GB of qemu.log in 30 s.
-  Loop counters kept with `l16ui/s16i` wrap at 65536 and look like countdowns in register samples.
+  QMP (`x4emu qmp '{"execute":"human-monitor-command","arguments":{"command-line":"info registers -a"}}'`),
+  disassemble the app there (`tools/appdis.py images/device/stock-app0-7.2.4.bin 0xPC`), and answer
+  the bit (a sticky entry in `esp32s3_rfstub.c`, or a model). Before the cap, one such poll wrote
+  1.9 GB of qemu.log in 30 s. Loop counters kept with `l16ui/s16i` wrap at 65536 and look like
+  countdowns in register samples.
+- `x4emu --name` becomes a directory under `.x4emu/` and part of two UNIX socket paths: no `=` in it
+  (QEMU's `-qmp unix:PATH` option parser splits on it) and keep it short (macOS caps socket paths at
+  104 bytes; pytest names come from the test function plus the parametrize id).
 
 ## 8. Definition of "world class" (checklist)
 
@@ -227,7 +261,8 @@ instead of hanging ✓ (`force witi stop` +7.5 s, deinit +17.5 s, UI alive; seco
 Done in this phase: the MCP server (28+ tools, screenshots inline), `make run` (build → image →
 boot → wait → screenshot), `x4emu flash-app` (swap the app in the live image, keep NVS/SD,
 relaunch), `x4emu console-send` (bidirectional USB Serial/JTAG: the chardev is now a unix socket
-with a logfile). Next:
+with a logfile), hot-poll lists in `x4emu state` (`iolog_hot`, `rf.hot`: which unmodelled register a
+firmware spins on, without reading qemu.log), `tools/appdis.py` (app disassembly at a PC). Next:
 
 **D1. Firmware debug console (in the custom firmware, from day one).** A line protocol over the
 USB Serial/JTAG so the *device* is scriptable exactly like the emulator. Proposed grammar, one

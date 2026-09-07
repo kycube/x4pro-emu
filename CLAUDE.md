@@ -37,7 +37,7 @@ device photos, world-class checklist).
 qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (gitignored; make setup)
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
-tools/         x4emu CLI, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py
+tools/         x4emu CLI, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py, appdis.py
 tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants)
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
 docs/          hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures)
@@ -112,8 +112,8 @@ rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it a
 | `tools/nvsedit.py IMAGE list` / `set-u8 NS KEY VALUE` | read or edit the NVS partition of a flash image (0x9000/0x5000 by default) |
 
 ROM symbols for the stock app's PCs: `make rom-symbols` → `images/rom/esp32s3_rev0_rom.nm`; the app
-itself is disassembled from `images/device/stock-app0-7.2.4.bin` (segments parsed from the image
-header; see docs/log.md 2026-09-06 for the TCB walk and the tricks that replace gdb).
+itself is disassembled with `tools/appdis.py images/device/stock-app0-7.2.4.bin 0xPC` (segments parsed
+from the image header; see docs/log.md 2026-09-06 for the TCB walk and the tricks that replace gdb).
 
 Tips: CrossPoint ignores input while it is painting, so use `--quiet 2` or `wait-quiet` before an
 input in scripts. Power: < 400 ms is a click (double-click toggles the frontlight), ≥ 400 ms held
@@ -122,7 +122,8 @@ rotated on it. `tools/epdtrace.py device.log emu.jsonl --from-cmd 0x00` compares
 streams; `models/build/replay uc8279 fixture.log` replays a recording through the core. Unmodelled-register polls:
 the `x4pro/<block>` loggers write 32 lines per address to qemu.log and count the rest into `state.iolog_hot`
 (`state.rf.hot` for the radio stub); `x4emu run … -global driver=esp32s3.rfstub,property=sticky,value=0xADDR:0xMASK`
-makes a radio status bit read as set without a rebuild.
+makes a radio status bit read as set without a rebuild. Instance names (`--name`): short and without `=`
+(they become UNIX socket paths).
 
 ## The real device (rules, in priority order)
 
