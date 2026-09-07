@@ -895,3 +895,13 @@ is the cheaper tool.
 36 fast); the full run lost one more stock tap — the book-row tap in `test_stock_screens_walk` produced a
 refresh but left All Files on screen (the walk now verifies every screen against its golden through `step()`
 and retries once; alone it passed three times). Committed on `main`, the owner pushes. Device untouched.
+
+**Device oracle for the reader (2026-09-07, later):** the owner put `tests/mkepub.py`'s book on the device's
+card (USB drive mode; `Test Book.epub` copied from the Mac, card ejected cleanly) and took CrossPoint's
+screenshot chord on pages 1–3 (`/screenshots/Emulator-Test-Book/*_ch1_pN_*.bmp`, mirrored into
+`images/device/sd-files/screenshots/`). Page 1 and page 2 differ from the emulator's reader pages (as base
+frames: any ink → black, since the device BMP is the 1-bit frame CrossPoint sends before the AA planes) in
+**307 pixels each, all the footer clock digits** (landscape x 780..792, y 404..461); the wrong page differs in
+~80,000. `tests/golden/device-reader-page{1,2}-*.bmp` and `test_reader_pages_match_device_screenshots` keep
+that. The device's screenshots cannot show the grey edges (1-bit), so the grey verdict still needs the
+owner's eye or a photo.

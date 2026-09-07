@@ -330,7 +330,10 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
 - [x] Stock firmware: screens matched to the device — by the owner's eye (Home, menu, light panel, Settings, All
   Files, reader; session 5). A pixel-exact `.xic` device capture stays optional (needs the developer-patched
   stock on the device); the emulator side of that is proven (`tests/test_stock_capture.py`).
-- [ ] CrossPoint: every activity reachable by script has a golden and a device oracle.
+- [ ] CrossPoint: every activity reachable by script has a golden and a device oracle — Home ✓ (session 3) and
+  the reader's pages 1–2 ✓ (session 7: the device's own screenshots of the test book match the emulator's
+  base frame in 0 pixels outside the footer clock, `tests/test_device_screenshot.py`); FileBrowser, sleep
+  screen and the settings pages still lack a device shot.
 - [x] Deterministic replay of an input script yields identical screenshots run to run (`tests/test_replay.py`, session 5).
 - [ ] Waveform-aware grayscale validated against the device (built in session 6 behind `waveform-gray`; the
   owner's photo or verdict on the crops decides the default).
