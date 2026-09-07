@@ -52,7 +52,17 @@ session-6 entry of `docs/log.md` for what each tier delivered.
    renders: the header carries two CRC-32s, now written), the card wallpaper path verified (no patch: All Files → image → Set as Wallpaper),
    the nav menu's hidden Preload List / Statistics rows (one 3-byte patch), the Lua host mapped but never
    invoked in 7.2.4 (a build-time stub on the standby/router path is the likely gate — needs Ghidra).
-   Waiting on the owner: Ghidra + JDK install (yes/no), the UX wish list, the grey verdict.
+   **The owner answered (2026-09-07):** Ghidra + a JDK may be installed (an Opus agent is installing
+   Temurin 21 + Ghidra + an Xtensa module and writing `tools/ghidra_stock.py`: headless analysis, exported
+   functions/xrefs/strings/calls, `xrefs`/`callers`/`func`/`decompile`). **Wish list:** "mostly just visual
+   enhancements as well as a smarter keyboard with some near miss correction (like the iPhone does) and
+   predictive suggestions along the top of it." So the order is: visual data-only wins (font, wallpaper,
+   labels, icons) → the keyboard: map the stock's keyboard classes and key-commit path (Ghidra), a hook
+   (new native code in the app slot's free area + a trampoline; the pioarduino Xtensa toolchain is on this
+   Mac), a dictionary on the card, the suggestion strip through the app's own text API — the hardest item
+   in the survey's list, planned as its own squad after the map. **Grey verdict:** the owner put the test
+   EPUB (`tests/mkepub.py`, the page the crops show) on the device's card via USB drive mode and will
+   photograph the page in CrossPoint; compare that photo with the two renderings and flip the default.
 
 ## 1. Where things stand (2026-09-06)
 
