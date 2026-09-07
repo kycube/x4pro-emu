@@ -481,6 +481,26 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
   black bars on the real sleep screen; a 100×150 image shows a "broken image" placeholder and is still
   accepted. Recipe with every coordinate: the session-7 wallpaper probe (docs/log.md).
 
+- **The lock-screen Lua route (probed, blocked).** `user_config/lockscrLuaApp` (str, config offset 0x90,
+  setter 0x421f4b18) names the directory under `/sdcard/XTApps`; the Lua verb `set_as_lockscreen_app`
+  (0x42210350 → finalizer 0x421298b9) writes it and sets `lockscrMode` (u8, offset 141) = 2 and
+  `lockscrIdle` (142) = 2 — mode 2 = Lua app, 3 = wallpaper (defaulted to 3 when a wallpaper string is set;
+  compared `== 3` at 0x421c9ba8/0x421c9bd1). Setting the key and mode by hand (values 1, 2, 4) changed
+  nothing: four boots painted the byte-identical "Get Started" guide on a short power press and no loader
+  line appeared. The loader path is complete and confirmed static: `ScriptHostPagePresenter` virtual
+  0x42129ea4 (vtable 0x3c3d9e60) builds `/sdcard/XTApps/<app>/app.xtapp`, falls back to `assets.xtab`,
+  then to the plain-directory manifest reader 0x42064b50 (`%s/manifest.json`) at 0x4212a8ad and
+  `index.lua` / `lockscreen.lua` at 0x4212a92a — **unwrapped directories are a supported source**, the
+  presenter is just never entered: nothing on the standby path constructs it. Lua API registration tables
+  at DROM 0x3c4a3084–0x3c4a33b0: clear/line/rect/circle/text/image/layer/size, flush_once/set_interval/
+  full_refresh/defer_auto_full/invalidate/set_tick_rate/request_refresh/quit/save/set_as_lockscreen_app,
+  info/warn/error, millis/uptime_ms/epoch_sec/local_sec/clock, battery/charging/power/status/radio/
+  network/bluetooth, has_key/has_bt_keyboard/has_bt_gamepad, exists/size/read_text/open_text/read_line/
+  seek/tell/close/create; callbacks on_load/on_enter/on_tick/on_input/on_draw/on_leave/on_unload. None
+  confirmed at runtime. **Next:** find who constructs `ScriptHostPagePresenter` (0x42128a84) and enters
+  page id 0x09 (router 0x420249fc), and the compile-time stub on the standby path that skips mode 2 —
+  a Ghidra job (call graph over 5 MB of Xtensa) rather than an `appdis.py` one.
+
 ### What this map still lacks
 The icon table and image-blit call signatures (§5), the second string pack's header (§6), the exact
 `.xtf` metric-byte order and the `.hot.xtfp` body (§4), the accessor of the i18n packs, whether the

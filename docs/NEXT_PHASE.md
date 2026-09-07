@@ -47,6 +47,12 @@ session-6 entry of `docs/log.md` for what each tier delivered.
    code patches. Device rules unchanged: every modification is verified in the emulator, and the device only
    through the guarded tools after the backup check. S7 upstream stays after that; the grey default flip
    happens as soon as the owner answers on the crops.
+   **Session 7 status:** `tools/stockstrings.py` (relabel anything, verified), `tools/xtfont.py` (font
+   format pinned to the pixel; a generated font is listed but refused at load — the header hash at 0x30
+   is being traced), the card wallpaper path verified (no patch: All Files → image → Set as Wallpaper),
+   the nav menu's hidden Preload List / Statistics rows (one 3-byte patch), the Lua host mapped but never
+   invoked in 7.2.4 (a build-time stub on the standby/router path is the likely gate — needs Ghidra).
+   Waiting on the owner: Ghidra + JDK install (yes/no), the UX wish list, the grey verdict.
 
 ## 1. Where things stand (2026-09-06)
 
