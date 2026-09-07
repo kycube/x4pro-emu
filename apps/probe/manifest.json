@@ -1,0 +1,12 @@
+{
+  "app_id": "probe",
+  "display_name": "API Probe",
+  "version": "1.0",
+  "author": "x4pro-emu",
+  "description": "Draws the Lua host's own API: g's methods, ctx's sub-tables, the sys getters, the on_input event.",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ]
+}

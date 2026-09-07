@@ -103,38 +103,112 @@ getmetatable, ipairs, math, next, pairs, pcall, rawequal, rawget, rawlen, rawset
 setmetatable, string, table, tonumber, tostring, type, utf8, warn, xpcall` — plus `g` and `ctx`.
 There is **no `print`**, and no `io`, `os` or `debug`.
 
-**Callbacks** — define them as globals. `on_load`, `on_enter`, `on_draw`, `on_tick` and `on_input`
-were all seen firing; `on_leave` and `on_unload` are registered but were not exercised. A touch
-arrives at `on_input` as a **table** (its fields are not mapped); returning `true` claims it.
+Everything in this section was read off the screen by `apps/probe`, which enumerates the host and
+draws the result (§7): there is no other output channel.
 
-**Drawing — the global `g`**, methods called with a colon. Coordinates are the **portrait** frame,
-480 wide × 800 tall, origin top left, 1 bpp.
+### Callbacks
+
+Define them as globals. **Every callback is called with `ctx` as its first argument**, so the
+one-argument forms in older notes were reading `ctx`, not an event:
+
+| callback | arguments | |
+|---|---|---|
+| `on_load(ctx)` / `on_enter(ctx)` | `ctx` | seen firing |
+| `on_draw(ctx, g)` | `ctx`, and the same `g` as the global | |
+| `on_tick(ctx, n)` | `ctx`, a number | fires on its own; the number's meaning is not established |
+| `on_input(ctx, ev)` | `ctx`, the event table below | return `true` to claim the event |
+| `on_leave`, `on_unload` | | registered, not exercised |
+
+**The `on_input` event table** — a plain table, no metatable, five keys:
+
+```lua
+{ type = 'touch', gesture = 'tap', x = 79, y = 240, time_ms = 33219 }
+```
+
+`x` and `y` are in the **same portrait frame you draw in**, so a hit test is a plain comparison.
+Only `type='touch'`, `gesture='tap'` have been seen; the `double_tap` / `swipe_*` names in the API
+string list have not.
+
+### Drawing — the global `g`
+
+`g` is a **plain table with exactly eight functions and no metatable**. The other names in the
+registration tables (`stroke`, `color`, `invert`, `draw_with`, `offscreen`, and any of `fill`,
+`fill_rect`, `pixel`, `font`, `measure`, `push`/`pop`, `clip`) are **not bound**: calling one is
+"attempt to call a nil value". Coordinates are the portrait frame, 480 wide × 800 tall, origin top
+left, 1 bpp.
 
 | call | effect |
 |---|---|
 | `g:clear(0)` | blank the whole frame to **white** — status bar and footer included |
-| `g:clear()` | ... with no argument, paints the whole frame **black** |
+| `g:clear()` / `g:clear(1)` | ... paints the whole frame **black** |
 | (no clear) | the page you were started from stays on screen and you paint over it |
-| `g:rect(x, y, w, h)` | rectangle outline |
+| `g:rect(x, y, w, h)` | rectangle **outline**. A fifth argument is accepted and ignored — there is no fill |
 | `g:line(x1, y1, x2, y2)` | line |
 | `g:circle(x, y, r)` | circle outline |
-| `g:text(x, y, "…")` | text in the system font (the baseline is at `y`) |
-| `g:size()` | the screen size — returns 480 first |
-| `g:image(…)`, `g:layer(…)` | exist; their arguments are **not** established |
+| `g:text(x, y, "…")` | text in the system font. **`y` is the top of the ~24 px line box**, not the baseline (the baseline lands near `y + 19`), which is why a rule meant to sit under a line goes at `y + 30` |
+| `g:size()` | two values, `480, 800` |
+| `g:image(asset, x, y)` | argument #2 must be a number; a string asset id is accepted and draws nothing without an asset pack |
+| `g:layer(t)` | wants a **table** — the layer object `ctx.layers:create(w, h)` returns |
 
-**Services — the global `ctx`**, plain function tables (call with a dot). Present and confirmed:
-`ctx.invalidate`, `ctx.request_refresh`, `ctx.set_tick_rate`, `ctx.save`, `ctx.quit`;
-`ctx.display.{full_refresh, defer_auto_full, flush_once}`; `ctx.log.{info, warn, error}`;
-`ctx.sys.{millis, uptime_ms, epoch_sec, clock, battery, charging, power, status, radio, network,
-has_key, has_bt_keyboard, has_bt_gamepad}`; `ctx.system.{set_as_lockscreen_app, quit}`; and the
-tables `ctx.screen, ctx.input, ctx.state, ctx.assets, ctx.data, ctx.fonts, ctx.i18n, ctx.layers,
-ctx.lock, ctx.perf, ctx.gc` (their members are not established).
+**There is no filled shape and no second text size.** Both status apps in `apps/` work around it the
+same way: `fill(x, y, w, h)` stacks `h` calls to `g:line`, and anything that has to be big — the
+clock — is drawn as seven-segment digits out of those fills.
+
+### Services — the global `ctx`
+
+Twenty members: `assets, data, display, fonts, gc, i18n, input, invalidate, layers, lock, log, perf,
+quit, request_refresh, save, screen, set_tick_rate, state, sys, system`. `invalidate`,
+`request_refresh`, `set_tick_rate`, `save` and `quit` are plain functions taking no `self`.
+
+> **The sub-tables' functions are methods.** `ctx.data.exists('a.txt')` fails with *bad argument #2
+> (string expected, got no value)*: the table itself is the first argument. Call them with a colon —
+> `ctx.data:exists('a.txt')`, `ctx.fonts:handle(name)`, `ctx.layers:create(w, h)`, `ctx.gc:count()`.
+> `ctx.sys.*` is the exception: those are plain functions.
+
+| sub-table | members, as read at runtime |
+|---|---|
+| `ctx.screen` | `width=480`, `height=800`, `short_side=480`, `long_side=800`, `is_portrait=true`, `is_landscape=false`, `orientation="portrait"` |
+| `ctx.input` | `caps = {touch=true, keys=true, bluetooth=true, gyro=true}`, `has_key`, `has_bt_keyboard`, `has_bt_gamepad` |
+| `ctx.fonts` | `handle`, `status` — both want a name; `ctx.fonts:handle(n)` returned **nil for every built-in name tried** (`default`, `system`, `ui`, `title`, `large`, `small`, `body`, `bold`, `regular`, `mono`, `digit`, `sans`, `serif`, `24`, `32`, `48`). Fonts look like app assets, not selectable faces |
+| `ctx.assets` | `handle`, `info`, `evict`; `info()` = `{count=0, limit=2097152, …}` with no asset pack |
+| `ctx.data` | `exists`, `size`, `read_text`, `open_text`; `ctx.data:exists('a.txt')` = `false`, `ctx.data:read_text('a.txt')` = `nil, "not_found"` — a per-app file API that answers |
+| `ctx.i18n` | `locale="en"`, `t`; `ctx.i18n:t('ok')` returns the key itself when the app ships no `lang/en.tsv` |
+| `ctx.layers` | `create`; `ctx.layers:create(64, 64)` **returns a layer table with `dispose` and `draw_with`** — the offscreen route exists |
+| `ctx.lock` | `base_page=""`, `clear_background=true`, `elapsed_sec=0`, `interval_sec=30`, `reason="idle"`, `flush_once`, `set_interval` |
+| `ctx.perf` | `info`; `info()` = `{asset_hit=0, asset_mis…=0, …}` |
+| `ctx.gc` | `collect`, `count`; `ctx.gc:count()` ≈ 65 000–80 000 (bytes of Lua heap) |
+| `ctx.display` | `full_refresh`, `defer_auto_full` |
+| `ctx.log` | `info`, `warn`, `error` — see the black-hole note below |
+| `ctx.system` | `set_as_lockscreen_app` |
+| `ctx.state` | an **empty table** on entry |
+
+**`ctx.sys` — twelve plain functions.** `has_key` / `has_bt_keyboard` / `has_bt_gamepad` are on
+`ctx.input`, not here.
+
+| call | returns |
+|---|---|
+| `ctx.sys.battery()` | a number, 0..100 |
+| `ctx.sys.charging()` | boolean |
+| `ctx.sys.millis()`, `ctx.sys.uptime_ms()` | milliseconds since boot |
+| `ctx.sys.epoch_sec()`, `ctx.sys.local_sec()` | seconds since 1970; `local_sec` is `epoch_sec` minus the device's zone offset |
+| `ctx.sys.clock()` | **a userdata with `hour, minute, second, year, month, day, weekday`** (local time; `weekday` 0 = Sunday). This is how you get a date without arithmetic |
+| `ctx.sys.power()` | a userdata with `percent`, `charging` |
+| `ctx.sys.network()` | a userdata with `state` (`"unknown"` with the radio off) |
+| `ctx.sys.radio()` | a userdata with `mode` (`"idle"`) |
+| `ctx.sys.status()`, `ctx.sys.bluetooth()` | userdata; no field name tried answered |
+
+The userdata objects' metatables are **protected** (`getmetatable` returns `false`), so they cannot
+be enumerated — only named fields answer, and the list above is what a wide name probe found.
 
 > **`ctx.log` is a black hole.** `info`, `warn` and `error` all exist, all return without raising —
 > and nothing they are given reaches the USB Serial/JTAG console, UART0 or the card, with developer
 > mode on or off. Together with the missing `print` that means **the screen is your only output**:
 > draw what you want to see. `tests/test_lua_apps.py` asserts the silence, so if a future image
 > starts logging, that test fails and this paragraph is wrong.
+
+**The Back pad does not leave an app.** Inside a running script the capacitive Home pad raises the
+stock's own dialog — `Exit app "<app_id>"?`, *Continue | Exit* — and only *Exit* returns to the app
+list (`tests/test_lua_status.py::back_to_list`).
 
 A whole app:
 
@@ -143,7 +217,7 @@ local taps = 0
 
 function on_load()  ctx.log.info('hello: loaded')  end   -- goes nowhere, but costs nothing
 
-function on_input(ev)
+function on_input(ctx, ev)
   taps = taps + 1
   ctx.invalidate()          -- mark dirty; on_draw follows
   return true               -- claim the event
@@ -170,23 +244,28 @@ That is `tests/data/hello-app`, and `tests/golden/stock-lua-hello.png` is what i
 
 ## 5. What is not confirmed
 
-- **`g:image` and `g:layer`** — the methods exist; the argument shapes, and how an asset id becomes
-  a bitmap, do not. The asset side (`assets.xtab`, `XtappAssetSource`, `XtabAssetSource`,
-  `preload_assets`, `app_icon_s/l`, `splash`) has not been exercised at all: apps in the list show a
-  default black icon.
-- **`ctx.fonts`, `ctx.i18n`, `ctx.assets`, `ctx.data`, `ctx.state`, `ctx.input`, `ctx.screen`,
-  `ctx.layers`, `ctx.lock`, `ctx.perf`, `ctx.gc`** — present as tables, members unread. The i18n
-  route (`lang/%s.tsv` per app) is only a string.
-- **The event table passed to `on_input`** — its keys were never dumped; gestures
-  (`double_tap`, `swipe_*`) exist in the API string list but were not seen.
-- **`on_tick` rate, `set_tick_rate` units, `ctx.save` semantics, `lua.offscreen`, `draw_with`,
-  `stroke`, `color`, `invert`** — named in the registration tables, untested.
-- **The lock-screen route is blocked.** `ctx.system.set_as_lockscreen_app()` raises the stock's
-  confirmation dialog and does write `user_config/{lockscrLuaApp, lockscrMode = 2, lockscrIdle = 2}`;
-  the standby path then reads mode 2 (its `form` changes 5 → 1) and **constructs no presenter** —
-  nothing on that path builds `ScriptHostPagePresenter`, so the sleep screen stays the stock's. The
-  `lockscreen.lua` entry point the host knows about is unreachable for the same reason. Finding the
+Shorter than it was — `apps/probe` (§7) answered the API shape, the `on_input` event and the
+`ctx.sys` getters. What is left:
+
+- **Assets.** `g:image(asset, x, y)` takes the arguments but there is no asset pack to feed it:
+  `assets.xtab`, `XtabAssetSource`, `preload_assets`, `app_icon_s/l` and `splash` have still not been
+  exercised, `ctx.assets:handle(name)` answers nil, and apps in the list show a default black icon.
+- **Layers.** `ctx.layers:create(w, h)` returns a real object with `dispose` and `draw_with`, and
+  `g:layer(t)` wants exactly such a table — but nothing has been *composited* through them yet, and
+  `draw_with`'s argument (a function? a layer?) is unread.
+- **Fonts.** `ctx.fonts:handle(name)` is nil for every built-in name, so a second text size is
+  probably an app-supplied font pack; how a handle would then reach `g:text` (a fourth argument is
+  accepted and ignored) is unknown.
+- **`ctx.save` and `ctx.state`.** `state` is an empty table on entry and `save` was not called.
+- **`set_tick_rate` units**, and what the number `on_tick` receives means.
+- **`ctx.lock`** (`set_interval`, `flush_once`, `interval_sec = 30`, `reason = "idle"`) belongs to
+  the lock-screen route, which is still blocked: `ctx.system.set_as_lockscreen_app()` raises the
+  stock's confirmation dialog and does write `user_config/{lockscrLuaApp, lockscrMode = 2,
+  lockscrIdle = 2}`; the standby path then reads mode 2 (its `form` changes 5 → 1) and **constructs
+  no presenter** — nothing on that path builds `ScriptHostPagePresenter`, so the sleep screen stays
+  the stock's, and the `lockscreen.lua` entry point is unreachable for the same reason. Finding the
   standby-side gate is the next Ghidra job (docs/stock-firmware.md, "Probed in session 7").
+- **`on_leave` / `on_unload`** are registered and were not seen firing.
 - **The device.** Everything here was done in the emulator. The patched image has not been flashed
   to the real X4 Pro.
 
@@ -227,14 +306,52 @@ image byte for byte.
 > adding a second manifest entry. The card side (`tools/xtapp.py`) is version-independent as long as
 > the container format has not changed.
 
+## 7. The apps in `apps/`
+
+Three app directories live in the repo, each one `manifest.json` + `index.lua`, ready for
+`tools/xtapp.py install`.
+
+| directory | `app_id` | what it is |
+|---|---|---|
+| `apps/probe/` | `probe` | the API dump §4 was written from: it enumerates `g`, every `ctx` sub-table and every `ctx.sys` getter, calls the ones that cannot change state, catches the error messages (a bad call's *"bad argument #2 to 'handle'"* is the only documentation the host has), and paints the lot one page per tap. The last two pages are the live `on_input` event and a set of drawing experiments. Nine pages; tap anywhere to advance |
+| `apps/status-typographic/` | `status1` | **Status, variant A.** Airy: the weekday alone at the top, a hand-drawn seven-segment `HH:MM` filling the upper third, the date spelled out under it, a battery percentage with a gauge across the page, then four quiet label/value rows (uptime, network, radio, Lua heap). White space does the work; one hairline per section |
+| `apps/status-panels/` | `status2` | **Status, variant B.** The same facts as framed cards: a solid header band, a clock card, a battery card with a wide gauge, a 2 × 2 grid of stat cards and a footer band. Denser, more "instrument panel" |
+
+Both status apps are readable on purpose — the layout is a list of `g:` calls with the coordinates
+in plain sight, so retuning one is editing numbers. Both carry the same two workarounds, commented
+at the top of each file: `fill()` stacks `g:line` because the host has no filled shape, and the big
+clock is seven-segment digits made of those fills because there is only one text size.
+
+**Installing one on the card** (the app image must already carry the `lua-apps-row` patch, §1):
+
+```
+.venv/bin/python tools/xtapp.py install /path/to/sd.img apps/status-typographic
+```
+
+That writes `/XTApps/status1/{app.xtapp, manifest.json, index.lua}` and nothing else. On the device
+the same three files are simply copied into `/XTApps/status1/` on the card — `/sdcard/XTApps` is
+hidden from All Files, so the card reader is the way in. Two apps installed side by side show as two
+cards on the Lua Apps page; the app list's card coordinates in the emulator are `tap 225 355` (left)
+and `tap 225 125` (right).
+
+`tests/test_lua_status.py` boots the patched stock with the RTC pinned
+(`-global driver=x4pro.pcf8563,property=base-epoch,value=…`) and checks both screens against
+`tests/golden/stock-lua-status-{list,typographic,panels}.png`. The date is compared pixel for pixel;
+the `HH:MM` digits, the uptime and the Lua-heap figure move between runs and are the only masked
+bands, and each masked band is separately asserted to contain ink.
+
 ## What is where
 
 | file | |
 |---|---|
 | `tools/stockpatch.py` | the named-patch manifest (`list` / `apply` / `revert` / `--check`) |
 | `tools/xtapp.py` | `new` / `pack` / `info` / `install` for `.xtapp` app directories |
+| `apps/probe/` | the API probe §4 was written from |
+| `apps/status-typographic/`, `apps/status-panels/` | the two status screens (§7) |
 | `tests/data/hello-app/` | the reference app: the manifest whose container the stock accepted, and its `index.lua` |
 | `tests/test_stockpatch.py`, `tests/test_xtapp.py` | the fast tests (no emulator) |
 | `tests/test_lua_apps.py` | the emulator test: menu → app list → the script painting |
 | `tests/golden/stock-menu-lua.png`, `stock-lua-apps.png`, `stock-lua-hello.png` | its three screens |
+| `tests/test_lua_status.py` | the emulator test for the two status screens |
+| `tests/golden/stock-lua-status-{list,typographic,panels}.png` | its three screens |
 | `docs/stock-firmware.md` | the map of the app, and how these offsets were found |

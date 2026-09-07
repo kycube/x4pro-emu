@@ -1,0 +1,12 @@
+{
+  "app_id": "status1",
+  "display_name": "Status (Typographic)",
+  "version": "1.0",
+  "author": "x4pro-emu",
+  "description": "An airy status page: a large seven-segment clock, the date in words, a battery gauge and four quiet rows.",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ]
+}

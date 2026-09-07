@@ -1,0 +1,12 @@
+{
+  "app_id": "status2",
+  "display_name": "Status (Panels)",
+  "version": "1.0",
+  "author": "x4pro-emu",
+  "description": "The same status facts in framed cards: a clock panel, a battery gauge and a 2x2 grid of stats.",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ]
+}
