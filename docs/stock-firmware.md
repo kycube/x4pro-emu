@@ -460,6 +460,17 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
   the lock-screen route (an NVS key naming a Lua app as the lock screen, `set_as_lockscreen_app`) is the
   next experiment.
 
+- **The card wallpaper path (verified).** No separate Images/Wallpapers page exists in this build (§5
+  overstates it): All Files → a folder with images (icons in four columns at landscape y ≈ 440, x
+  167/237/310/380) → tap the image (full-screen preview) → tap again → a menu with the filename, X,
+  **Set as Wallpaper**, Delete Image (a 900 ms long tap on the file row opens the same menu) → **Set as
+  Wallpaper** writes `user_config/lockscrWallp` and `shutWallp` (both `/sdcard/wallpapers/<file>`) plus
+  `lockscrIdle` = 3 and `lockscrShut` = 3, toast "Set as both wallpapers"; `wallpMode` stays 0. Persists
+  across a cold reboot; a short power press paints it ("Powering off…") before the deep sleep. PNG is
+  accepted (480×800 fits exactly); an 800×480 image is rotated in the preview but scaled to width with
+  black bars on the real sleep screen; a 100×150 image shows a "broken image" placeholder and is still
+  accepted. Recipe with every coordinate: the session-7 wallpaper probe (docs/log.md).
+
 ### What this map still lacks
 The icon table and image-blit call signatures (§5), the second string pack's header (§6), the exact
 `.xtf` metric-byte order and the `.hot.xtfp` body (§4), the accessor of the i18n packs, whether the
