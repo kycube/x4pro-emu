@@ -6,7 +6,7 @@
   x4emu stop | reset | status | state | log [--follow] [--since N] | wait-text TEXT [--timeout S]
   x4emu screenshot out.png [--diff other.png] | wait-refresh [--count N] [--timeout S]
   x4emu press left|right|power [--ms 120] | hold power --ms 3000
-  x4emu tap X Y | swipe X1 Y1 X2 Y2 [--ms 250] | home [--ms 120]
+  x4emu tap X Y | swipe X1 Y1 X2 Y2 [--ms 250] | home [--ms 250] [--quiet S]
   x4emu battery --soc 63 --mv 3910 [--charging on|off] | light
   x4emu mem read ADDR LEN | gdb | qmp '{"execute":...}'
 
@@ -356,16 +356,36 @@ def cmd_chord(a):
     print(f'chord {"+".join(a.buttons)} for {a.ms} ms')
     after_input(q, n0, a)
 
+def gt911_clears(q):
+    return json.loads(q.qom_get(BOARD, 'state'))['gt911']['clears']
+
+def hold_until_read(q, ms, clears0, max_s=5.0):
+    """Keep a touch/Home-pad input asserted for at least `ms`, and until the firmware has consumed
+    the GT911 frame (its write of 0 to 0x814E, `state.gt911.clears`). Firmware that polls the
+    touch controller between rendering passes of several seconds (CrossPoint) would otherwise miss
+    a short tap; it still sees a short touch, since it measures from its own first read. Returns
+    the seconds until the frame was read, or None if it never was within max_s."""
+    t0 = time.time()
+    read_at = None
+    while True:
+        now = time.time() - t0
+        if read_at is None and gt911_clears(q) > clears0:
+            read_at = now
+        if now >= ms / 1000.0 and (read_at is not None or now >= max_s):
+            return read_at
+        time.sleep(0.02)
+
 def cmd_tap(a):
     q = connect(a.name)
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
+    c0 = gt911_clears(q)
     rx, ry = to_gt911(a.x, a.y)
     q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
-    time.sleep(a.ms / 1000.0)
+    read_at = hold_until_read(q, a.ms, c0)
     q.qom_set(INPUT, 'touch', '[]')
-    print(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})')
+    print(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})' + (f', read by the firmware after {read_at:.2f}s' if read_at is not None else ', not read by the firmware within 5 s'))
     after_input(q, n0, a)
 
 def cmd_swipe(a):
@@ -381,10 +401,16 @@ def cmd_swipe(a):
     print(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2})')
 
 def cmd_home(a):
+    """The capacitive Home pad (GT911 key bit): held for at least --ms and until the firmware reads it."""
     q = connect(a.name)
+    if getattr(a, 'quiet', 0):
+        wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
-    q.qom_set(INPUT, 'home', True); time.sleep(a.ms / 1000.0); q.qom_set(INPUT, 'home', False)
-    print('home')
+    c0 = gt911_clears(q)
+    q.qom_set(INPUT, 'home', True)
+    read_at = hold_until_read(q, a.ms, c0)
+    q.qom_set(INPUT, 'home', False)
+    print(f'home for {a.ms} ms' + (f', read by the firmware after {read_at:.2f}s' if read_at is not None else ', not read by the firmware within 5 s'))
     after_input(q, n0, a)
 
 def cmd_wait_quiet(a):
@@ -461,7 +487,8 @@ def main():
     p.add_argument('--wait', type=float, default=0); p.add_argument('--quiet', type=float, default=0); p.set_defaults(fn=cmd_tap)
     p = sp.add_parser('wait-quiet'); p.add_argument('--seconds', type=float, default=2); p.add_argument('--timeout', type=float, default=60); p.set_defaults(fn=cmd_wait_quiet)
     p = sp.add_parser('swipe'); [p.add_argument(n, type=int) for n in ('x1', 'y1', 'x2', 'y2')]; p.add_argument('--ms', type=int, default=250); p.set_defaults(fn=cmd_swipe)
-    p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=120); p.add_argument('--wait', type=float, default=0); p.set_defaults(fn=cmd_home)
+    p = sp.add_parser('home'); p.add_argument('--ms', type=int, default=250); p.add_argument('--wait', type=float, default=0)
+    p.add_argument('--quiet', type=float, default=0, help='first wait until the panel has been idle for S seconds'); p.set_defaults(fn=cmd_home)
     p = sp.add_parser('battery'); p.add_argument('--soc', type=int); p.add_argument('--mv', type=int); p.add_argument('--charging', choices=['on', 'off']); p.set_defaults(fn=cmd_battery)
     p = sp.add_parser('light'); p.add_argument('-v', '--verbose', action='store_true'); p.set_defaults(fn=cmd_light)
     p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=cmd_mem)

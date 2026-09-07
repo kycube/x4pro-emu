@@ -107,8 +107,10 @@ reads VER (0x70) once through the same host in half-duplex. Init after three RST
 `00 37 4D` (PSR), `61 03 20 02 58` (TRES 800x600: the driver addresses 600 gates and uses 120..599),
 `65 00 00 00 00` (GSST), `03 20` (PFS), `E1 02`, DTM2/DTM1/DTM2 planes, `50 97` (CDI), `E0 02` (CCSET),
 `E5 1E` (TSSET), `04` (PON, 40 ms), `00 17 4D`, `12` (DRF, GC, 1.3 s). Page updates: PTIN, PTL
-(`90 x0 x1 y0 y1 01`), DTM1 48,000 bytes, PTOUT, DTM2, `50 D7`, `E5 5A`, `03 20`, `E1 02`, DRF (fast);
-toasts use small PTL windows. The frontlight defaults to the warm channel (GPIO9, LEDC) at ~25 %.
+full window (`90 00 00 03 1F 00 78 02 57 01` = x 0..799, y 120..599), DTM1 48,000 bytes (the old plane,
+always in full), PTOUT, PTIN, PTL of the changed window, DTM2 with that window's bytes only, PTOUT,
+`50 D7`, `E0 02`, `E5 5A`, `03 20`, `E1 02`, sometimes the full PTL again, PTIN, `00 17 4D`, DRF (fast);
+toasts and the status bar use small windows (a clock repaint sends 112 bytes). The frontlight defaults to the warm channel (GPIO9, LEDC) at ~25 %.
 
 ### UC8279 / UC8179 (X4 Pro variants)
 
@@ -161,6 +163,13 @@ LEDC low-speed PWM, 25 kHz, 10-bit, active-high: cool white on GPIO8, warm on GP
 CrossPoint's `FrontlightManager` goes through the IDF `ledc` driver on timer 0 and lands on channels
 0 (GPIO8) and 1 (GPIO9), as the emulator's GPIO-matrix routing shows (`state.ledc`). The two are
 mixed for colour temperature; a power-button double-click toggles the light on the X4 Pro.
+
+The stock app lights the warm channel at 249 ‰ (DUTY 4080 = 255.0/1024) when it wakes, **fades it out
+60 s after the last input** and back in on the next touch, with ESP-IDF's hardware fade: CONF1 =
+DUTY_SCALE 1, DUTY_CYCLE 24, DUTY_NUM 255, DUTY_INC 0, DUTY_START 1 (255 steps × 24 periods at 25 kHz =
+245 ms), DUTY_CHNG_END interrupt enabled for the fading channel. The emulator walks such a fade in guest
+time (`state.ledc.channels[].fading/target_permille`, `state.ledc.fades`); `DUTY_R` follows it, which
+`ledc_fade_isr` relies on to know the fade reached its target (docs/log.md 2026-09-06, session 4).
 
 ## I2C bus 39/38 device map
 

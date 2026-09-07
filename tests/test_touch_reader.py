@@ -42,7 +42,7 @@ def test_tap_open_book_and_page_forward(images, emu, tmp_path):
     r = x4emu(emu, 'screenshot', str(p3), '--diff', str(p2), check=False)
     assert r.returncode == 1, r.stdout
     # Home pad returns to the home screen
-    x4emu(emu, 'home', '--wait', 20)
+    x4emu(emu, 'home', '--quiet', 1.5, '--wait', 20)
     x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 30)
 
 def test_battery_property(images, emu):

@@ -1,0 +1,288 @@
+From 5422572e79221829e452a6b5f6f99bb911265716 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 20:03:30 -0500
+Subject: [PATCH 11/11] xteink-x4pro: LEDC hardware fades walk the duty in
+ guest time
+
+The model completed every DUTY_START at once and raised DUTY_CHNG_END without
+moving the duty. ESP-IDF's ledc_fade_isr reads DUTY_R back after each fade-end
+interrupt and re-arms the fade until the duty reaches its target, so an instant
+fade re-triggers in the same instruction: core 0 never leaves the level-1
+dispatcher, the FreeRTOS tick stops and every periodic task freezes. The stock
+Xteink X4 Pro app fades its frontlight out 60 s after the last input (255 steps
+of one duty unit every 24 PWM periods), which parked the emulator.
+
+DUTY_START with DUTY_NUM steps now walks the duty from DUTY to DUTY +/-
+NUM*SCALE over NUM*CYCLE periods of the channel's timer (a QEMU timer per
+channel); DUTY_R follows; DUTY_CHNG_END fires when the last step lands; NUM = 0
+applies the duty at once. The board state reports fading/target_permille per
+channel and a fade counter.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/misc/esp32s3_ledc.c         | 122 ++++++++++++++++++++++++++++++---
+ hw/xtensa/xteink_x4pro.c       |   7 +-
+ include/hw/misc/esp32s3_ledc.h |  19 ++++-
+ 3 files changed, 133 insertions(+), 15 deletions(-)
+
+diff --git a/hw/misc/esp32s3_ledc.c b/hw/misc/esp32s3_ledc.c
+index 6b5dc77..8e94aad 100644
+--- a/hw/misc/esp32s3_ledc.c
++++ b/hw/misc/esp32s3_ledc.c
+@@ -6,13 +6,21 @@
+  *   bits 0..3, CLK_DIV bits 4..21, PAUSE 22, RST 23, TICK_SEL 24, PARA_UP 25),
+  *   LSTIMERn_VALUE +0xA4+8n, INT_RAW/ST/ENA/CLR +0xC0..+0xCC (OVF timer n = bit n,
+  *   DUTY_CHNG_END ch n = bit 4+n), CONF +0xD0 (APB_CLK_SEL bits 0..1).
+- * A duty change completes instantly (DUTY_CHNG_END raised on DUTY_START).
++ * CONF1 carries the hardware fade: DUTY_SCALE bits 0..9 (step size, integer duty units),
++ * DUTY_CYCLE bits 10..19 (PWM periods per step), DUTY_NUM bits 20..29 (steps), DUTY_INC bit 30,
++ * DUTY_START bit 31. DUTY_START with DUTY_NUM = 0 applies DUTY at once; with steps the output
++ * walks from DUTY to DUTY +/- NUM*SCALE in guest time (NUM*CYCLE periods of the channel's timer),
++ * DUTY_R follows, and DUTY_CHNG_END is raised when the last step lands. ESP-IDF's ledc_fade_isr
++ * reads DUTY_R back to decide whether the fade reached its target and otherwise programs the next
++ * segment: an instant "fade" that leaves the duty in place makes it re-arm forever and starves the
++ * core in the level-1 dispatcher (docs/log.md 2026-09-06, frontlight auto-dim in the stock app).
+  *
+  * x4pro-emu, GPL-2.0-or-later.
+  */
+ #include "qemu/osdep.h"
+ #include "qemu/log.h"
+ #include "qemu/module.h"
++#include "qemu/timer.h"
+ #include "hw/irq.h"
+ #include "hw/sysbus.h"
+ #include "hw/misc/esp32s3_ledc.h"
+@@ -29,28 +37,116 @@
+ 
+ #define CONF0_SIG_OUT_EN (1u << 2)
+ #define CONF1_DUTY_START (1u << 31)
++#define CONF1_DUTY_INC   (1u << 30)
++#define DUTY_MAX         0xFFFFFu
+ 
+ static void ledc_update_irq(ESP32S3LedcState *s)
+ {
+     qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+ }
+ 
+-int esp32s3_ledc_duty_permille(ESP32S3LedcState *s, int ch)
++/* integer duty the output is at now: the fade walks it one scale per step in guest time */
++static uint32_t ledc_cur_duty(ESP32S3LedcState *s, int ch)
+ {
+-    if (ch < 0 || ch >= ESP32S3_LEDC_CHANNELS || !(s->ch_conf0[ch] & CONF0_SIG_OUT_EN)) {
+-        return -1;
++    if (!s->fade_active[ch]) {
++        return s->ch_duty_cur[ch];
+     }
++    int64_t steps = (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->fade_t0_ns[ch]) / s->fade_step_ns[ch];
++    if (steps < 0) steps = 0;
++    if (steps > s->fade_num[ch]) steps = s->fade_num[ch];
++    uint64_t delta = (uint64_t)steps * s->fade_scale[ch];
++    if (s->fade_inc[ch]) {
++        return (uint32_t)MIN((uint64_t)s->fade_from[ch] + delta, (uint64_t)DUTY_MAX);
++    }
++    return s->fade_from[ch] > delta ? s->fade_from[ch] - (uint32_t)delta : 0;
++}
++
++static uint32_t ledc_fade_target(ESP32S3LedcState *s, int ch)
++{
++    uint64_t delta = (uint64_t)s->fade_num[ch] * s->fade_scale[ch];
++    if (s->fade_inc[ch]) {
++        return (uint32_t)MIN((uint64_t)s->fade_from[ch] + delta, (uint64_t)DUTY_MAX);
++    }
++    return s->fade_from[ch] > delta ? s->fade_from[ch] - (uint32_t)delta : 0;
++}
++
++static int ledc_permille(ESP32S3LedcState *s, int ch, uint32_t duty)
++{
+     int timer = s->ch_conf0[ch] & 3;
+     int res = s->timer_conf[timer] & 0xF;
+     if (!res) {
+         return 0;
+     }
+     uint32_t max = 1u << res;
+-    uint32_t duty = (s->ch_duty[ch] >> 4) & 0xFFFFF;
+     if (duty >= max) duty = max;
+     return (int)((uint64_t)duty * 1000 / max);
+ }
+ 
++int esp32s3_ledc_duty_permille(ESP32S3LedcState *s, int ch)
++{
++    if (ch < 0 || ch >= ESP32S3_LEDC_CHANNELS || !(s->ch_conf0[ch] & CONF0_SIG_OUT_EN)) {
++        return -1;
++    }
++    return ledc_permille(s, ch, ledc_cur_duty(s, ch));
++}
++
++bool esp32s3_ledc_fading(ESP32S3LedcState *s, int ch)
++{
++    return ch >= 0 && ch < ESP32S3_LEDC_CHANNELS && s->fade_active[ch];
++}
++
++int esp32s3_ledc_fade_target_permille(ESP32S3LedcState *s, int ch)
++{
++    if (!esp32s3_ledc_fading(s, ch)) {
++        return -1;
++    }
++    return ledc_permille(s, ch, ledc_fade_target(s, ch));
++}
++
++static void ledc_fade_done(ESP32S3LedcState *s, int ch)
++{
++    if (s->fade_active[ch]) {
++        s->ch_duty_cur[ch] = ledc_fade_target(s, ch);
++        s->fade_active[ch] = false;
++    }
++    s->int_raw |= 1u << (4 + ch);   /* DUTY_CHNG_END */
++    ledc_update_irq(s);
++}
++
++static void ledc_fade_cb(void *opaque)
++{
++    struct { ESP32S3LedcState *s; int ch; } *ctx = opaque;
++    ledc_fade_done(ctx->s, ctx->ch);
++}
++
++/* DUTY_START: apply DUTY now (no steps) or start walking towards DUTY +/- NUM*SCALE */
++static void ledc_duty_start(ESP32S3LedcState *s, int ch, uint32_t conf1)
++{
++    uint32_t num = (conf1 >> 20) & 0x3FF, cycle = (conf1 >> 10) & 0x3FF, scale = conf1 & 0x3FF;
++    uint32_t from = (s->ch_duty[ch] >> 4) & DUTY_MAX;
++    uint32_t freq = esp32s3_ledc_freq_hz(s, ch);
++    s->duty_updates++;
++    if (s->fade_active[ch]) {
++        timer_del(&s->fade_timer[ch]);
++        s->fade_active[ch] = false;
++    }
++    s->ch_duty_cur[ch] = from;
++    if (num == 0 || scale == 0 || cycle == 0 || freq == 0) {
++        ledc_fade_done(s, ch);
++        return;
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    s->fade_active[ch] = true;
++    s->fade_inc[ch] = (conf1 & CONF1_DUTY_INC) != 0;
++    s->fade_from[ch] = from;
++    s->fade_num[ch] = num;
++    s->fade_scale[ch] = scale;
++    s->fade_t0_ns[ch] = now;
++    s->fade_step_ns[ch] = MAX((int64_t)cycle * 1000000000LL / freq, (int64_t)1);
++    s->fades++;
++    timer_mod_ns(&s->fade_timer[ch], now + s->fade_step_ns[ch] * num);
++}
++
+ uint32_t esp32s3_ledc_freq_hz(ESP32S3LedcState *s, int ch)
+ {
+     /* clk_div is Q18.8; source clock per CONF.APB_CLK_SEL: 1 = APB 80 MHz, 2 = RC_FAST ~17.5 MHz, 3 = XTAL 40 MHz */
+@@ -74,7 +170,7 @@ static uint64_t ledc_read(void *opaque, hwaddr addr, unsigned int size)
+         case 0x4: r = s->ch_hpoint[ch]; break;
+         case 0x8: r = s->ch_duty[ch]; break;
+         case 0xC: r = s->ch_conf1[ch] & ~CONF1_DUTY_START; break;
+-        case 0x10: r = s->ch_duty[ch]; break;   /* DUTY_R: current duty */
++        case 0x10: r = (ledc_cur_duty(s, ch) << 4) | (s->ch_duty[ch] & 0xF); break;   /* DUTY_R: the duty the output is at */
+         }
+         return r;
+     }
+@@ -110,9 +206,7 @@ static void ledc_write(void *opaque, hwaddr addr, uint64_t value, unsigned int s
+         case 0xC:
+             s->ch_conf1[ch] = v;
+             if (v & CONF1_DUTY_START) {
+-                s->duty_updates++;
+-                s->int_raw |= 1u << (4 + ch);   /* DUTY_CHNG_END: the (instant) fade finished */
+-                ledc_update_irq(s);
++                ledc_duty_start(s, ch, v);
+             }
+             break;
+         default: break;
+@@ -150,7 +244,12 @@ static void ledc_reset_hold(Object *obj, ResetType type)
+     memset(s->ch_conf0, 0, sizeof(s->ch_conf0));
+     memset(s->ch_hpoint, 0, sizeof(s->ch_hpoint));
+     memset(s->ch_duty, 0, sizeof(s->ch_duty));
++    memset(s->ch_duty_cur, 0, sizeof(s->ch_duty_cur));
+     memset(s->ch_conf1, 0, sizeof(s->ch_conf1));
++    for (int ch = 0; ch < ESP32S3_LEDC_CHANNELS; ch++) {
++        timer_del(&s->fade_timer[ch]);
++        s->fade_active[ch] = false;
++    }
+     memset(s->timer_conf, 0, sizeof(s->timer_conf));
+     s->int_raw = s->int_ena = 0;
+     s->conf = 0;
+@@ -163,6 +262,11 @@ static void ledc_init(Object *obj)
+     memory_region_init_io(&s->iomem, obj, &ledc_ops, s, TYPE_ESP32S3_LEDC, 0x1000);
+     sysbus_init_mmio(sbd, &s->iomem);
+     sysbus_init_irq(sbd, &s->irq);
++    for (int ch = 0; ch < ESP32S3_LEDC_CHANNELS; ch++) {
++        s->fade_ctx[ch].s = s;
++        s->fade_ctx[ch].ch = ch;
++        timer_init_ns(&s->fade_timer[ch], QEMU_CLOCK_VIRTUAL, ledc_fade_cb, &s->fade_ctx[ch]);
++    }
+ }
+ 
+ static void ledc_class_init(ObjectClass *klass, void *data)
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index c3d0c29..67c7f10 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -459,10 +459,11 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+             for (int p = 0; p < ESP32S3_GPIO_PINS; p++) {
+                 if ((b->gpio->func_out_sel[p] & 0x1FF) == 73 + ch) { gpio = p; break; }   /* LEDC_LS_SIG_OUT0_IDX = 73 */
+             }
+-            g_string_append_printf(j, "%s{\"ch\":%d,\"gpio\":%d,\"duty_permille\":%d,\"freq_hz\":%u}", ch ? "," : "",
+-                                   ch, gpio, esp32s3_ledc_duty_permille(b->ledc, ch), esp32s3_ledc_freq_hz(b->ledc, ch));
++            g_string_append_printf(j, "%s{\"ch\":%d,\"gpio\":%d,\"duty_permille\":%d,\"freq_hz\":%u,\"fading\":%s,\"target_permille\":%d}", ch ? "," : "",
++                                   ch, gpio, esp32s3_ledc_duty_permille(b->ledc, ch), esp32s3_ledc_freq_hz(b->ledc, ch),
++                                   esp32s3_ledc_fading(b->ledc, ch) ? "true" : "false", esp32s3_ledc_fade_target_permille(b->ledc, ch));
+         }
+-        g_string_append_printf(j, "],\"updates\":%" PRIu64 "},", b->ledc->duty_updates);
++        g_string_append_printf(j, "],\"updates\":%" PRIu64 ",\"fades\":%" PRIu64 "},", b->ledc->duty_updates, b->ledc->fades);
+     }
+     if (b->sleep) {
+         g_string_append_printf(j, "\"sleep\":{\"sleeping\":%s,\"deep\":%s,\"count\":%" PRIu64 ",\"wakes\":%" PRIu64 ",\"light_sleeps\":%" PRIu64 ",\"entered_us\":%" PRId64 ",\"ext1_sel\":\"0x%x\",\"ext1_status\":\"0x%x\",\"wakeup_cause\":\"0x%x\"},",
+diff --git a/include/hw/misc/esp32s3_ledc.h b/include/hw/misc/esp32s3_ledc.h
+index 8d29bb4..2417b0f 100644
+--- a/include/hw/misc/esp32s3_ledc.h
++++ b/include/hw/misc/esp32s3_ledc.h
+@@ -1,11 +1,14 @@
+ /*
+  * ESP32-S3 LEDC (LED PWM) controller: low-speed channels 0..7, timers 0..3.
+- * Only duty/resolution are modelled; the result is an observable duty per channel.
++ * Duty, resolution and hardware fades (DUTY_START with DUTY_NUM steps of DUTY_SCALE every
++ * DUTY_CYCLE PWM periods) are modelled; the result is an observable duty per channel that
++ * follows a fade in guest time, and DUTY_CHNG_END when the last step lands.
+  * x4pro-emu, GPL-2.0-or-later.
+  */
+ #pragma once
+ 
+ #include "hw/sysbus.h"
++#include "qemu/timer.h"
+ 
+ #define TYPE_ESP32S3_LEDC "esp32s3.ledc"
+ OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3LedcState, ESP32S3_LEDC)
+@@ -19,13 +22,23 @@ struct ESP32S3LedcState {
+     qemu_irq irq;
+     uint32_t ch_conf0[ESP32S3_LEDC_CHANNELS];
+     uint32_t ch_hpoint[ESP32S3_LEDC_CHANNELS];
+-    uint32_t ch_duty[ESP32S3_LEDC_CHANNELS];    /* DUTY register value (duty << 4) */
++    uint32_t ch_duty[ESP32S3_LEDC_CHANNELS];    /* DUTY register as written (start duty << 4) */
++    uint32_t ch_duty_cur[ESP32S3_LEDC_CHANNELS]; /* integer duty the output is at (DUTY_R >> 4) */
+     uint32_t ch_conf1[ESP32S3_LEDC_CHANNELS];
+     uint32_t timer_conf[ESP32S3_LEDC_TIMERS];
+     uint32_t int_raw, int_ena, conf;
+-    uint64_t duty_updates;
++    uint64_t duty_updates, fades;
++    /* a fade in progress: from -> from +/- num*scale, one step of scale every step_ns */
++    bool fade_active[ESP32S3_LEDC_CHANNELS], fade_inc[ESP32S3_LEDC_CHANNELS];
++    uint32_t fade_from[ESP32S3_LEDC_CHANNELS], fade_num[ESP32S3_LEDC_CHANNELS], fade_scale[ESP32S3_LEDC_CHANNELS];
++    int64_t fade_t0_ns[ESP32S3_LEDC_CHANNELS], fade_step_ns[ESP32S3_LEDC_CHANNELS];
++    QEMUTimer fade_timer[ESP32S3_LEDC_CHANNELS];
++    struct { ESP32S3LedcState *s; int ch; } fade_ctx[ESP32S3_LEDC_CHANNELS];
+ };
+ 
+ /* duty in permille (0..1000) of the channel's current setting; -1 if the output is disabled */
+ int esp32s3_ledc_duty_permille(ESP32S3LedcState *s, int ch);
+ uint32_t esp32s3_ledc_freq_hz(ESP32S3LedcState *s, int ch);
++/* fade in progress on the channel; target duty in permille of the running fade, -1 if none */
++bool esp32s3_ledc_fading(ESP32S3LedcState *s, int ch);
++int esp32s3_ledc_fade_target_permille(ESP32S3LedcState *s, int ch);
+-- 
+2.50.1 (Apple Git-155)
+

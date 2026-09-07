@@ -530,3 +530,72 @@ PHY's status polls have no timeouts, so every bit it waits for needs an answer, 
 one is a two-minute step; loop counters kept with `l16ui/s16i` wrap at 65536 and look like countdowns in
 register samples; `esp32s3.rfstub` stores what the driver writes, which the MAC address setup at
 0x60033000+8n / +0x24+8n (app 0x4230be5e) relies on.
+
+## 2026-09-06 — Session 4: the stock's frontlight auto-dim froze core 0 (LEDC fade model), tcbwalk, stock screens
+
+The handoff said 14/14 green; `make test` at the start of the session gave 12/14: the stock's menu tap
+never repainted, and CrossPoint's file-browser row tap once drew nothing. The stock failure reproduced by
+hand and looked like a touch or I2C bug: after one good tap the GT911 model sat with a frame pending
+and INT low, the firmware never read it again, and the CW2017 poll (every 3 s) had stopped too — the
+I2C controller idle, its last transaction complete, interrupts disabled. Nothing waited on the bus.
+
+- **The tick was dead.** `pmemsave` over QMP (the HMP form parses a `/` in the path as a division) and the
+  new `tools/tcbwalk.py` (finds every TCB by its self-owned list items, prints core, priority, the
+  queue/semaphore a task waits on, and a register-window backtrace with ROM/app symbols): every
+  periodic task of the stock (`xteink_input`, `xteink_ui`, `pwr_monitor`, `xteink_sdmon`, …) sat in the
+  delayed list waiting for ticks 93553..93917 while the dump was 345 s old. `xTickCount` = 93551, frozen.
+- **Core 0 never left a level-1 interrupt.** `info registers -a`: core 0 at PS.INTLEVEL=1 on the interrupt
+  stack, `INTERRUPT & INTENABLE` = CPU interrupts 2, 5 and 12; the PC in ESP-IDF's level-1 dispatcher
+  loop (`rsr.interrupt` / pick the highest bit / `wsr.intclear` / call the handler / `j` back). The
+  interrupt matrix (0x600C2000, source → CPU interrupt) said 12 = LEDC, 5 = SYSTIMER target 0 (the tick),
+  2 = SYSTIMER target 2 (esp_timer). LEDC came first every time; the tick never ran again.
+- **Why the LEDC handler could not clear it.** `LEDC_INT_RAW` = `DUTY_CHNG_END_LSCH1`, `INT_ENA` = channels
+  0/1; channel 1 (warm, GPIO9) had `CONF1` = fade *down*, 255 steps of 1 duty unit every 24 PWM periods
+  (245 ms at 25 kHz) from `DUTY` 4080 (= 255.0, the 249 ‰ the stock lights at boot). The model completed
+  every fade "instantly" without moving the duty. ESP-IDF's `ledc_fade_isr` clears the flag, reads `DUTY_R`
+  back, sees 255 instead of 0, programs the next segment and sets `DUTY_START` again — the model raises
+  `DUTY_CHNG_END` in the same instruction, the ISR returns into a dispatcher that sees the source high
+  again, forever. Trigger: the stock fades the frontlight out **60 s after the last input** (the power
+  press that woke it counts) and fades it back on the next touch. The tests were flaky because boot to Home
+  takes 11–50 s wall time here, so the tap sometimes landed on the dim.
+- **Fix (QEMU patch 0011, `hw/misc/esp32s3_ledc.c`):** `DUTY_START` with `DUTY_NUM` steps walks the duty
+  from `DUTY` to `DUTY ± NUM×SCALE` over `NUM×CYCLE` periods of the channel's timer in guest time (a QEMU
+  timer per channel); `DUTY_R` and `state.ledc` follow the walk; `DUTY_CHNG_END` fires when the last step
+  lands; `NUM = 0` applies the duty at once as before. `state.ledc.channels[]` gains `fading` and
+  `target_permille`, `state.ledc.fades` counts fades. Verified: the warm channel goes 249 → 0 at 60 s, the
+  gauge poll and the clock repaint continue, a tap fades it back and opens the menu.
+  New test `tests/test_stock.py::test_stock_idle_dims_frontlight_and_keeps_ticking`.
+- **CrossPoint's lost taps.** Three different CrossPoint tests each failed once on an input that drew
+  nothing: the Home pad after Browse Files, the file-browser row tap, the Browse Files tap right after a
+  battery change. Common cause: CrossPoint polls the GT911 in its main loop, and a rendering pass takes
+  seconds ("Time = 3494 ms from clearScreen to displayBuffer") during which no poll happens; `wait-quiet`
+  only sees panel refreshes, so a 120 ms tap into that window is invisible to the firmware. `x4emu tap`
+  and `home` now stay asserted for at least `--ms` and until the firmware has consumed the frame
+  (`state.gt911.clears`, up to 5 s) and report when it was read; the firmware still sees a short touch
+  because it measures from its own first read. `home` also takes `--quiet` and defaults to 250 ms.
+- **Stock screens (NEXT_PHASE §3.2 step 4).** Nav menu (Read, All Files, USB Mode, Cloud Sync, Settings;
+  date on the right edge), All Files (microSD, `screenshots/`, `Test Book.epub`), the EPUB (opens at
+  "Chapter 2", Right pages), the reading menu (back, bookmark, Contents/Progress/Font/More), the bookshelf
+  with the book (38 %, "0h1m", Continue), Settings (Unbound, Upgrade, Network, Bluetooth, Language, Time,
+  Startup Password, System Font, About Device). Goldens `tests/golden/stock-{menu,all-files,reader-page1,
+  reader-page2,reading-menu,settings}.png` and `test_stock_screens_walk` (coordinates in its docstring).
+  The card image for the stock tests now carries `tests/mkepub.py`'s book (mcopy into the scratch copy).
+  Panel stream of every update (`--trace-epd`): PTIN, PTL full window (x 0..799, y 120..599), DTM1 48 000
+  bytes, PTOUT, PTIN, PTL changed window, DTM2 window bytes, PTOUT, CDI D7, CCSET 02, TSSET 5A, PFS 20,
+  E1 02, [PTL full again], PTIN, PSR 17 4D, DRF; the boot init is command for command what
+  `docs/hardware.md` lists.
+- **Not found yet: the brightness UI.** Settings shows no display/light entry; a swipe and the Right button
+  do not scroll it; the Home pad does nothing in the stock (it reads the frames — maybe it wants the GT911
+  key value byte at 0x8177, which the model does not serve). Candidates: the reading menu's "More", a
+  status-bar pull-down, the power-button double click.
+- **Stock has a screenshot function after all.** Strings: Settings → Developer → "Screen Capture",
+  `/sdcard/screenshots/screenshot_%s.xic`, `Screenshot saved`, a developer log `/sdcard/logs/dev_%s.log`
+  with `light_on=%u brightness_value=%u color_temp_value=%u wifi_enabled=%u …`, and a
+  `DeveloperToolsService` that pushes screenshots to `/sdcard/devtools/screenshot_push_url.txt`. If the
+  `.xic` format can be decoded, step 5 (a device oracle for a stock screen) needs no photo.
+
+Lessons: when touch, I2C and every 3-second poll stop together, check the tick before any peripheral —
+`tcbwalk.py` shows it in one screen; a level-1 source that its handler cannot clear parks the core in the
+dispatcher loop with `PS.INTLEVEL=1` and only higher-level interrupts still run; `x4emu mem read` on the
+matrix map (0x600C2000 + 4·source) names the culprit; "instant" completion in a model is wrong whenever
+the driver reads progress back. QMP `pmemsave` takes absolute paths, the HMP wrapper does not.

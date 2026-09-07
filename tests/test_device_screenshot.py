@@ -19,8 +19,8 @@ def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
     # the percentage change repaints the status bar within ~1.5 s; do not tap into that paint
     x4emu(emu, 'tap', 345, 350, '--quiet', 3, '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    x4emu(emu, 'home', '--wait', 20)
+    # the Home pad is polled: press it into an idle panel and hold it (default 250 ms)
+    x4emu(emu, 'home', '--quiet', 1.5, '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
     r = x4emu(emu, 'screenshot', str(tmp_path / 'home-100.png'), '--diff', DEVICE_BMP, check=False)
     assert r.returncode == 0 and '0.000%' in r.stdout, r.stdout

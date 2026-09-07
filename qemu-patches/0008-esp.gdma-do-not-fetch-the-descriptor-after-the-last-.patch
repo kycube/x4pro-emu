@@ -1,7 +1,7 @@
 From 309ec3f4bd2be6d76c08376452c8f2208010eecd Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 18:22:48 -0500
-Subject: [PATCH 08/10] esp.gdma: do not fetch the descriptor after the last
+Subject: [PATCH 08/11] esp.gdma: do not fetch the descriptor after the last
  one of a read
 
 esp_gdma_read_channel() fetched the next list node even when the requested

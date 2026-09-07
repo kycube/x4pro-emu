@@ -5,20 +5,35 @@ Goal of the next phase, in the owner's words: run the **stock Xteink firmware** 
 **world class**. This document is the whole context you need; the previous agent's context is gone.
 Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
 
-## 0. Resume here (end of session 3, 2026-09-06; its two commits are the top of `git log` on main)
+## 0. Resume here (end of session 4, 2026-09-06; session 4's changes are in the working tree — see the end of this section)
 
-1. `cd /Users/mini/x4pro-emu && make test` — 14 cases (12 CrossPoint + 2 stock), about 3 minutes.
-   Needs the built QEMU (`qemu/build/qemu-system-xtensa`), the CrossPoint build
-   (`firmware/.pio/build/x4pro`) and the gitignored `images/` (device dump, `sd-device.img`, ROM ELF);
-   all three are present on this Mac. If `qemu/` were ever missing: `make setup && make build`
-   (`qemu/.x4pro-patched` marks an applied series; the tree here carries patches 0001–0010 as commits).
-2. See the stock give WiFi up: `x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img`,
-   wait for "deep sleep" in `x4emu --name stock status`, `press power`, `wait-text "wifi:force witi stop"
-   --timeout 90`, `screenshot`. `state` shows `ana_i2c`, `saradc`, `rf.hot`, `iolog_hot`. (`images/stock.bin`
-   is the dump with the device's NVS, `net_en=1`; the stock writes to it and to the SD image — regenerate
-   with `tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin` when in doubt.)
-3. Continue at §3.2 step 4 (stock screens beyond Home). The device was not touched in session 3; §1's
-   device state still holds. Session 3's findings: `docs/log.md`, last entry.
+1. `cd /Users/mini/x4pro-emu && make test` — 16 cases (12 CrossPoint + 4 stock), about 4 minutes, all green
+   at the end of session 4. Needs the built QEMU (`qemu/build/qemu-system-xtensa`, rebuilt in session 4
+   with patch 0011), the CrossPoint build (`firmware/.pio/build/x4pro`) and the gitignored `images/`
+   (device dump, `sd-device.img`, ROM ELF); all present on this Mac. If `qemu/` were ever missing:
+   `make setup && make build` (`qemu/.x4pro-patched` marks an applied series; the tree carries patches
+   0001–0011 as commits on branch `x4pro`).
+2. **Session 4 in one line:** the handoff's "14/14 green" was 12/14 here; the cause was an emulator bug,
+   not touch — the stock fades its frontlight out 60 s after the last input, the LEDC model finished the
+   fade "instantly" without moving the duty, ESP-IDF's fade ISR re-armed it forever and core 0 never left
+   the level-1 dispatcher (tick dead, every periodic task frozen). Fixed in patch 0011 (fades walk the duty
+   in guest time). Full story and the debugging path: `docs/log.md`, last entry. Tool that found it:
+   `tools/tcbwalk.py` (FreeRTOS task walk over a `pmemsave` dump; `--frame PC,A0,SP` for a live CPU).
+3. Stock screens (§3.2 step 4) are walked by `tests/test_stock.py::test_stock_screens_walk` with goldens
+   `tests/golden/stock-*.png`: nav menu, All Files, EPUB page 1/2, reading menu, Settings. **Open:** the
+   brightness/warmth UI is not on the Settings page and neither a swipe nor the Right button scrolls it;
+   try the reading menu's "More" (landscape ≈ (770, 60) with the menu open), a status-bar pull-down, and the
+   power-button double click — `x4emu light` must follow. The stock ignores the GT911 Home pad frames
+   (CrossPoint's `x4emu home` does nothing there; it may want the key value byte at 0x8177).
+4. §3.2 step 5 has a new option: the stock has **Screen Capture** (Settings → Developer) writing
+   `/sdcard/screenshots/screenshot_%s.xic`; decode `.xic` (start with `strings`/the `XTCache` files, or
+   compare a capture's size with 800×480/8) and the device oracle needs no photo. The device was not
+   touched in session 4; §1's device state still holds.
+5. Session 4's edits are uncommitted in the main repo (the QEMU clone has commit 5422572 on `x4pro`, and
+   `qemu-patches/0011-…` is exported): `qemu-patches/0011`, `tools/x4emu` (`home --ms 250 --quiet`),
+   `tools/tcbwalk.py`, `tests/test_stock.py` (+3 tests, EPUB on the scratch card, `golden_check`),
+   `tests/test_device_screenshot.py`, `tests/test_touch_reader.py`, six goldens, `docs/log.md`,
+   `docs/hardware.md`, `docs/audit.md`, `CLAUDE.md`, this file. Review `git status` and commit.
 
 ## 1. Where things stand (2026-09-06)
 
@@ -84,7 +99,11 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
    home paint through `spi_master` with GDMA (sequence in `docs/hardware.md`). Home at ~5 s after the
    wake; `refresh_count` 3; warm frontlight on GPIO9 at ~25 %.
 4. Touch: a tap on the menu icon (`x4emu tap 88 38`) repaints; the stock reads the GT911 on its
-   INT line (`state.gpio_irqs`, `gt911.frames`).
+   INT line (`state.gpio_irqs`, `gt911.frames`). Nav menu entries at landscape x 160/245/330/415/500,
+   y ≈ 150 (Read, All Files, USB Mode, Cloud Sync, Settings); All Files first row (250, 320); reader
+   page centre (400, 240) opens the reading menu, its back arrow is (80, 445); Right/Left page.
+   60 s after the last input the frontlight fades out (`state.ledc` `fading` → warm 0), the next touch
+   fades it back; the status-bar clock repaints every minute.
 5. With `net_en=1` (the device's setting): at 14 s `wifi_init` logs appear exactly as on the device,
    PHY 711 calibrates (≈1050 analog-master reads, the temperature sensor, ≈8700 radio-block accesses),
    `wifi:mode : sta (98:c3:77:be:ea:30)` and `wifi:enable tsf` follow as on the device, then — no air —
@@ -93,9 +112,11 @@ Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/lo
    `phy: error: pll_cal exceeds 2ms!!!` x6 (the RF PLL lock flag in analog block 0x62 reg 0x0c is never
    set). No blocker is known in the stock now.
 
-`tests/test_stock.py` boots scratch copies of the dump: `net_en=0` checks 1–4 against
-`tests/golden/stock-home.png` (status bar masked); `net_en=1` checks 5 (console sequence, no register
-polled past 200 k accesses, gauge alive, Home intact, menu tap repaints).
+`tests/test_stock.py` boots scratch copies of the dump with `tests/mkepub.py`'s book on the card:
+`net_en=0` checks 1–4 against `tests/golden/stock-home.png` (status bar masked); `net_en=1` checks 5
+(console sequence, no register polled past 200 k accesses, gauge alive, Home intact, menu tap repaints);
+`test_stock_idle_dims_frontlight_and_keeps_ticking` (the 60 s fade, tick alive, tap after it);
+`test_stock_screens_walk` (menu, All Files, page 1/2, reading menu, bookshelf with the book, Settings).
 
 ### 3.2 Attack plan (in order)
 
@@ -111,14 +132,16 @@ polled past 200 k accesses, gauge alive, Home intact, menu tap repaints).
    0x60040000) stays a logger until a firmware uses continuous mode.
 Next, in the order that serves the owner's goal (a usable stock in the emulator) best:
 
-4. **Stock screens beyond Home** (start here). Menu (`x4emu tap 88 38` repaints it; find its items by
+4. **Stock screens beyond Home** — done for menu / All Files / reader / reading menu / Settings
+   (session 4, goldens + `test_stock_screens_walk`); **open: the brightness/warmth UI** (see §0.3). Menu (`x4emu tap 88 38` repaints it; find its items by
    tapping and diffing screenshots), All Files (the device card holds no books: build an SD image with
    an EPUB, `tests/mkepub.py` + `tools/mksd.py --src`), Settings (brightness/warmth sliders → `x4emu
    light` must follow; that is the open acceptance item), one reader page. One golden per screen under
    `tests/golden/stock-*.png` and one pytest walking them (extend `tests/test_stock.py`; mask the status
    bar as `masked_diff` does). Compare each full refresh's panel stream (`--trace-epd`,
    `tools/epdtrace.py`) with the UC8279 sequence in `docs/hardware.md`.
-5. **Device oracle for a stock screen.** The stock has no screenshot function. Ask the owner to put the
+5. **Device oracle for a stock screen.** The stock *has* a screenshot function (Settings → Developer →
+   Screen Capture, `.xic` files on the card, see §0.4) — decode it first. Otherwise ask the owner to put the
    stock back on the device (`tools/device.py restore-stock --yes`: app0 ← backup; CrossPoint returns
    with `flash-crosspoint --yes`), photograph Home and one more screen, and capture a boot log with
    `tools/device.py console --reset --seconds 40`. Compare by eye (layout, glyph shapes, the status bar)
@@ -211,6 +234,10 @@ follows its slider (step 4, Settings → `x4emu light`); a stock screen matches 
   whole lines otherwise.
 - Firmware ignores input while painting; the CLI has `--quiet` / `wait-quiet`, and
   `wait-refresh --total`/`press --wait` avoid the baseline race that looked like 4-second latency.
+  CrossPoint also polls touch only between rendering passes that take seconds ("Time = 3494 ms from
+  clearScreen to displayBuffer"), which `wait-quiet` cannot see: a 120 ms tap into such a pass was the
+  session-4 flake in three different tests. `tap`/`home` now stay asserted until the firmware reads the
+  GT911 frame (`state.gt911.clears`); firmware measures a tap from its own first read, so it stays short.
 - SdFat mounts MBR partition 1 only; `mksd.py` writes an MBR. QEMU needs power-of-two images.
 - The GT911 only answers while GPIO2 is driven LOW (with GPIO1 HIGH); the model NACKs otherwise.
 - The panel probe is bit-banged by CrossPoint but read through SPI2 half-duplex by the stock;
@@ -239,6 +266,13 @@ follows its slider (step 4, Settings → `x4emu light`); a stock screen matches 
   the bit (a sticky entry in `esp32s3_rfstub.c`, or a model). Before the cap, one such poll wrote
   1.9 GB of qemu.log in 30 s. Loop counters kept with `l16ui/s16i` wrap at 65536 and look like
   countdowns in register samples.
+- When touch, I2C and the 3-second gauge poll stop together, the tick is dead: `pmemsave` over QMP
+  (`{"execute":"pmemsave","arguments":{"val":1070170112,"size":491520,"filename":"/abs/dram.bin"}}`;
+  the HMP form parses a `/` in the path as a division) + `tools/tcbwalk.py` show every task's wait in
+  one screen; `info registers -a` gives PS.INTLEVEL / INTERRUPT / INTENABLE, `x4emu mem read 0x600C2000
+  396` the matrix map (source → CPU interrupt), and the level-1 dispatcher loop (app 0x4037c58e..c5e6)
+  re-dispatches a level source its handler cannot clear forever. A model must never complete
+  "instantly" what a driver reads progress back from (LEDC fades, session 4).
 - `x4emu --name` becomes a directory under `.x4emu/` and part of two UNIX socket paths: no `=` in it
   (QEMU's `-qmp unix:PATH` option parser splits on it) and keep it short (macOS caps socket paths at
   104 bytes; pytest names come from the test function plus the parametrize id).
@@ -247,7 +281,8 @@ follows its slider (step 4, Settings → `x4emu light`); a stock screen matches 
 
 - [x] Stock firmware: boots, renders, navigates, frontlight observable (WiFi off in NVS).
 - [x] Stock firmware: WiFi start fails fast (analog-master I2C block, SENS, radio stub; `tests/test_stock.py`).
-- [ ] Stock firmware: one screen matched to a device photo.
+- [x] Stock firmware: the screens reachable by touch have goldens and a walk test (session 4).
+- [ ] Stock firmware: one screen matched to a device capture (Screen Capture `.xic`) or photo.
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle.
 - [ ] Deterministic replay of an input script yields identical screenshots run to run.
 - [ ] Waveform-aware grayscale validated against device photos.

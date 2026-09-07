@@ -14,14 +14,22 @@ then finds no air: "TX Q not empty" at +7.5 s, "force witi stop", and the stock 
 +17 s while the UI keeps running (no radio is modelled; docs/NEXT_PHASE.md). The golden is
 emulator-made (no device oracle for this screen yet; the device shows the same empty bookshelf). The
 status bar (clock, battery, WiFi glyph) is excluded from the comparison.
+
+Sixty seconds after the last input the stock fades the frontlight out (ESP-IDF ledc fade, 255 steps
+of one duty unit every 24 PWM periods); the first touch fades it back in. That fade is what froze
+the emulator before the LEDC model walked the duty in guest time (docs/log.md 2026-09-06, session 4):
+ESP-IDF's fade-end ISR reads DUTY_R back, sees a duty that never moved, re-arms the fade, and the
+instant "fade done" interrupt storms core 0's level-1 dispatcher forever, taking the FreeRTOS tick
+with it. `test_stock_idle_dims_frontlight_and_keeps_ticking` guards that.
 """
-import json, os, shutil, subprocess, time, pytest
+import json, os, shutil, subprocess, sys, time, pytest
 from conftest import x4emu, ROOT, PY
 
 DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')
 SD = os.path.join(ROOT, 'images', 'sd-device.img')
 GOLDEN = os.path.join(ROOT, 'tests', 'golden', 'stock-home.png')
 STATUS_BAR_COLS = 60     # landscape columns 0..59 hold the portrait status bar (clock, battery)
+PANEL_W = 800
 
 
 def state(name):
@@ -40,6 +48,8 @@ def wait_for(fn, timeout, what):
 
 @pytest.fixture
 def stock(tmp_path, request):
+    """A scratch copy of the dump (user_config/net_en = request.param, default 0) and of the device's
+    card image, plus `tests/mkepub.py`'s book at the card root (the device card holds no books)."""
     if not (os.path.exists(DUMP) and os.path.exists(SD)):
         pytest.skip('device dump / SD image not available')
     net_en = getattr(request, 'param', 0)
@@ -50,18 +60,34 @@ def stock(tmp_path, request):
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
     shutil.copyfile(SD, sd)          # the stock writes to the card at boot
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mkepub import make_epub
+    make_epub(str(tmp_path / 'Test Book.epub'))
+    subprocess.run(['mcopy', '-i', f'{sd}@@1048576', '-o', str(tmp_path / 'Test Book.epub'), '::/'], check=True)
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--trace-epd', str(tmp_path / 'epd.jsonl'))
     yield name, tmp_path
     x4emu(name, 'stop', check=False)
 
 
-def masked_diff(a_png, b_png):
+def masked_diff(a_png, b_png, cols=(STATUS_BAR_COLS, PANEL_W)):
+    """Pixels differing in landscape columns cols[0]..cols[1]-1 (the portrait status bar with the
+    clock and battery is columns 0..59; the nav menu's date sits in the last 60 columns)."""
     from PIL import Image, ImageChops
     a = Image.open(a_png).convert('1'); b = Image.open(b_png).convert('1')
-    box = (STATUS_BAR_COLS, 0, a.width, a.height)
+    box = (cols[0], 0, min(cols[1], a.width), a.height)
     d = ImageChops.difference(a.crop(box), b.crop(box))
-    return sum(1 for v in d.getdata() if v)
+    return sum(1 for v in d.get_flattened_data() if v) if hasattr(d, 'get_flattened_data') else sum(1 for v in d.getdata() if v)
+
+
+def golden_check(shot, name, cols=(STATUS_BAR_COLS, PANEL_W)):
+    """Compare against tests/golden/NAME (created from this shot when missing)."""
+    g = os.path.join(ROOT, 'tests', 'golden', name)
+    if not os.path.exists(g):
+        shutil.copyfile(shot, g)
+        print(f'golden created: {g}')
+    n = masked_diff(shot, g, cols)
+    assert n == 0, f'{os.path.basename(shot)} differs from tests/golden/{name} in {n} pixels (columns {cols[0]}..{cols[1]-1})'
 
 
 def test_stock_boots_to_home_lights_and_reacts_to_touch(stock):
@@ -148,3 +174,85 @@ def test_stock_wifi_fails_fast(stock):
     x4emu(name, 'tap', '88', '38', '--quiet', '1')
     after = wait_for(lambda: (s := state(name))['refresh_count'] > before['refresh_count'] and s, 20, 'repaint after the menu tap')
     assert after['gt911']['frames'] > before['gt911']['frames']
+
+
+def test_stock_idle_dims_frontlight_and_keeps_ticking(stock):
+    """After ~60 s without input the stock fades the warm channel to 0 (LEDC fade, guest time); the
+    tick, the gauge poll and touch must survive it, and the first tap fades the light back in."""
+    name, tmp = stock
+    st = boot_to_home(name)
+    x4emu(name, 'wait-quiet', '--seconds', '2', '--timeout', '30')
+
+    def warm(s):
+        return {c['gpio']: c for c in s['ledc']['channels'] if c['gpio'] >= 0}.get(9, {})
+    assert warm(st)['duty_permille'] > 0, warm(st)
+    # 1. the auto-dim: a real fade (steps in guest time), ending at 0
+    seen_fade = False
+    def dimmed():
+        nonlocal seen_fade
+        s = state(name)
+        w = warm(s)
+        seen_fade |= bool(w.get('fading'))
+        return s if w.get('duty_permille') == 0 and s['ledc']['fades'] >= 1 else None
+    st = wait_for(dimmed, 120, 'frontlight auto-dim (~60 s after the wake)')
+    assert st['ledc']['fades'] >= 1, st['ledc']
+    # 2. core 0 still ticks: the gauge poll (every 3 s) goes on, the panel clock still repaints
+    i2c0, t = st['i2c0']['transactions'], st['uptime_us']
+    wait_for(lambda: state(name)['uptime_us'] > t + 7_000_000, 40, 'seven guest seconds')
+    assert state(name)['i2c0']['transactions'] > i2c0, 'CW2017 polling stopped: core 0 is stuck (LEDC fade-end storm?)'
+    # 3. touch works and brings the light back (a fade in, to the previous duty)
+    before = state(name)
+    x4emu(name, 'tap', '88', '38', '--quiet', '1')
+    after = wait_for(lambda: (s := state(name))['refresh_count'] > before['refresh_count'] and s, 20, 'repaint after the menu tap')
+    assert after['gt911']['clears'] > before['gt911']['clears']
+    def lit_again():
+        s = state(name)
+        return s if warm(s)['duty_permille'] > 0 and not warm(s)['fading'] else None
+    lit = wait_for(lit_again, 10, 'frontlight back on')
+    assert lit['ledc']['fades'] >= 2, lit['ledc']
+
+
+def tap(name, x, y, quiet=1, wait=20):
+    x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait))
+
+
+def settle(name, seconds=1.5, timeout=60):
+    x4emu(name, 'wait-quiet', '--seconds', str(seconds), '--timeout', str(timeout))
+
+
+def test_stock_screens_walk(stock):
+    """Home -> nav menu -> All Files -> the EPUB (page 1, page 2) -> reading menu -> back to the
+    bookshelf -> nav menu -> Settings, one golden per screen (tests/golden/stock-*.png, emulator-made;
+    no device oracle yet). Coordinates are landscape panel pixels of the portrait UI: the hamburger
+    icon (88, 38), the nav menu entries at x 160/245/330/415/500 (Read, All Files, USB Mode, Cloud
+    Sync, Settings), the first file row (250, 320), the page centre (400, 240), the reading menu's
+    back arrow (80, 445). The Home pad does nothing in the stock (docs/NEXT_PHASE.md)."""
+    name, tmp = stock
+    boot_to_home(name)
+    settle(name, 2, 30)
+    tap(name, 88, 38); settle(name)
+    x4emu(name, 'screenshot', str(tmp / 'menu.png'))
+    golden_check(tmp / 'menu.png', 'stock-menu.png', cols=(STATUS_BAR_COLS, PANEL_W - 60))   # date on the right edge
+    tap(name, 245, 150); settle(name, 2)
+    x4emu(name, 'screenshot', str(tmp / 'all-files.png'))
+    golden_check(tmp / 'all-files.png', 'stock-all-files.png')
+    tap(name, 250, 320, wait=30); settle(name, 3, 120)          # opening the book: several refreshes
+    x4emu(name, 'screenshot', str(tmp / 'reader-page1.png'))
+    READER_COLS = (STATUS_BAR_COLS, PANEL_W - 40)     # the reader draws its clock in the portrait footer: the last 40 columns
+    golden_check(tmp / 'reader-page1.png', 'stock-reader-page1.png', cols=READER_COLS)
+    x4emu(name, 'press', 'right', '--quiet', '1', '--wait', '20'); settle(name, 2)
+    x4emu(name, 'screenshot', str(tmp / 'reader-page2.png'))
+    golden_check(tmp / 'reader-page2.png', 'stock-reader-page2.png', cols=READER_COLS)
+    assert masked_diff(tmp / 'reader-page1.png', tmp / 'reader-page2.png') > 1000, 'page turn drew nothing'
+    tap(name, 400, 240); settle(name, 2)
+    x4emu(name, 'screenshot', str(tmp / 'reading-menu.png'))
+    golden_check(tmp / 'reading-menu.png', 'stock-reading-menu.png')
+    tap(name, 80, 445); settle(name, 2)                          # back: the bookshelf now lists the book
+    x4emu(name, 'screenshot', str(tmp / 'bookshelf.png'))
+    assert masked_diff(tmp / 'bookshelf.png', GOLDEN) > 1000, 'bookshelf still empty after reading'
+    tap(name, 88, 38); settle(name)
+    tap(name, 500, 150); settle(name, 2)
+    x4emu(name, 'screenshot', str(tmp / 'settings.png'))
+    golden_check(tmp / 'settings.png', 'stock-settings.png')
+    st = state(name)
+    assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']

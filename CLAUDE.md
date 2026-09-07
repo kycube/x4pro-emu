@@ -27,7 +27,9 @@ device photos, world-class checklist).
   are ignored (the GPIO model carries per-pin idle levels: buttons, MOSI, RST, CS idle HIGH).
 - **Stock firmware** (`xteink_app` 7.2.4, IDF 6.0.1): runs to Home with the device's NVS as dumped; its
   WiFi start (14 s) ends in `wifi:force witi stop` at +7.5 s and a deinit at +17.5 s without stalling
-  the UI (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0` skips it). Emulator-only console line:
+  the UI (`tools/nvsedit.py IMAGE set-u8 user_config net_en 0` skips it). It fades the frontlight out 60 s
+  after the last input and back on the next touch (LEDC hardware fade, walked in guest time; `state.ledc`
+  shows `fading`/`target_permille`). Emulator-only console line:
   `phy: error: pll_cal exceeds 2ms!!!` (x6, RF PLL lock flag unanswered). RTC IO pads, RMT, I2S,
   APB_SARADC DMA mode, USB OTG stay unmodelled; SAR oneshots and the temperature sensor answer fixed values.
 
@@ -37,7 +39,7 @@ device photos, world-class checklist).
 qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (gitignored; make setup)
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
-tools/         x4emu CLI, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py, appdis.py
+tools/         x4emu CLI, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, device.py, epdtrace.py, appdis.py, tcbwalk.py
 tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants)
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
 docs/          hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures)
@@ -104,7 +106,7 @@ rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it a
 | `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |
 | `press left\|right\|power [--ms 120] [--wait S] [--quiet S]` / `hold BTN --ms 3000` | active-low buttons; `--wait` reports the refresh that follows, `--quiet` first waits for an idle panel; a power press while sleeping is extended to 1.5 s |
 | `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
-| `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms]` / `home [--ms]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad |
+| `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (the stock ignores it). `tap`/`home` stay down for at least `--ms` **and until the firmware has read the frame** (`state.gt911.clears`; up to 5 s), so a tap into CrossPoint's multi-second rendering pass is not lost; the output says when it was read |
 | `battery --soc N --mv N --charging on\|off` / `light [-v]` | CW2017 values and the charger STAT line; LEDC duty (permille) of the cool/warm channels |
 | `console-send TEXT [--no-newline]` | write into the guest's USB Serial/JTAG console (RX path) |
 | `flash-app --app APP.bin [--build DIR]` | swap the app (and bootloader/table with `--build`) inside the live flash image, keep NVS/SD, relaunch |
@@ -113,7 +115,10 @@ rejects a cold boot and deep-sleeps; `x4emu --name stock press power` wakes it a
 
 ROM symbols for the stock app's PCs: `make rom-symbols` → `images/rom/esp32s3_rev0_rom.nm`; the app
 itself is disassembled with `tools/appdis.py images/device/stock-app0-7.2.4.bin 0xPC` (segments parsed
-from the image header; see docs/log.md 2026-09-06 for the TCB walk and the tricks that replace gdb).
+from the image header). `tools/tcbwalk.py DRAM.bin --rom … --app …` walks every FreeRTOS task of a
+`pmemsave` dump (QMP `pmemsave`, val 0x3FC88000 size 0x78000): what each waits on, its backtrace, and
+`--frame PC,A0,SP` backtraces a live CPU from `info registers -a`. When touch, I2C and the 3-second gauge
+poll stop together, check the tick there first (docs/log.md 2026-09-06, session 4).
 
 Tips: CrossPoint ignores input while it is painting, so use `--quiet 2` or `wait-quiet` before an
 input in scripts. Power: < 400 ms is a click (double-click toggles the frontlight), ≥ 400 ms held
