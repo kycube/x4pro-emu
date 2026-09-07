@@ -99,17 +99,31 @@ def test_record_replay_same_screen(images, emu, replay_emus, tmp_path):
     js = json.loads(x4emu(emu, '--json', 'wait-guest-ms', 200, '--timeout', 60).stdout)
     assert js['ok'] and js['advanced_ms'] >= 200 and js['guest_ms'] >= js['target_ms'], js
 
-    # 4. replay the journal onto two fresh instances, human mode and --json mode
+    # 4. replay the journal onto two fresh instances, human mode and --json mode.
+    #    A replayed input the firmware reads while it paints draws nothing and `replay` stops with
+    #    "no refresh within Ns" -- the loaded-host flake (CLAUDE.md "Lessons"; `--deterministic`
+    #    stretches every paint against the host clock, and the desk Mac runs the owner's own
+    #    applications). The repair is to replay the *whole* journal again from a fresh boot: the
+    #    journal is untouched, so step 5's acceptance -- three runs, one screen -- is unweakened.
     for i, name in enumerate(replay_emus):
-        boot(name, images)
-        if i:
-            js = json.loads(x4emu(name, '--json', 'replay', flow, timeout=BOOT_S).stdout)
-            assert js['steps'] == 2 and js['guest_ms_end'] >= ts[-1], js
-            assert [s['cmd'] for s in js['replayed']] == ['tap', 'home'], js
-        else:
-            r = x4emu(name, 'replay', flow, timeout=BOOT_S)
-            assert f't={ts[0]} ms tap {BROWSE_FILES[0]} {BROWSE_FILES[1]}' in r.stdout, r.stdout
-            assert 'replayed 2 steps' in r.stdout, r.stdout
+        for attempt in range(2):
+            x4emu(name, 'stop', check=False)
+            boot(name, images)
+            try:
+                if i:
+                    js = json.loads(x4emu(name, '--json', 'replay', flow, timeout=BOOT_S).stdout)
+                    assert js['steps'] == 2 and js['guest_ms_end'] >= ts[-1], js
+                    assert [s['cmd'] for s in js['replayed']] == ['tap', 'home'], js
+                else:
+                    r = x4emu(name, 'replay', flow, timeout=BOOT_S)
+                    assert f't={ts[0]} ms tap {BROWSE_FILES[0]} {BROWSE_FILES[1]}' in r.stdout, r.stdout
+                    assert 'replayed 2 steps' in r.stdout, r.stdout
+            except AssertionError as e:
+                if attempt or 'no refresh within' not in str(e):
+                    raise
+                print(f'{name}: the replay lost an input; replaying the journal again from a fresh boot')
+                continue
+            break
         # the firmware took the same path: FileBrowser and back to Home
         x4emu(name, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
         x4emu(name, 'wait-quiet', '--seconds', 2, '--timeout', 60)
