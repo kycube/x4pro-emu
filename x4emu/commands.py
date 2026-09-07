@@ -378,8 +378,7 @@ def cmd_screenshot(a):
         im1 = Image.open(dest).convert('L'); im2 = Image.open(a.diff).convert('L')
         if im2.size == (im1.size[1], im1.size[0]):
             # CrossPoint's on-device BMP is the upright portrait frame, i.e. the panel rotated 90 deg
-            # clockwise; rotating it 90 deg counter-clockwise gives the landscape frame back:
-            # rotate it back to the panel's landscape frame
+            # clockwise; rotating it 90 deg counter-clockwise gives the landscape frame back
             im2 = im2.rotate(90, expand=True)
         if im2.size != im1.size:
             im2 = im2.resize(im1.size)
