@@ -172,9 +172,9 @@ a mass-storage personality ("XTEink X4 Pro", 0x303A:0x4002) in USB mode.
    `images/device/flash-2026-09-06-{a,b}.bin`, `docs/device/flash-backup-sha256.txt`.
 2. Never `erase-flash`, never `espefuse burn-*`, never write 0x0..0x10000 (bootloader, partition
    table, otadata) except to restore the verified backup byte for byte. Writing an OTA app slot
-   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state: app0 =
-   CrossPoint 1.6.0 (EpdBus-traced build), app1 = the stock 7.2.4 image, otadata untouched (boots app0).
-   `tools/device.py restore-stock --yes` puts stock back into app0.
+   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-09-07): app0 = the
+   stock 7.2.4 again (`restore-stock`, hash verified, read-back OK), app1 = the stock 7.2.4 copy, otadata
+   untouched (boots app0). `tools/device.py flash-crosspoint --yes` puts CrossPoint back into app0.
 3. Do not touch the device during a transfer; the magnetic pogo adapter detaches easily. If a
    transfer breaks, check the device state before retrying.
 4. GPIO19/20 are USB D-/D+: never run any pin or bus probe over them.
