@@ -12,6 +12,27 @@ def x4emu(name, *args, check=True, timeout=120):
         raise AssertionError(f'x4emu {args} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
     return r
 
+def x4emu_input(name, *args, tries=2, **kw):
+    """An input command carrying `--wait`, repeated once when nothing repainted.
+
+    Both firmwares poll touch and the buttons only between rendering passes that take seconds, so an
+    input delivered into such a pass is read and then ignored: `--wait` reports "no refresh within Ns"
+    while the firmware did take the frame (CLAUDE.md "Lessons"; the session-4 flake in three tests, and
+    one input in ~40 lost on a loaded host). `tests/test_stock.py`'s `tap_repaints` and
+    `tests/test_device_screenshot.py` already retry for this; this is the same guard for every other
+    test. The retry is safe precisely because no refresh happened -- the firmware acted on nothing, so
+    nothing advanced. Any other failure is raised at once, unretried."""
+    for attempt in range(tries):
+        last = attempt == tries - 1
+        r = x4emu(name, *args, check=last, **kw)
+        if r.returncode == 0:
+            return r
+        if 'no refresh within' not in (r.stdout + r.stderr):
+            raise AssertionError(f'x4emu {args} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
+        print(f'{name}: {args[0]} drew nothing, repeating it once')
+    return r
+
+
 @pytest.fixture(scope='session')
 def images_base(tmp_path_factory):
     """Built once per session: the flash image from the firmware build and an MBR/FAT32 SD image

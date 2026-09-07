@@ -2,7 +2,7 @@
 100% and charging, docs/device/screenshots/screenshot-3824.bmp) must be reproduced pixel for
 pixel by the emulator once the battery state matches."""
 import os, subprocess
-from conftest import x4emu, ROOT
+from conftest import x4emu, x4emu_input, ROOT
 
 DEVICE_BMP = os.path.join(ROOT, 'tests', 'golden', 'device-home-screenshot-3824.bmp')
 
@@ -17,10 +17,10 @@ def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
     # match the device: 100%, USB power -> repaint via a Browse Files round trip
     x4emu(emu, 'battery', '--soc', 100, '--charging', 'on')
     # the percentage change repaints the status bar within ~1.5 s; do not tap into that paint
-    x4emu(emu, 'tap', 345, 350, '--quiet', 3, '--wait', 20)
+    x4emu_input(emu, 'tap', 345, 350, '--quiet', 3, '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     # the Home pad is polled: press it into an idle panel and hold it (default 250 ms)
-    x4emu(emu, 'home', '--quiet', 1.5, '--wait', 20)
+    x4emu_input(emu, 'home', '--quiet', 1.5, '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
     r = x4emu(emu, 'screenshot', str(tmp_path / 'home-100.png'), '--diff', DEVICE_BMP, check=False)
     assert r.returncode == 0 and '0.000%' in r.stdout, r.stdout
@@ -58,7 +58,7 @@ def test_reader_pages_match_device_screenshots(images, emu, tmp_path):
     x4emu(emu, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd')
     x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 90)
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
-    x4emu(emu, 'tap', 345, 350, '--quiet', 2, '--wait', 20)            # Browse Files
+    x4emu_input(emu, 'tap', 345, 350, '--quiet', 2, '--wait', 20)      # Browse Files
     x4emu(emu, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     for attempt in range(2):                                            # the book; CrossPoint drops a tap
@@ -72,7 +72,7 @@ def test_reader_pages_match_device_screenshots(images, emu, tmp_path):
     x4emu(emu, 'screenshot', str(p1))
     n1 = base_frame_diff(p1, DEVICE_PAGE1)
     assert n1 == 0, f'page 1 differs from the device screenshot in {n1} pixels outside the clock'
-    x4emu(emu, 'press', 'right', '--wait', 20)
+    x4emu_input(emu, 'press', 'right', '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     p2 = tmp_path / 'page2.png'
     x4emu(emu, 'screenshot', str(p2))

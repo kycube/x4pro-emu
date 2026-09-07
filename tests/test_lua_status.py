@@ -31,7 +31,7 @@ carries the owner's WiFi credentials, CLAUDE.md rule 6.
 """
 import os, shutil, subprocess, sys
 import pytest
-from conftest import x4emu, ROOT, PY
+from conftest import x4emu, ROOT, PY, x4emu_input
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -147,7 +147,7 @@ def back_to_list(name, tmp, tries=2):
     g = os.path.join(ROOT, 'tests', 'golden', 'stock-lua-status-list.png')
     shot = tmp / 'back.png'
     for attempt in range(tries):
-        x4emu(name, 'home', '--quiet', '2', '--wait', '20')
+        x4emu_input(name, 'home', '--quiet', '2', '--wait', '20')
         settle(name, 2, 60)
         tap(name, *EXIT_BUTTON, quiet=2)
         settle(name, 2, 60)
