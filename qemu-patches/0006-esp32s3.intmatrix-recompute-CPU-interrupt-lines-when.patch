@@ -1,7 +1,7 @@
 From d18e29402d715a657620d27cc9f7544793769cb7 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 17:40:37 -0500
-Subject: [PATCH 06/12] esp32s3.intmatrix: recompute CPU interrupt lines when a
+Subject: [PATCH 06/15] esp32s3.intmatrix: recompute CPU interrupt lines when a
  source is re-routed
 
 The matrix only stored a new map entry; the CPU line was updated solely from

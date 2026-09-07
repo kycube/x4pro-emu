@@ -1,7 +1,7 @@
 From 21c1607fe52875b66afc1616f45c8a14a0b97471 Mon Sep 17 00:00:00 2001
 From: x4pro-emu <x4pro-emu@localhost>
 Date: Sun, 6 Sep 2026 19:11:10 -0500
-Subject: [PATCH 10/12] xteink-x4pro: analog-master I2C block, SENS/SAR ADC,
+Subject: [PATCH 10/15] xteink-x4pro: analog-master I2C block, SENS/SAR ADC,
  radio register stub, capped access loggers
 
 The stock xteink_app's WiFi start parked its radio task (priority 23, core 0)

@@ -1,0 +1,176 @@
+From 4f55952c8d35ae9d48fcb45e16d5a446dccabe01 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 23:26:56 -0500
+Subject: [PATCH 13/15] xteink-x4pro: analog master answers the PHY's DC-offset
+ comparator and the RF PLL lock flag
+
+A POWERON cold boot with WiFi enabled runs ESP-IDF's full PHY calibration, which parked the
+WiFi task on 0x6000E04C: the PHY writes 0x113cf1 then 0x113cf3 (bit 1 start), polls bit 24 with
+no timeout and takes bits 31:30 as two comparator outputs for a 12-step binary search on two
+9-bit codes, five passes per calibration (stock app 0x422e4558; the DCO calibration). The block
+now answers done after a start with the comparator bits from the "cal-cmp" property.
+The six "phy: error: pll_cal exceeds 2ms!!!" lines came from the lock poll at app 0x422e0d48:
+readReg_Mask(0x62, reg 0x07, bit 1) every 20 us for 100 tries after the calibration pulse on
+reg 0x00 bits 6/5. ana_answered[] makes that bit read as set; 0x0c, read in the cap search,
+is never checked. state.ana_i2c gains cal_starts and pll_cals.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/misc/x4pro_ana_i2c.c         | 52 ++++++++++++++++++++++++++++++++-
+ hw/xtensa/xteink_x4pro.c        |  5 ++--
+ include/hw/misc/x4pro_ana_i2c.h |  3 ++
+ 3 files changed, 57 insertions(+), 3 deletions(-)
+
+diff --git a/hw/misc/x4pro_ana_i2c.c b/hw/misc/x4pro_ana_i2c.c
+index fb498b4..cd2abd1 100644
+--- a/hw/misc/x4pro_ana_i2c.c
++++ b/hw/misc/x4pro_ana_i2c.c
+@@ -18,13 +18,30 @@
+  *   +0x44  ANA_CONFIG (per-block enables, a cleared bit enables), +0x48 ANA_CONFIG2.
+  *   +0x50  SAR2 power detector: bit 1 start (rom_pkdet_vol_start), bits 26:24 state,
+  *          7 = idle/done, polled before and after the start; bits 6,7 rom_en_pwdet.
++ *   +0x4C  PHY calibration comparator (no ESP-IDF name; the PHY's DC-offset search,
++ *          stock app 0x422e4558..0x422e466e, docs/log.md 2026-09-06 S1): the PHY
++ *          writes 0x113cf1 then 0x113cf3 (bit 1 = start), polls bit 24 (done) with
++ *          no timeout and takes bits 31 and 30 as two comparator outputs ("DAC too
++ *          high") for a 12-step binary search on two 9-bit codes (start 0x100, steps
++ *          124, 63, 32, ... 1; the last four are averaged), five passes per
++ *          calibration. Answered: done on the read after a start, comparator bits
++ *          from the "cal-cmp" property (default 0: both codes saturate at 0x1ff).
++ *          A stored-value answer parks the WiFi task here on a POWERON cold boot
++ *          (a DSLEEP wake reuses the calibration kept in RTC memory).
+  *   +0x5C / +0x60  detector configuration (rom_pwdet_sar2_init: 0x16a, bits 19..23;
+  *          rom_get_sar2_vol: bits 4:3 select the input).
+  *   +0x80..+0x9C  eight 13-bit SAR2 samples (rom_read_sar_dout), answered with
+  *          the "sar2-code" property.
+  *
+  * The analog registers behind the masters are stored per (block, register) and
+- * read back as written; no PLL, ADC or radio behaviour is derived from them.
++ * read back as written, except for the status bits in ana_answered[] which read
++ * as set: block 0x62 (RF PLL) reg 0x07 bit 1, the lock flag. The PHY starts a
++ * PLL calibration by pulsing reg 0x00 bit 6 / bit 5 (writeReg_Mask 0x62/0/6/6=1,
++ * 5/5=0, 5/5=1, 6/6=0; app 0x422e0c80) and then polls readReg_Mask(0x62, 0x07,
++ * 1, 1) every 20 us for at most 100 tries (app 0x422e0d48), printing "phy:
++ * error: pll_cal exceeds 2ms!!!" on the 100th miss; the cap search that precedes
++ * it (reg 0x01 = 0..0x0a, reg 0x02 pulsed, reg 0x0c read) has no such check.
++ * No PLL, ADC or radio behaviour is derived from the stored values.
+  *
+  * x4pro-emu, GPL-2.0-or-later.
+  */
+@@ -40,6 +57,7 @@
+ #define R_ANA_CONF0     0x40
+ #define R_ANA_CONFIG    0x44
+ #define R_ANA_CONFIG2   0x48
++#define R_PHY_CAL       0x4C
+ #define R_SAR2_CTRL     0x50
+ #define R_SAR2_CONF1    0x5C
+ #define R_SAR2_CONF2    0x60
+@@ -54,19 +72,40 @@
+ #define CMD_START       (1u << 26)
+ 
+ #define ANA_CONF0_BBPLL_CAL_DONE (1u << 24)
++#define PHY_CAL_START            (1u << 1)
++#define PHY_CAL_DONE             (1u << 24)
++#define PHY_CAL_CMP_SHIFT        30
+ #define SAR2_CTRL_START          (1u << 1)
+ #define SAR2_CTRL_STATE_DONE     (7u << 24)
+ #define SAR2_CODE_MASK           0x1FFF
+ 
++/* Analog register bits that read as set whatever was written: status the firmware waits for. */
++static const struct { uint8_t block, reg, mask; const char *what; } ana_answered[] = {
++    { 0x62, 0x07, 0x02, "RF PLL locked (pll_cal)" },
++};
++
++#define RFPLL_BLOCK        0x62
++#define RFPLL_CAL_REG      0x00
++#define RFPLL_CAL_START    0x20    /* reg 0x00 bit 5, pulsed low-high by the PHY before it polls the lock */
++
+ static void x4pro_ana_i2c_command(X4ProAnaI2cState *s, int master, uint32_t v)
+ {
+     uint8_t block = CMD_BLOCK(v), reg = CMD_REG(v), data = CMD_DATA(v);
+     bool write = v & CMD_WRITE;
+     if (write) {
++        if (block == RFPLL_BLOCK && reg == RFPLL_CAL_REG &&
++            (data & RFPLL_CAL_START) && !(s->mem[block][reg] & RFPLL_CAL_START)) {
++            s->pll_cals++;
++        }
+         s->mem[block][reg] = data;
+         s->writes++;
+     } else {
+         data = s->mem[block][reg];
++        for (size_t i = 0; i < ARRAY_SIZE(ana_answered); i++) {
++            if (ana_answered[i].block == block && ana_answered[i].reg == reg) {
++                data |= ana_answered[i].mask;
++            }
++        }
+         s->reads++;
+     }
+     s->last_master = master;
+@@ -91,6 +130,11 @@ static uint64_t x4pro_ana_i2c_read(void *opaque, hwaddr addr, unsigned size)
+         return v & ~CMD_BUSY;
+     case R_ANA_CONF0:
+         return v | ANA_CONF0_BBPLL_CAL_DONE;
++    case R_PHY_CAL:
++        if (v & PHY_CAL_START) {
++            return (v & ~(3u << PHY_CAL_CMP_SHIFT)) | PHY_CAL_DONE | ((s->cal_cmp & 3u) << PHY_CAL_CMP_SHIFT);
++        }
++        return v & ~(PHY_CAL_DONE | (3u << PHY_CAL_CMP_SHIFT));
+     case R_SAR2_CTRL:
+         return (v & ~SAR2_CTRL_STATE_DONE) | SAR2_CTRL_STATE_DONE;
+     case R_SAR2_DOUT0 ... R_SAR2_DOUT7:
+@@ -109,6 +153,11 @@ static void x4pro_ana_i2c_write(void *opaque, hwaddr addr, uint64_t value, unsig
+     case R_MST1:
+         x4pro_ana_i2c_command(s, addr / 4, v);
+         return;
++    case R_PHY_CAL:
++        if ((v & PHY_CAL_START) && !(s->reg[addr / 4] & PHY_CAL_START)) {
++            s->cal_starts++;
++        }
++        break;
+     case R_SAR2_CTRL:
+         if ((v & SAR2_CTRL_START) && !(s->reg[addr / 4] & SAR2_CTRL_START)) {
+             s->sar2_starts++;
+@@ -146,6 +195,7 @@ static void x4pro_ana_i2c_init(Object *obj)
+ 
+ static Property x4pro_ana_i2c_properties[] = {
+     DEFINE_PROP_UINT32("sar2-code", X4ProAnaI2cState, sar2_code, 0x800),
++    DEFINE_PROP_UINT32("cal-cmp", X4ProAnaI2cState, cal_cmp, 0),
+     DEFINE_PROP_BOOL("log", X4ProAnaI2cState, log, true),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 3d34c3c..91d8523 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -473,8 +473,9 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+     }
+     if (b->ana) {
+         g_string_append_printf(j, "\"ana_i2c\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"sar2_starts\":%" PRIu64
+-            ",\"last\":\"m%u 0x%02x/0x%02x=0x%02x\"},",
+-            b->ana->reads, b->ana->writes, b->ana->sar2_starts, b->ana->last_master, b->ana->last_block, b->ana->last_reg, b->ana->last_data);
++            ",\"cal_starts\":%" PRIu64 ",\"pll_cals\":%" PRIu64 ",\"last\":\"m%u 0x%02x/0x%02x=0x%02x\"},",
++            b->ana->reads, b->ana->writes, b->ana->sar2_starts, b->ana->cal_starts, b->ana->pll_cals,
++            b->ana->last_master, b->ana->last_block, b->ana->last_reg, b->ana->last_data);
+     }
+     if (b->saradc) {
+         g_string_append_printf(j, "\"saradc\":{\"sar1_starts\":%" PRIu64 ",\"sar2_starts\":%" PRIu64 ",\"tsens_reads\":%" PRIu64
+diff --git a/include/hw/misc/x4pro_ana_i2c.h b/include/hw/misc/x4pro_ana_i2c.h
+index f844bca..2b55167 100644
+--- a/include/hw/misc/x4pro_ana_i2c.h
++++ b/include/hw/misc/x4pro_ana_i2c.h
+@@ -22,9 +22,12 @@ struct X4ProAnaI2cState {
+     uint8_t mem[256][256];                   /* analog registers: [block][register] */
+ 
+     uint32_t sar2_code;                      /* 13-bit sample answered at +0x80..+0x9C */
++    uint32_t cal_cmp;                        /* +0x4C bits 31:30 answered after a start (2 bits) */
+     bool log;                                /* log every master transaction (-d unimp) */
+ 
+     uint64_t reads, writes;                  /* master transactions */
+     uint64_t sar2_starts;                    /* +0x50 bit 1 set */
++    uint64_t cal_starts;                     /* +0x4C bit 1 set: PHY comparator measurements */
++    uint64_t pll_cals;                       /* block 0x62 reg 0x00 bit 5 set: RF PLL calibrations */
+     uint8_t last_master, last_block, last_reg, last_data;
+ };
+-- 
+2.50.1 (Apple Git-155)
+

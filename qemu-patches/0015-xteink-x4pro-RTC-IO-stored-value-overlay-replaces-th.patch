@@ -1,0 +1,281 @@
+From b8f45cffd71d7af35ff1c6af494cc31a7ce682d4 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 23:26:56 -0500
+Subject: [PATCH 15/15] xteink-x4pro: RTC IO stored-value overlay replaces the
+ rtcio access logger
+
+The RTC-domain pad configuration both firmwares program around deep sleep (TOUCH_PAD3/5/6/7/13/14,
+XTAL_32P/N, PAD_DAC2: hold, pull, sleep isolation) reads back as written; the W1TS/W1TC pairs
+act on OUT/ENABLE/STATUS. No electrical behaviour, no overlap with the RTC_CNTL sleep overlay.
+state.rtcio = {reads, writes, pad_writes, hold_mask}; no x4pro/rtcio logger lines remain.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/misc/meson.build           |   1 +
+ hw/misc/x4pro_rtcio.c         | 141 ++++++++++++++++++++++++++++++++++
+ hw/xtensa/xteink_x4pro.c      |  20 ++++-
+ include/hw/misc/x4pro_rtcio.h |  26 +++++++
+ 4 files changed, 186 insertions(+), 2 deletions(-)
+ create mode 100644 hw/misc/x4pro_rtcio.c
+ create mode 100644 include/hw/misc/x4pro_rtcio.h
+
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index c8bbdf3..346807e 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -186,6 +186,7 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
+   'x4pro_ana_i2c.c',
+   'esp32s3_saradc.c',
+   'esp32s3_rfstub.c',
++  'x4pro_rtcio.c',
+   'esp32s3_rng.c',
+   'esp32s3_pms.c',
+   'esp_hmac.c',
+diff --git a/hw/misc/x4pro_rtcio.c b/hw/misc/x4pro_rtcio.c
+new file mode 100644
+index 0000000..82faeae
+--- /dev/null
++++ b/hw/misc/x4pro_rtcio.c
+@@ -0,0 +1,141 @@
++/*
++ * ESP32-S3 RTC IO block (DR_REG_RTCIO_BASE 0x60008400, 1 KB).
++ *
++ * Why: Espressif's SoC leaves the block to its silent catch-all; the stock
++ * xteink_app and CrossPoint write the pad registers around deep sleep
++ * (RTC_IO_TOUCH_PAD3 for the power button's EXT1 wake, XTAL_32N, TOUCH_PAD0..:
++ * hold, pull-up/down, sleep isolation) and read them back for read-modify-write,
++ * which used to land in the machine's "x4pro/rtcio" logger (docs/NEXT_PHASE.md
++ * 3.2.9). Register map (rtc_io_reg.h): +0x00 OUT, +0x04/+0x08 OUT_W1TS/W1TC,
++ * +0x0C ENABLE, +0x10/+0x14 ENABLE_W1TS/W1TC, +0x18 STATUS, +0x1C/+0x20
++ * STATUS_W1TS/W1TC, +0x24 IN, +0x28.. PIN0..21, +0x84.. TOUCH_PAD0..14 (RTC IO
++ * 0..14), +0xC0 XTAL_32P (15), +0xC4 XTAL_32N (16), +0xC8/+0xCC PAD_DAC1/2
++ * (17/18), +0xD0..+0xD8 RTC_PAD19..21, +0xDC EXT_WAKEUP0, +0xE0 XTL_EXT_CTR,
++ * +0xE4 SAR_I2C_IO, +0xE8 TOUCH_CTRL, +0x1FC DATE. Pad registers carry HOLD in
++ * bit 31, RDE/RUE (pull-down/up) bits 28/27, DRV 30:29, MUX_SEL 19, FUN_SEL 18:17,
++ * SLP_SEL 16, SLP_IE/OE 15/14 (RTC_PAD19..21 use the same layout).
++ *
++ * Model: storage; the W1TS/W1TC registers set/clear bits of their base register
++ * and read as 0; IN reads as the stored value (0: no RTC input path is modelled,
++ * the EXT1 wake goes through RTC_CNTL, hw/misc/x4pro_sleep.c). Nothing here
++ * changes a GPIO level: the GPIO model owns the pins.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/misc/x4pro_rtcio.h"
++
++#define R_OUT             0x00
++#define R_OUT_W1TS        0x04
++#define R_OUT_W1TC        0x08
++#define R_ENABLE          0x0C
++#define R_ENABLE_W1TS     0x10
++#define R_ENABLE_W1TC     0x14
++#define R_STATUS          0x18
++#define R_STATUS_W1TS     0x1C
++#define R_STATUS_W1TC     0x20
++#define R_PAD0            0x84
++#define R_PAD_LAST        0xD8
++#define R_DATE            0x1FC
++
++#define PAD_HOLD          (1u << 31)
++
++uint32_t x4pro_rtcio_hold_mask(X4ProRtcIoState *s)
++{
++    uint32_t m = 0;
++    for (int i = 0; i < X4PRO_RTCIO_PADS; i++) {
++        if (s->reg[(R_PAD0 + 4 * i) / 4] & PAD_HOLD) {
++            m |= 1u << i;
++        }
++    }
++    return m;
++}
++
++static uint64_t x4pro_rtcio_read(void *opaque, hwaddr addr, unsigned size)
++{
++    X4ProRtcIoState *s = X4PRO_RTCIO(opaque);
++    s->reads++;
++    switch (addr) {
++    case R_OUT_W1TS:
++    case R_OUT_W1TC:
++    case R_ENABLE_W1TS:
++    case R_ENABLE_W1TC:
++    case R_STATUS_W1TS:
++    case R_STATUS_W1TC:
++        return 0;
++    default:
++        return s->reg[addr / 4];
++    }
++}
++
++static void x4pro_rtcio_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    X4ProRtcIoState *s = X4PRO_RTCIO(opaque);
++    uint32_t v = value;
++    s->writes++;
++    switch (addr) {
++    case R_OUT_W1TS:    s->reg[R_OUT / 4] |= v; return;
++    case R_OUT_W1TC:    s->reg[R_OUT / 4] &= ~v; return;
++    case R_ENABLE_W1TS: s->reg[R_ENABLE / 4] |= v; return;
++    case R_ENABLE_W1TC: s->reg[R_ENABLE / 4] &= ~v; return;
++    case R_STATUS_W1TS: s->reg[R_STATUS / 4] |= v; return;
++    case R_STATUS_W1TC: s->reg[R_STATUS / 4] &= ~v; return;
++    case R_DATE:        return;
++    case R_PAD0 ... R_PAD_LAST:
++        s->pad_writes++;
++        break;
++    default:
++        break;
++    }
++    s->reg[addr / 4] = v;
++}
++
++static const MemoryRegionOps x4pro_rtcio_ops = {
++    .read = x4pro_rtcio_read,
++    .write = x4pro_rtcio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void x4pro_rtcio_reset_hold(Object *obj, ResetType type)
++{
++    X4ProRtcIoState *s = X4PRO_RTCIO(obj);
++    /* cleared on every reset, the system reset that models a deep-sleep wake included: the real
++     * RTC domain keeps its pad latches through deep sleep, but both firmwares reprogram every pad
++     * they use before reading anything back (the counters survive for the tooling) */
++    memset(s->reg, 0, sizeof(s->reg));
++    s->reg[R_DATE / 4] = 0x2101180;   /* RTCIO_DATE as ESP-IDF's rtc_io_reg.h lists it */
++}
++
++static void x4pro_rtcio_init(Object *obj)
++{
++    X4ProRtcIoState *s = X4PRO_RTCIO(obj);
++    memory_region_init_io(&s->iomem, obj, &x4pro_rtcio_ops, s, TYPE_X4PRO_RTCIO, X4PRO_RTCIO_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++}
++
++static void x4pro_rtcio_class_init(ObjectClass *klass, void *data)
++{
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = x4pro_rtcio_reset_hold;
++}
++
++static const TypeInfo x4pro_rtcio_info = {
++    .name = TYPE_X4PRO_RTCIO,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(X4ProRtcIoState),
++    .instance_init = x4pro_rtcio_init,
++    .class_init = x4pro_rtcio_class_init,
++};
++
++static void x4pro_rtcio_register_types(void)
++{
++    type_register_static(&x4pro_rtcio_info);
++}
++
++type_init(x4pro_rtcio_register_types)
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 347ee46..0e6e486 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -33,6 +33,7 @@
+ #include "hw/misc/x4pro_ana_i2c.h"
+ #include "hw/misc/esp32s3_saradc.h"
+ #include "hw/misc/esp32s3_rfstub.h"
++#include "hw/misc/x4pro_rtcio.h"
+ #include "hw/misc/x4pro_hotlog.h"
+ #include "qapi/qmp/qjson.h"
+ #include "qapi/qmp/qdict.h"
+@@ -66,7 +67,6 @@ typedef struct IoLogRegion {
+ } IoLogRegion;
+ 
+ static IoLogRegion iolog_regions[] = {
+-    { "rtcio",     DR_REG_RTCIO_BASE,           0x400  },
+     { "iomux",     DR_REG_IO_MUX_BASE,          0x1000 },
+     { "spi3",      DR_REG_SPI3_BASE,            0x1000 },
+     { "usb_wrap",  DR_REG_USB_WRAP_BASE,        0x1000 },
+@@ -381,6 +381,7 @@ struct X4ProBoardState {
+     X4ProAnaI2cState *ana;
+     ESP32S3SarAdcState *saradc;
+     ESP32S3RfStubState *rf;
++    X4ProRtcIoState *rtcio;
+ };
+ 
+ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+@@ -482,6 +483,10 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+             ",\"sar1_pad\":\"0x%03x\",\"sar2_pad\":\"0x%03x\"},",
+             b->saradc->sar1_starts, b->saradc->sar2_starts, b->saradc->tsens_reads, b->saradc->sar1_pad, b->saradc->sar2_pad);
+     }
++    if (b->rtcio) {
++        g_string_append_printf(j, "\"rtcio\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"pad_writes\":%" PRIu64 ",\"hold_mask\":\"0x%x\"},",
++            b->rtcio->reads, b->rtcio->writes, b->rtcio->pad_writes, x4pro_rtcio_hold_mask(b->rtcio));
++    }
+     if (b->rf) {
+         g_string_append_printf(j, "\"rf\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"sticky\":%d,\"hot\":",
+                                b->rf->reads, b->rf->writes, b->rf->n_sticky);
+@@ -752,6 +757,17 @@ static void x4pro_machine_init(MachineState *machine)
+         saradc = ESP32S3_SARADC(dev);
+     }
+ 
++    /* RTC IO pads at 0x60008400: hold / pull / sleep-isolation configuration, read back as written */
++    X4ProRtcIoState *rtcio;
++    {
++        DeviceState *dev = qdev_new(TYPE_X4PRO_RTCIO);
++        object_property_add_child(OBJECT(machine), "x4pro-rtcio", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_RTCIO_BASE, mr, 2);
++        rtcio = X4PRO_RTCIO(dev);
++    }
++
+     /* Radio register stub: FE2 / FE / RX / BB blocks the PHY programs and polls */
+     ESP32S3RfStubState *rf;
+     {
+@@ -772,7 +788,7 @@ static void x4pro_machine_init(MachineState *machine)
+         X4ProBoardState *b = X4PRO_BOARD(dev);
+         b->gpio = gpio; b->spi2 = spi2; b->epd = epd; b->usj = usj_state; b->input = input;
+         b->i2c0 = i2c0; b->gt911 = gt911; b->cw2017 = cw2017; b->rtc = rtc;
+-        b->ledc = ledc; b->sleep = sleep; b->ana = ana; b->saradc = saradc; b->rf = rf;
++        b->ledc = ledc; b->sleep = sleep; b->ana = ana; b->saradc = saradc; b->rf = rf; b->rtcio = rtcio;
+         qdev_realize_and_unref(dev, NULL, &error_fatal);
+     }
+ 
+diff --git a/include/hw/misc/x4pro_rtcio.h b/include/hw/misc/x4pro_rtcio.h
+new file mode 100644
+index 0000000..335788b
+--- /dev/null
++++ b/include/hw/misc/x4pro_rtcio.h
+@@ -0,0 +1,26 @@
++/*
++ * ESP32-S3 RTC IO block (DR_REG_RTCIO_BASE 0x60008400, 1 KB): the RTC-domain pad
++ * configuration (hold, pull, sleep isolation, drive) firmware programs around
++ * deep sleep. Stored-value overlay: registers read back as written, the W1TS/W1TC
++ * pairs act on OUT/ENABLE/STATUS. No electrical behaviour.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++
++#define TYPE_X4PRO_RTCIO "x4pro.rtcio"
++OBJECT_DECLARE_SIMPLE_TYPE(X4ProRtcIoState, X4PRO_RTCIO)
++
++#define X4PRO_RTCIO_SIZE 0x400
++#define X4PRO_RTCIO_PADS 22          /* RTC IO n = GPIO n: TOUCH_PAD0..14, XTAL_32P/N, PAD_DAC1/2, PAD19..21 */
++
++struct X4ProRtcIoState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint32_t reg[X4PRO_RTCIO_SIZE / 4];
++    uint64_t reads, writes, pad_writes;   /* pad_writes: the per-pad registers +0x84..+0xD8 */
++};
++
++/* mask of RTC IOs whose pad register has HOLD (bit 31) set */
++uint32_t x4pro_rtcio_hold_mask(X4ProRtcIoState *s);
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,152 @@
+From fdc368296d1d828a452422cabea7c176b08cfe8e Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Sun, 6 Sep 2026 23:26:56 -0500
+Subject: [PATCH 14/15] xteink-x4pro: GT911 key-value byte and record layout
+ (the stock's Home pad), BM8563 base-epoch
+
+The stock xteink_app reads GT911 status 0x814E, sees HaveKey with no points and then reads the
+key-value byte that follows the point records (0x814F + 8 * count, bit 0 = key 1), every 11 ms
+while the pad is down; the model served nothing there, so the pad did nothing. It now serves
+that byte and the real record layout from 0x814F (track id, X, Y, size). In the stock the pad
+is Back, one level. state.gt911.key_reads counts the reads.
+The BM8563/PCF8563 model takes a "base-epoch" property (seconds since 1970, 0 = host time) so
+a run's clock can be pinned: -global driver=x4pro.pcf8563,property=base-epoch,value=N.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ hw/misc/x4pro_i2c_devs.c         | 50 ++++++++++++++++++++++----------
+ hw/xtensa/xteink_x4pro.c         |  4 +--
+ include/hw/misc/x4pro_i2c_devs.h |  2 ++
+ 3 files changed, 38 insertions(+), 18 deletions(-)
+
+diff --git a/hw/misc/x4pro_i2c_devs.c b/hw/misc/x4pro_i2c_devs.c
+index 7d1b9f1..9553d87 100644
+--- a/hw/misc/x4pro_i2c_devs.c
++++ b/hw/misc/x4pro_i2c_devs.c
+@@ -3,15 +3,17 @@
+  *
+  * GT911 (freeink InputManager::beginGt911/pollGt911): 16-bit register pointer
+  * written MSB first, auto-increment; 0x814E status (bit 7 buffer ready, bit 4
+- * Home pad, bits 0..3 point count), 0x8150.. 8-byte point records (X lo/hi,
+- * Y lo/hi, size lo/hi, reserved, id), product ID "911" at 0x8140, config area
+- * 0x8047.. accepted. INT is driven LOW while a frame is pending and released
++ * Home pad "HaveKey", bits 0..3 point count), 0x814F.. 8-byte point records
++ * (track id, X lo/hi, Y lo/hi, size lo/hi, reserved), the key-value byte right
++ * after the last record (0x814F + 8 * count, bit 0 = the Home pad), product ID
++ * "911" at 0x8140, config area 0x8047.. accepted. INT is driven LOW while a frame is pending and released
+  * when the firmware writes 0 to 0x814E; a held finger produces a new frame
+  * 10 ms after each clear, a release produces one count-0 frame. The chip only
+  * answers while its rail is on (GPIO2 LOW) unless require-power is off.
+  *
+- * PCF8563: 16 BCD registers; time = seed (host wall clock at start) + guest
+- * virtual time; writes to the time registers move the seed.
++ * PCF8563: 16 BCD registers; time = seed (host wall clock at start, or the
++ * "base-epoch" property in seconds since 1970) + guest virtual time; writes to
++ * the time registers move the seed.
+  *
+  * CW2017 (freeink BatteryMonitor): VERSION 0x00 = 0x0D (running), VCELL
+  * 0x02/0x03 (14-bit, mV = (raw*5+8)>>4), SOC 0x04, MODE 0x08, SOC_ALERT 0x0B
+@@ -114,19 +116,27 @@ static uint8_t gt911_recv(I2CSlave *i2c)
+     if (r == 0x814E) {
+         return (s->frame_ready ? 0x80 : 0) | (s->home ? 0x10 : 0) | (s->count & 0x0F);
+     }
+-    if (r >= 0x8150 && r < 0x8150 + 8 * GT911_MAX_POINTS) {
+-        int i = (r - 0x8150) / 8, k = (r - 0x8150) % 8;
++    if (r >= 0x814F && r <= 0x814F + 8 * GT911_MAX_POINTS) {
++        /* point records of 8 bytes from 0x814F (track id, X lo/hi, Y lo/hi, size lo/hi, reserved);
++         * the key-value byte follows the last record: 0x814F + 8 * count, bit 0 = key 1 (the Home
++         * pad). The stock xteink_app reads status 0x814E, then that one byte when the count is 0
++         * (docs/log.md 2026-09-06, S1); Linux's goodix driver reads it the same way. */
++        int o = r - 0x814F, i = o / 8, k = o % 8;
++        if (o == 8 * s->count) {
++            if (s->home) s->key_reads++;
++            return s->home ? 0x01 : 0x00;
++        }
+         if (i >= s->count) return 0;
+         const Gt911Point *p = &s->pts[i];
+         switch (k) {
+-        case 0: return p->x & 0xFF;
+-        case 1: return p->x >> 8;
+-        case 2: return p->y & 0xFF;
+-        case 3: return p->y >> 8;
+-        case 4: return p->size & 0xFF;
+-        case 5: return p->size >> 8;
+-        case 6: return 0;
+-        case 7: return p->id;
++        case 0: return p->id;
++        case 1: return p->x & 0xFF;
++        case 2: return p->x >> 8;
++        case 3: return p->y & 0xFF;
++        case 4: return p->y >> 8;
++        case 5: return p->size & 0xFF;
++        case 6: return p->size >> 8;
++        case 7: return 0;
+         }
+     }
+     if (r >= 0x8140 && r < 0x8140 + sizeof(gt911_id)) {
+@@ -266,11 +276,18 @@ static void pcf_realize(DeviceState *dev, Error **errp)
+ {
+     X4ProPcf8563State *s = X4PRO_PCF8563(dev);
+     memset(s->regs, 0, sizeof(s->regs));
+-    s->base_epoch = time(NULL);
++    /* "base-epoch" pins the clock at start (-global driver=x4pro.pcf8563,property=base-epoch,value=N);
++     * 0 = the host's wall clock */
++    s->base_epoch = s->base_epoch_prop ? (int64_t)s->base_epoch_prop : time(NULL);
+     s->base_vt_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+     pcf_refresh_time(s);
+ }
+ 
++static Property pcf_properties[] = {
++    DEFINE_PROP_UINT32("base-epoch", X4ProPcf8563State, base_epoch_prop, 0),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
+ static void pcf_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+@@ -279,6 +296,7 @@ static void pcf_class_init(ObjectClass *klass, void *data)
+     k->send = pcf_send;
+     k->recv = pcf_recv;
+     dc->realize = pcf_realize;
++    device_class_set_props(dc, pcf_properties);
+ }
+ 
+ static const TypeInfo pcf_info = {
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 91d8523..347ee46 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -439,8 +439,8 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+         g_string_append(j, "]},");
+     }
+     if (b->gt911) {
+-        g_string_append_printf(j, "\"gt911\":{\"frame_ready\":%s,\"frames\":%" PRIu64 ",\"clears\":%" PRIu64 ",\"start_nacks\":%" PRIu64 "},",
+-            b->gt911->frame_ready ? "true" : "false", b->gt911->frames, b->gt911->clears, b->gt911->start_nacks);
++        g_string_append_printf(j, "\"gt911\":{\"frame_ready\":%s,\"frames\":%" PRIu64 ",\"clears\":%" PRIu64 ",\"start_nacks\":%" PRIu64 ",\"key_reads\":%" PRIu64 "},",
++            b->gt911->frame_ready ? "true" : "false", b->gt911->frames, b->gt911->clears, b->gt911->start_nacks, b->gt911->key_reads);
+     }
+     if (b->i2c0) {
+         g_string_append_printf(j, "\"i2c0\":{\"transactions\":%" PRIu64 ",\"nacks\":%" PRIu64 ",\"last_addr\":\"0x%02x\"},",
+diff --git a/include/hw/misc/x4pro_i2c_devs.h b/include/hw/misc/x4pro_i2c_devs.h
+index 8d9c85e..c77ca4f 100644
+--- a/include/hw/misc/x4pro_i2c_devs.h
++++ b/include/hw/misc/x4pro_i2c_devs.h
+@@ -30,6 +30,7 @@ struct X4ProGt911State {
+     bool home;
+     bool frame_ready;
+     uint64_t frames, reads, clears, start_nacks;
++    uint64_t key_reads;             /* key-value byte read while the Home pad is down */
+     bool require_power;
+     int (*powered)(void *opaque);   /* board callback: is the touch rail on? */
+     void *powered_opaque;
+@@ -48,6 +49,7 @@ struct X4ProPcf8563State {
+     int byte_index;
+     int64_t base_epoch;           /* seconds: wall time corresponding to guest virtual time base_vt */
+     int64_t base_vt_ns;
++    uint32_t base_epoch_prop;     /* "base-epoch": seed at realize; 0 = host time */
+     uint64_t reads, writes;
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+

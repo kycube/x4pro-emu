@@ -1,4 +1,5 @@
-"""M5: frontlight PWM observable; power-button hold sleeps (VM paused, sleep screen), press wakes with DSLEEP."""
+"""M5: frontlight PWM observable; power-button hold sleeps (VM paused, sleep screen), press wakes with DSLEEP;
+the RTC IO pad writes around the sleep land in the stored-value overlay (S1, 3.2.9)."""
 import json, os
 from conftest import x4emu, ROOT
 
@@ -37,3 +38,8 @@ def test_deep_sleep_and_wake(images, emu, tmp_path):
     assert not st['sleep']['sleeping'] and st['sleep']['wakes'] == 1
     assert st['sleep']['ext1_status'] == '0x8' and st['sleep']['wakeup_cause'] == '0x2'
     assert 'running' in x4emu(emu, 'status').stdout
+    # the RTC IO pad configuration around the sleep (hold / pull / sleep isolation of RTC_IO_TOUCH_PAD3,
+    # XTAL_32N, TOUCH_PAD0..) is stored by the x4pro.rtcio overlay, not logged (docs/NEXT_PHASE.md 3.2.9)
+    assert st['rtcio']['pad_writes'] > 0, st['rtcio']
+    assert 'rtcio' not in st['iolog_hot'], st['iolog_hot']
+    assert 'x4pro/rtcio' not in open(os.path.join(ROOT, '.x4emu', emu, 'qemu.log'), errors='replace').read()
