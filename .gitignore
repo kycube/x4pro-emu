@@ -11,3 +11,9 @@ dist/
 *.log
 !docs/device/*.log
 qemu/
+
+# Font binaries: proprietary copies (bookerly, georgia, misans) must not be published, and
+# the open ones are one curl away. fonts/README.md says what belongs here.
+fonts/*
+!fonts/README.md
+.DS_Store
