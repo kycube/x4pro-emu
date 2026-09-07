@@ -17,7 +17,7 @@ setup: .venv/bin/python qemu/.x4pro-patched firmware/platformio.ini
 .venv/bin/python:
 	python3 -m venv .venv
 	.venv/bin/pip install -q --upgrade pip
-	.venv/bin/pip install -q esptool pyserial pillow pytest mcp
+	.venv/bin/pip install -q esptool pyserial pillow pytest mcp capstone
 
 qemu/.git:
 	git clone --branch esp-develop --depth 1 https://github.com/espressif/qemu.git qemu
