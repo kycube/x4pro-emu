@@ -21,16 +21,22 @@ def x4emu(name, *args, check=True, timeout=120):
 SOCK_MAX = 104          # the smaller of the two caps, so a name that fits here fits everywhere
 
 
-def instance_name(node_name):
-    """The `--name` for one test: readable, unique, and short enough for the socket paths."""
+def instance_name(node_name, node_id=None):
+    """The `--name` for one test: readable, unique, and short enough for the socket paths.
+
+    Two test files can hold the same function name (`test_the_importable_api_matches_the_cli` is in
+    both test_stockdev.py and test_stockpatch.py), and a shared name means a shared `.x4emu/NAME/`
+    with its console.log and sockets, so the hash covers `node_id` -- pass `request.node.nodeid`
+    where a collision is possible; the readable head still comes from the function name."""
     name = 'pytest-' + node_name.replace('[', '-').replace(']', '').replace('=', '-')
     room = SOCK_MAX - len(os.path.join(ROOT, '.x4emu')) - len('/console.sock') - 2   # '/' + NUL
-    if len(name) > room:
-        name = name[:room - 9] + '-' + hashlib.sha1(name.encode()).hexdigest()[:8]
+    if len(name) > room or node_id:
+        h = hashlib.sha1((node_id or node_name).encode()).hexdigest()[:8]
+        name = name[:min(len(name), room - 9)] + '-' + h
     return name
 
 
-def x4emu_input(name, *args, tries=2, **kw):
+def x4emu_input(name, *args, tries=3, **kw):
     """An input command carrying `--wait`, repeated once when nothing repainted.
 
     Both firmwares poll touch and the buttons only between rendering passes that take seconds, so an
@@ -39,7 +45,11 @@ def x4emu_input(name, *args, tries=2, **kw):
     one input in ~40 lost on a loaded host). `tests/test_stock.py`'s `tap_repaints` and
     `tests/test_device_screenshot.py` already retry for this; this is the same guard for every other
     test. The retry is safe precisely because no refresh happened -- the firmware acted on nothing, so
-    nothing advanced. Any other failure is raised at once, unretried."""
+    nothing advanced. Any other failure is raised at once, unretried.
+
+    Three attempts, not two: the desk Mac runs the owner's own applications (a load average around 7
+    of 14 cores while this was written), every paint takes longer under that, and two attempts were
+    measurably not enough -- a full run lost the menu tap twice in a row on 2026-09-07."""
     for attempt in range(tries):
         last = attempt == tries - 1
         r = x4emu(name, *args, check=last, **kw)
@@ -83,7 +93,7 @@ def images(images_base, tmp_path):
 
 @pytest.fixture
 def emu(images, request):
-    name = instance_name(request.node.name)
+    name = instance_name(request.node.name, request.node.nodeid)
     x4emu(name, 'stop', check=False)
     yield name
     x4emu(name, 'stop', check=False)

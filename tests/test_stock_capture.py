@@ -46,7 +46,7 @@ def stock_dev(tmp_path, request, stock_card):
     Capture. Yields (instance name, tmp_path, card image)."""
     if not os.path.exists(DUMP):
         pytest.skip('device dump not available')
-    name = instance_name(request.node.name)
+    name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(DUMP, flash)
     for cmd in (['nvsedit.py', str(flash), 'set-u8', 'user_config', 'net_en', '0'],

@@ -61,7 +61,7 @@ def wait_for(fn, timeout, what):
     raise AssertionError(f'timeout waiting for {what}')
 
 
-def tap_repaints(name, x, y, tries=2, timeout=20):
+def tap_repaints(name, x, y, tries=3, timeout=20):
     """Tap (x, y) once the panel is idle and wait for the repaint it triggers; returns (state before,
     state after). The stock drops a tap now and then (docs/log.md 2026-09-06, session 4 and 5: under a
     loaded host the suite lost one menu tap in 40 tests while the same test passed alone), so a tap that
@@ -121,7 +121,7 @@ def stock(tmp_path, request, stock_card):
     else:
         opts = {'net_en': param}
     net_en, boot_hold = opts.get('net_en', 0), opts.get('boot_hold', True)
-    name = instance_name(request.node.name)   # '=' breaks -qmp unix:PATH
+    name = instance_name(request.node.name, request.node.nodeid)   # '=' breaks -qmp unix:PATH
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(DUMP, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8', 'user_config', 'net_en', str(net_en)],
@@ -302,7 +302,7 @@ def test_stock_idle_dims_frontlight_and_keeps_ticking(stock):
     assert lit['ledc']['fades'] >= 2, lit['ledc']
 
 
-def tap(name, x, y, quiet=1, wait=20, tries=2):
+def tap(name, x, y, quiet=1, wait=20, tries=3):
     """Tap (x, y) once the panel is idle and require the refresh it triggers (`--wait`); a tap the stock
     dropped (docs/log.md 2026-09-06 session 4, sessions 5-6: one lost tap per full-suite run under a loaded
     host, never when the test runs alone) is repeated once."""

@@ -31,7 +31,7 @@ carries the owner's WiFi credentials, CLAUDE.md rule 6.
 """
 import os, shutil, subprocess, sys
 import pytest
-from conftest import x4emu, ROOT, PY, x4emu_input, instance_name
+from conftest import x4emu, ROOT, PY, instance_name
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -69,7 +69,7 @@ def stock_status(tmp_path, request, stock_card):
         pytest.skip('device dump not available')
     if not shutil.which('mcopy'):
         pytest.skip('mtools not available')
-    name = instance_name(request.node.name)
+    name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(DUMP, flash)
     for cmd in (['nvsedit.py', str(flash), 'set-u8', 'user_config', 'net_en', '0'],
@@ -118,7 +118,7 @@ def ink_in(shot, bands):
     return [sum(1 for v in _px(im.crop((c0, 0, c1, im.height))) if v == 0) for c0, c1 in bands]
 
 
-def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), bands=(), tries=2, quiet=2):
+def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), bands=(), tries=3, quiet=2):
     """Tap, settle, screenshot and compare against tests/golden/GOLDEN (created from the shot when
     missing). A tap the stock dropped, or one that left the previous screen up, is repeated once --
     the same known flake `test_lua_apps.tap_to` and `test_stock.step` guard against."""
@@ -140,21 +140,31 @@ def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), bands=(), tr
                          f'({n} pixels differ outside {list(bands)}); the shot is {shot}')
 
 
-def back_to_list(name, tmp, tries=2):
+def back_to_list(name, tmp, tries=3):
     """Out of a running app and back to the Lua Apps page. The Back pad does not leave the app on
     its own: it raises the stock's `Exit app "<app_id>"?` dialog (Continue | Exit), so the exit is
-    two inputs. Verified against the list golden, and retried once if either input was dropped."""
+    two inputs, and the whole pair is retried against the list golden.
+
+    Neither input asks `--wait` for a repaint. The stock ignores input while it paints, and on a
+    loaded host (the desk Mac runs the owner's own applications) that made `home --wait` fail, while
+    *retrying the pad alone* is the wrong repair: if the first press did raise the dialog, a second
+    one dismisses it and the Exit tap then lands on the app. Only the outcome is worth asserting, so
+    press, settle, tap Exit, settle, and compare -- a whole attempt at a time."""
     g = os.path.join(ROOT, 'tests', 'golden', 'stock-lua-status-list.png')
     shot = tmp / 'back.png'
+    n = None
     for attempt in range(tries):
-        x4emu_input(name, 'home', '--quiet', '2', '--wait', '20')
+        x4emu(name, 'home', '--quiet', '2')
         settle(name, 2, 60)
         tap(name, *EXIT_BUTTON, quiet=2)
         settle(name, 2, 60)
         x4emu(name, 'screenshot', str(shot))
-        if diff_masked(shot, g) == 0:
+        n = diff_masked(shot, g)
+        if n == 0:
             return
-    raise AssertionError(f'Back + Exit did not return to the Lua Apps list; the shot is {shot}')
+        print(f'Back + Exit left {n} pixels differing from the app list; starting the exit over')
+    raise AssertionError(f'Back + Exit did not return to the Lua Apps list in {tries} tries '
+                         f'({n} pixels differ); the shot is {shot}')
 
 
 def test_stock_runs_both_status_apps(stock_status):

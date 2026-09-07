@@ -58,7 +58,7 @@ def stock_lua(tmp_path, request, stock_card):
         pytest.skip('device dump not available')
     if not shutil.which('mcopy'):
         pytest.skip('mtools not available')
-    name = instance_name(request.node.name)
+    name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
     shutil.copyfile(DUMP, flash)
     for cmd in (['nvsedit.py', str(flash), 'set-u8', 'user_config', 'net_en', '0'],
@@ -76,7 +76,7 @@ def stock_lua(tmp_path, request, stock_card):
     x4emu(name, 'stop', check=False)
 
 
-def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), tries=2, quiet=2):
+def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), tries=3, quiet=2):
     """Tap, settle, screenshot and compare against tests/golden/GOLDEN (created from the shot when
     missing, like `test_stock.golden_check`). A tap the stock dropped, or one that left the previous
     screen up, is repeated once (`test_stock.step`)."""
