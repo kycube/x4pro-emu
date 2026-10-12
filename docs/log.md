@@ -1075,3 +1075,39 @@ despite being Google's reading face — its Google Fonts build carries no hintin
 `fonts/` holds sixteen families and is gitignored except its README: three are the owner's own
 proprietary copies, and MiSans' licence forbids redistribution *and* adaptation, so even an `.xtf`
 built from the device's own font may not be shipped.
+
+## 2026-10-12 — Upstream check after five weeks; the device moves to stock 7.6.8
+
+What moved since 2026-09-07, and what it means here:
+
+- **Stock firmware: 7.6.8** (offered on the device as "released 09/23/2026"; app built Sep 22 2026, IDF v6.0.1,
+  6,250,640 bytes, 805 KB larger than 7.5.4). The owner ran the update with our go-ahead; the 2026-09-07 backup
+  already covered a restore. Afterwards: `tools/device.py backup` → `flash-2026-10-12-{a,b}.bin`, SHA-256
+  01779adc… both. otadata entry 0 seq 3 → **app0 boots** 7.6.8; app1 still holds 7.5.4 byte for byte (equal to
+  `stock-app1-7.5.4.bin`); the 7.2.4 that sat in app0 is gone from the device (it stays on disk). A read-only
+  `espefuse dump` after the update is **identical** to `docs/device/efuse-dump.txt`: no flash encryption, no
+  secure boot, `SECURE_VERSION` 0 — the update locked nothing. The app is extracted as
+  `images/device/stock-app0-7.6.8.bin` (`esptool image-info`: checksum and validation hash valid).
+- **7.6.8 in the emulator:** the raw dump (net_en 0, card from `images/device/sd-files`, `--boot-hold-power`)
+  reaches Home at refresh 2, `epd_unknown_cmds` 0, `iolog_hot` only the IO_MUX logger — no new model gap on the
+  boot path, as with 7.5.4. Home differs from the 7.2.4 golden only in the clock and a few pixels of header
+  spacing; the menu keeps 7.5.4's rows (Read, All Files, USB, Cloud, Settings), with a line scrim instead of the
+  checkerboard and the date as `2026/10/12`. The Lua markers are all still in the image (`/sdcard/XTApps`,
+  `index.lua`, `app.xtapp`, `sys.battery`, `sys.status`, "Mini Apps"; `XTAP` 3 hits against 7.5.4's 2), so the
+  route probably survives, but that is unproven until the patch sites are re-located. `tools/stockver.py identify`
+  refuses 7.6.8, as designed: no `stockver.d/7.6.8.json` yet.
+- **CrossPoint 1.6.5** (2026-09-27, 93 commits past our pin 7db14a01 = 1.6.0+1; freeink-sdk 108 commits). The
+  hardware-facing part: a reworked UC81xx probe and an `Uc8279X4Driver` (new AA and four-tone LUT banks, SPI
+  10 MHz), dropped-press fixes in the button idle poll and list repaints, frontlight state across silent
+  restarts. Built in a scratch clone (2 min) and booted: the probe still reads `VER=00 0F 68 00 00 FLG=13` and
+  promotes UC8279, `epd_unknown_cmds` 0, no panic. The CrossPoint end-to-end tests against that build (a pytest
+  plugin that only repoints `conftest.BUILD`): **17 passed, 1 failed** — `test_home_screen_matches_device_screenshot`
+  at 0.505 %, which is upstream's own UI change ("Recent Books" → "Library"), not an emulator gap. The pin
+  stays at 1.6.0 for now: its device oracles (home, reader pages) were captured from 1.6.0 on the device, so a
+  bump needs new device captures, which need CrossPoint on the device.
+- **Espressif QEMU** `esp-develop` is still at our base febae182; nothing to rebase.
+- **CI:** the run on bf4b86a (2026-09-07) is green, so the socket-path fix of session 8 is confirmed.
+- Found on the way and fixed: `make setup` cloned CrossPoint with `git clone --recurse-submodules` of the
+  default branch, not the submodule pin, so a fresh clone without `--recurse-submodules` built whatever upstream
+  was at (CI was safe: its checkout is `submodules: recursive`). The rule is now `git submodule update --init
+  --recursive firmware`; checked on a fresh local clone (firmware at 7db14a01, freeink-sdk at cb9167d).

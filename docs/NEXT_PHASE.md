@@ -5,7 +5,14 @@ Goal of the next phase, in the owner's words: run the **stock Xteink firmware** 
 **world class**. This document is the whole context you need; the previous agent's context is gone.
 Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
 
-## 0. Resume here (end of session 8, 2026-09-07)
+## 0. Resume here (end of session 8, 2026-09-07; amended 2026-10-12)
+
+**2026-10-12: the device runs stock 7.6.8 (app0 boots), so the 7.5.4 re-baseline of session 8 has to be done
+once more before steps a–d below**: `tools/ghidra_stock.py analyze --image images/device/stock-app0-7.6.8.bin
+--version 7.6.8`, a `tools/stockver.d/7.6.8.json` (dev stub, the three patch sites, string packs), the Lua
+route walked on the patched 7.6.8, a `docs/stock-7.6.8.md` like `docs/stock-7.5.4.md`. 7.6.8 already boots to
+Home and its menu in the emulator with no new model gap; backup, efuse check and the CrossPoint 1.6.5 trial
+are in the 2026-10-12 entry of `docs/log.md`. Item e below is confirmed (CI green on bf4b86a).
 
 **Work is organised as squads: read §10 before starting anything.** Sessions 5–8 ran four to five agents in
 parallel with cost balancing (Fable for models and symbol-less firmware reading, Opus for C/Python work with
