@@ -27,8 +27,12 @@ def instance_name(node_name, node_id=None):
     Two test files can hold the same function name (`test_the_importable_api_matches_the_cli` is in
     both test_stockdev.py and test_stockpatch.py), and a shared name means a shared `.x4emu/NAME/`
     with its console.log and sockets, so the hash covers `node_id` -- pass `request.node.nodeid`
-    where a collision is possible; the readable head still comes from the function name."""
-    name = 'pytest-' + node_name.replace('[', '-').replace(']', '').replace('=', '-')
+    where a collision is possible; the readable head still comes from the function name.
+
+    `X4EMU_TEST_PREFIX` (e.g. `a-`) goes in front of the test's part, so two pytest runs side by side --
+    two agents, or two workers -- never share an instance (each test stops its own name first)."""
+    name = 'pytest-' + os.environ.get('X4EMU_TEST_PREFIX', '') + \
+        node_name.replace('[', '-').replace(']', '').replace('=', '-')
     room = SOCK_MAX - len(os.path.join(ROOT, '.x4emu')) - len('/console.sock') - 2   # '/' + NUL
     if len(name) > room or node_id:
         h = hashlib.sha1((node_id or node_name).encode()).hexdigest()[:8]
