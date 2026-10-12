@@ -101,3 +101,73 @@ def emu(images, request):
     x4emu(name, 'stop', check=False)
     yield name
     x4emu(name, 'stop', check=False)
+
+
+# --- --golden-drift FILE: the upstream watch's CrossPoint-latest job (docs/upstream.md) ----------
+# Off unless the option is given: without it the hook below returns at once and no outcome changes.
+# With it the run answers "did the emulator break?" for a firmware the goldens were not made from:
+#  - a test in GOLDEN_ORACLES that fails in one of its own comparisons against a device-made golden
+#    (a bare assert in the test body whose message matches, not an x4emu command), while its
+#    emulator still runs with no unknown panel command and no crash marker in its console, is
+#    reported as xfail and recorded in FILE as golden drift;
+#  - a test that passed while its emulator shows a crash marker or an unknown panel command fails;
+#  - every other failure stays a failure.
+# FILE gets one JSON line per drift or unhealthy test (`tools/upstream_check.py tests-summary`).
+GOLDEN_ORACLES = {
+    # test function -> regex over the failing assert's message (the device's own screenshots)
+    'test_home_screen_matches_device_screenshot': r'% of pixels differ',
+    'test_reader_pages_match_device_screenshots': r'differs from the device screenshot|base_frame_diff\(',
+}
+
+
+def pytest_addoption(parser):
+    parser.addoption('--golden-drift', metavar='FILE', default=None,
+                     help='upstream watch only: a mismatch against a device golden on a healthy emulator '
+                          'becomes xfail and a JSON line in FILE (docs/upstream.md)')
+
+
+def _emu_health(name):
+    """(problems, running) of one instance: crash markers in its console, unknown panel commands."""
+    import importlib.util, json
+    spec = importlib.util.spec_from_file_location('upstream_check', os.path.join(ROOT, 'tools', 'upstream_check.py'))
+    uc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(uc)
+    problems = uc.crash_markers(os.path.join(ROOT, '.x4emu', name, 'console.log'))
+    r = x4emu(name, 'state', check=False, timeout=30)
+    try:
+        st = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        st = None
+    if st and st.get('epd_unknown_cmds'):
+        problems.append(f'{st["epd_unknown_cmds"]} unknown panel command(s), last {st.get("epd_last_unknown")}')
+    return problems, st is not None
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    path = item.config.getoption('--golden-drift')
+    rep = outcome.get_result()
+    if not path or rep.when != 'call' or rep.skipped or 'emu' not in getattr(item, 'funcargs', {}):
+        return
+    import json, re
+    problems, running = _emu_health(item.funcargs['emu'])
+    record = None
+    if rep.passed and problems:
+        rep.outcome = 'failed'
+        rep.longrepr = 'golden-drift check: the emulator was unhealthy after a passing test: ' + '; '.join(problems)
+        record = {'kind': 'unhealthy', 'test': item.nodeid, 'message': '; '.join(problems)}
+    elif rep.failed and call.excinfo is not None:
+        pattern = GOLDEN_ORACLES.get(getattr(item, 'originalname', None) or item.name)
+        exc = call.excinfo
+        msg = str(exc.value)
+        golden = (pattern and exc.errisinstance(AssertionError)
+                  and exc.traceback[-1].name == item.function.__name__ and re.search(pattern, msg))
+        if golden and running and not problems:
+            first = next((x.strip() for x in msg.splitlines() if re.search(pattern, x)), msg.strip()[:200])
+            rep.outcome = 'skipped'
+            rep.wasxfail = f'golden drift: {first}'
+            record = {'kind': 'golden-drift', 'test': item.nodeid, 'message': first}
+    if record:
+        with open(path, 'a') as f:
+            f.write(json.dumps(record) + '\n')
