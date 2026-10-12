@@ -130,10 +130,24 @@ firmware/       CrossPoint Reader (submodule)
 docs/           everything written down
 ```
 
+## Licence
+
+[MIT](LICENSE) for this repository's own work: the `x4emu` CLI, the panel models, the tools, the
+Lua apps, and the gamebook's story and art. Three parts keep their own licences:
+
+- `qemu-patches/` are changes to QEMU and are under QEMU's licence: the files they touch carry no
+  header of their own, which QEMU's `LICENSE` makes GPL-2.0-or-later;
+- `docs/device/idf-headers/` are Espressif's ESP-IDF register headers and ROM linker scripts,
+  kept for reference (Apache-2.0);
+- `firmware/` is [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader), a
+  submodule with its own MIT licence and copyright.
+
+The stock `xteink_app` firmware belongs to Xteink; it is not distributed here, and the tools work
+on images you take from your own device.
+
 ## Credits
 
-Built on [Espressif's QEMU fork](https://github.com/espressif/qemu) (GPL-2.0; `qemu-patches/` are
-changes to it) and [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader) with
-its freeink SDK. The gamebook's display type is Libre Baskerville and the README captions Inter, both
-under the SIL Open Font Licence. The stock `xteink_app` firmware belongs to Xteink and is not
-distributed here.
+Built on [Espressif's QEMU fork](https://github.com/espressif/qemu) and
+[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader) with its freeink SDK.
+The gamebook's display type is Libre Baskerville and the README captions Inter, both under the SIL
+Open Font Licence (the fonts themselves are not in the repository).
