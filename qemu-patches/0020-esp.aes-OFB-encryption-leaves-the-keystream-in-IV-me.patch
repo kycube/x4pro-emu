@@ -1,0 +1,117 @@
+From f12c786a5cd2e92f84029282656cd39721872623 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 15:40:20 -0500
+Subject: [PATCH 20/20] esp.aes: OFB encryption leaves the keystream in IV
+ memory, CTR honours INC32
+
+Two DMA-AES results differed from the hardware's, found by comparing every
+block mode against a host AES over qtest:
+
+- OFB encryption copied the last ciphertext block into IV memory. The next
+  OFB IV is the last output of the block cipher, i.e. the last ciphertext
+  block XOR the last plaintext block (the decryption path already did
+  this). ESP-IDF reads IV memory back to continue a stream, so the second
+  call of a long OFB encryption produced wrong output.
+
+- CTR ran gcrypt's CTR mode, which always increments the whole 128-bit
+  counter block. AES_INC_SEL 0 selects NIST's INC32 (only the last 32 bits
+  count and wrap without a carry), which ESP-IDF's GCM sets; the IV memory
+  update already used INC32, but the keystream carried into bit 32 once the
+  low word wrapped. Build the counter blocks with the INC_SEL rule and
+  encrypt them in ECB mode; encryption and decryption are the same
+  operation and IV memory ends at the next counter.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/esp_aes.c | 45 ++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 32 insertions(+), 13 deletions(-)
+
+diff --git a/hw/misc/esp_aes.c b/hw/misc/esp_aes.c
+index 1a92ffa..c937b6d 100644
+--- a/hw/misc/esp_aes.c
++++ b/hw/misc/esp_aes.c
+@@ -78,7 +78,8 @@ static void esp_aes_dma_start(ESPAesState *s)
+         [ESP_AES_ECB_CIPHER]    = GCRY_CIPHER_MODE_ECB,
+         [ESP_AES_CBC_CIPHER]    = GCRY_CIPHER_MODE_CBC,
+         [ESP_AES_OFB_CIPHER]    = GCRY_CIPHER_MODE_OFB,
+-        [ESP_AES_CTR_CIPHER]    = GCRY_CIPHER_MODE_CTR,
++        /* CTR builds its counter blocks itself (INC32/INC128) and encrypts them in ECB mode */
++        [ESP_AES_CTR_CIPHER]    = GCRY_CIPHER_MODE_ECB,
+         [ESP_AES_CFB8_CIPHER]   = GCRY_CIPHER_MODE_CFB8,
+         [ESP_AES_CFB128_CIPHER] = GCRY_CIPHER_MODE_CFB,
+     };
+@@ -124,9 +125,7 @@ static void esp_aes_dma_start(ESPAesState *s)
+     /* `iv_mem` field represents the Initialization Vector for CBC/OFB/CFB operations
+      * But it represents the Initial Counter Block for CTR operation.
+      * It shall be ignored for ECB block operation. */
+-    if (cipher_mode == ESP_AES_CTR_CIPHER) {
+-        err = gcry_cipher_setctr(ghandle, iv_mem, ESP_AES_IV_REG_CNT);
+-    } else if (cipher_mode != ESP_AES_ECB_CIPHER) {
++    if (cipher_mode != ESP_AES_ECB_CIPHER && cipher_mode != ESP_AES_CTR_CIPHER) {
+         err = gcry_cipher_setiv(ghandle, iv_mem, ESP_AES_IV_REG_CNT);
+     }
+ 
+@@ -155,12 +154,36 @@ static void esp_aes_dma_start(ESPAesState *s)
+     }
+ 
+     /* Reading was successful, process the buffer (encrypt/decrypt) and write back to the GDMA OUT buffer */
+-    if (encrypt) {
++    if (cipher_mode == ESP_AES_CTR_CIPHER) {
++        /* gcrypt's CTR mode always increments the whole 128-bit block, but INC_SEL 0 selects
++         * NIST's INC32 (only the last 32 bits count, wrapping without a carry; ESP-IDF's GCM
++         * sets it), so the counter blocks are built here and encrypted in ECB mode. Encryption
++         * and decryption are the same operation, and IV memory ends at the next counter. */
++        g_autofree uint8_t *stream = g_malloc(buf_size);
++        for (uint32_t i = 0; i < s->block_num_reg; i++) {
++            memcpy(stream + i * ESP_AES_IV_REG_CNT, iv_mem, ESP_AES_IV_REG_CNT);
++            esp_aes_ctr_add_counter(s, 1);
++        }
++        err = gcry_cipher_encrypt(ghandle, stream, buf_size, NULL, 0);
++        for (uint32_t i = 0; i < buf_size; i++) {
++            buffer[i] ^= stream[i];
++        }
++    } else if (encrypt) {
++        /* The last block of plaintext, needed for OFB */
++        uint8_t plaintext[ESP_AES_IV_REG_CNT];
++        memcpy(plaintext, buffer + buf_size - ESP_AES_IV_REG_CNT, ESP_AES_IV_REG_CNT);
++
+         err = gcry_cipher_encrypt(ghandle, buffer, buf_size, NULL, 0);
+ 
+-        if (cipher_mode != ESP_AES_CTR_CIPHER) {
+-            /* On the real hardware, IV memory is used in-place for encrypting data, so copy the last encrypted block to IV memory */
+-            memcpy(iv_mem, buffer + buf_size - 16, ESP_AES_IV_REG_CNT);
++        /* On the real hardware, IV memory is used in-place for encrypting data, so copy the last encrypted block to IV memory */
++        memcpy(iv_mem, buffer + buf_size - 16, ESP_AES_IV_REG_CNT);
++
++        /* For OFB, IV memory holds the last output of the block cipher: the last ciphertext block
++         * XOR the last plaintext block, as on the decryption side below. */
++        if (cipher_mode == ESP_AES_OFB_CIPHER) {
++            for (int i = 0; i < ESP_AES_IV_REG_CNT; i++) {
++                iv_mem[i] ^= plaintext[i];
++            }
+         }
+     } else {
+         /* Store the last block of plaintext, needed for OFB */
+@@ -169,7 +192,7 @@ static void esp_aes_dma_start(ESPAesState *s)
+         memcpy(plaintext, buffer_last_block, ESP_AES_IV_REG_CNT);
+ 
+         /* The IV memory is initalized with the encrypted data, so do the copy now */
+-        if (cipher_mode != ESP_AES_OFB_CIPHER && cipher_mode != ESP_AES_CTR_CIPHER) {
++        if (cipher_mode != ESP_AES_OFB_CIPHER) {
+             memcpy(iv_mem, buffer + buf_size - 16, ESP_AES_IV_REG_CNT);
+         }
+ 
+@@ -184,10 +207,6 @@ static void esp_aes_dma_start(ESPAesState *s)
+         }
+     }
+ 
+-    if (cipher_mode == ESP_AES_CTR_CIPHER) {
+-        esp_aes_ctr_add_counter(s, s->block_num_reg);
+-    }
+-
+     if (err) {
+         error_report("[AES] error processing memory");
+         goto close_exit;
+-- 
+2.54.0 (Apple Git-157)
+

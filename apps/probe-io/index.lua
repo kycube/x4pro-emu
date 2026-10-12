@@ -20,9 +20,9 @@
 -- card directory (the host's package source is null: "module source unavailable", read_text ->
 -- nil,"not_found"/"invalid_name"); ctx.save() is a stub returning false; a frame keeps its first
 -- 1024 commands, a layer painted with draw_with has no such limit; set_tick_rate/request_refresh
--- take their option as argument #2 (ctx:set_tick_rate('low')). Leaving the app with a non-empty
--- ctx.state (and the busy-loop tests, which write one) hangs the EMULATOR: core 1 spins on the
--- AES accelerator's state register (0x6003A04C), whose DMA mode is not modelled.
+-- take their option as argument #2 (ctx:set_tick_rate('low')). Leaving the app saves ctx.state,
+-- encrypted, to /XTApps/<app_id>/state.xtsv (DMA-AES; the emulator hung there until
+-- qemu-patches/0019 let the GDMA reach PSRAM), and the next start restores it (docs/lua-apps.md 4c).
 --
 -- The card: `apps/probe-io/mkcard.py CARD.img` installs this directory and adds the generated
 -- files (big100k.txt, big400k.txt, lad*.txt) and the markers outside the app directory.

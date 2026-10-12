@@ -50,7 +50,10 @@ log entry for.
   after the last input and back on the next touch (LEDC hardware fade, walked in guest time; `state.ledc`
   shows `fading`/`target_permille`). Its light panel is a pull-down from the portrait top edge
   (`x4emu swipe 5 240 300 240 --ms 600`; brightness and colour-temperature steps, Light button; `x4emu
-  light` follows). Its Home pad is Back, one level (`x4emu home`; the GT911 key byte). RMT, I2S,
+  light` follows). Its Home pad is Back, one level (`x4emu home`; the GT911 key byte). A Lua app's
+  `ctx.state` is saved on leave, encrypted by DMA-AES, to `/XTApps/<app_id>/state.xtsv` and restored on
+  the next start, across a reboot too (Espressif's AES model; the GDMA reaches PSRAM since
+  qemu-patches/0019, `tests/test_aes.py` checks the block against a host AES over qtest). RMT, I2S,
   APB_SARADC DMA mode, USB OTG stay unmodelled; SAR oneshots and the temperature sensor answer fixed values;
   RTC IO pad writes are stored, not acted on. Its Developer menu (Screen Capture, `.xic` files) is compiled
   out in 7.2.4: `tools/stockdev.py` patches the predicate in an image copy (`docs/xic.md`).
@@ -63,7 +66,7 @@ qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the s
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
 x4emu/         the CLI as a package (pipx install . → `x4emu`; docs/x4emu.md); tools/x4emu is its in-repo shim
 tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, xic2png.py, stockver.py (+ stockver.d/: the per-version offsets the three stock tools read), stockdev.py, stockpatch.py, stockstrings.py, xtfont.py, xtapp.py, gamebook.py (+ gamebook_engine.lua, pixart.py), readme_images.py, ghidra_stock.py (+ ghidra/), device.py, epdtrace.py, appdis.py, tcbwalk.py
-tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants, stock, record/replay); fast: nvsedit, xic
+tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants, stock, record/replay, Lua state); fast: nvsedit, xic, AES (qtest)
 apps/          Lua apps for the stock (gull-rock: a gamebook, built; status-typographic, status-panels, probe, probe-io); docs/lua-apps.md
 stories/       gamebook sources (story.txt + scenes.py pixel art) that tools/gamebook.py builds into apps/; docs/gamebook.md
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
@@ -91,7 +94,10 @@ extra pytest flags.
 Everything Python runs from `.venv/bin/python` (`-m esptool`, `-m espefuse`, `-m pytest`).
 QEMU: `cd qemu/build && ../configure --target-list=xtensa-softmmu --enable-gcrypt --enable-slirp
 --enable-png --disable-user --disable-capstone --disable-vnc --disable-gtk --disable-sdl
---disable-docs && ninja qemu-system-xtensa` (that target also runs macOS code signing).
+--disable-docs --disable-werror --disable-gnutls && ninja qemu-system-xtensa` (that target also runs
+macOS code signing; Homebrew's gnutls 3.8.13 breaks QEMU's TLS files, which nothing here needs).
+A Homebrew upgrade can strand an old build directory on a removed Cellar include path (`gcrypt.h not
+found`): re-run the configure line in it.
 
 ## Boot a firmware image and take a screenshot (five commands)
 

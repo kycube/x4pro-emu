@@ -79,6 +79,9 @@ The models are checked against the desk unit, not just against datasheets:
 - Touch, buttons, the capacitive Home pad, the front light (LEDC with hardware fades), the battery
   gauge, the RTC, the SD card, deep sleep and the radio blocks a WiFi start touches are modelled to
   the point where both firmwares run unpatched ([docs/hardware.md](docs/hardware.md)).
+- The stock's Lua apps keep their `ctx.state` between visits and across a reboot, as on the device:
+  the firmware encrypts it with the SoC's AES accelerator through DMA, and the AES block is checked
+  against a host AES in every block mode (`tests/test_aes.py`, `tests/test_lua_state.py`).
 
 ## Lua apps and a gamebook
 

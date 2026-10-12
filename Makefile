@@ -38,7 +38,7 @@ qemu: qemu/build/build.ninja
 qemu/build/build.ninja:
 	mkdir -p qemu/build && cd qemu/build && ../configure --target-list=xtensa-softmmu \
 	  --enable-gcrypt --enable-slirp --enable-png --disable-user --disable-capstone \
-	  --disable-vnc --disable-gtk --disable-sdl --disable-docs --disable-werror
+	  --disable-vnc --disable-gtk --disable-sdl --disable-docs --disable-werror --disable-gnutls
 
 firmware:
 	cd firmware && pio run -e x4pro

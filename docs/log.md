@@ -1180,3 +1180,74 @@ SHA-256 checked on the card, no `._` files), Mini Apps appeared by itself, and t
 the plates are crisp with no ghosting between scenes, the side buttons turn pages, and **`ctx.state`
 persists** — after leaving with the Home pad (Exit) and coming back, the cover offers Continue; the
 exit is clean. So the AES hang is the emulator's alone, and Lua apps can keep state on the device.
+
+## 2026-10-12 — A Lua app's exit no longer hangs: the GDMA reaches PSRAM, and two AES model fixes
+
+The brief assumed the AES accelerator was not modelled. It is: Espressif's QEMU has `hw/misc/esp_aes.c`
+(typical mode and DMA-AES through the GDMA, six block modes, 128/256-bit keys), and the esp32s3 machine
+wires it to the GDMA and the interrupt matrix. The earlier probe runs' `stderr.log` held the real
+cause: `[AES] Error reading from GDMA buffer`. At the hang (probe-io left through Home pad → Exit on the
+owner's 7.6.8, redacted copy): AES-256 key, `MODE` 6 (AES-256 decrypt), `DMA_ENA` 1, `BLOCK_MODE` 3
+(CTR), `INC_SEL` 0 (INC32), `BLOCK_NUM` 2; GDMA channel 1 with `PERI_SEL` 6 in both directions, its
+descriptors in DRAM (0x3FCBF5B8 / 0x3FCBF5C4) but **the buffers in PSRAM at 0x3C95D9E8 and 0x3C95DA60**.
+The firmware's AES writers (`FUN_4232348c`: DMA_ENA, BLOCK_NUM, TRIGGER; `FUN_42323534`: the STATE
+poll) are ESP-IDF 6's `esp_aes_dma_core.c`; mode DEC with CTR and INC32 is IDF's GCM (CTR on the
+hardware, GHASH in software). The GDMA's address space was rooted at the internal DRAM region alone,
+so the read failed, `AES_STATE` stayed IDLE and the driver spun waiting for DONE.
+
+**Patches 0019 and 0020.** `esp32s3: the GDMA reaches PSRAM through the data cache's MMU` gives the
+GDMA a container address space with the DRAM at its bus address and an alias of the data-cache
+window at 0x3C000000; the cache's IOMMU translates each page to PSRAM (rw) or flash (ro) as for the
+CPU. A known-answer test then compared every block mode against a host AES and found two model
+errors, fixed in `esp.aes: OFB encryption leaves the keystream in IV memory, CTR honours INC32`: OFB
+encryption left the last ciphertext block in IV memory (the next IV is ciphertext XOR plaintext, as
+the decrypt path already had), and CTR ran gcrypt's 128-bit counter, so under INC_SEL 0 the
+keystream carried into bit 32 once the low word wrapped (the IV update was already INC32). The
+counter blocks are now built with the INC_SEL rule and encrypted in ECB. Neither error touched the
+stock's save; both broke multi-call streams. The series is regenerated whole (20 patches) and
+applies with `git am --3way` to esp-develop @ febae182 into a tree identical to `qemu/` x4pro.
+
+**Tests.** `tests/test_aes.py` (30 tests, 10 s) runs `qemu-system-xtensa -machine xteink-x4pro
+-accel qtest`, so no guest code runs: FIPS-197 C.1/C.3 and random blocks in typical mode; DMA mode
+in all six block modes × both key sizes × both directions with buffers in DRAM and in PSRAM (two MMU
+pages that are not contiguous in PSRAM, so a transfer crosses a page boundary), split over several
+descriptors; the IV left for a continuing call; descriptor write-back; the INC32 wrap. Against the
+old binary the PSRAM cases fail at `AES_STATE == DONE`; against the new one all pass.
+`tests/test_lua_state.py` (2.5 min) installs a small app that counts its visits in `ctx.state` and
+draws them as lines: first visit 0, Exit, re-enter 1, Exit, a stop and a cold boot from the same
+flash and card, 2 with a string and a nested float intact; it asserts the encrypted
+`/XTApps/state-check/state.xtsv` on the card. On the old binary it fails at the Exit tap after 87 s
+("drew nothing in 3 tries"), not by hanging.
+
+**What the host does with ctx.state (probe-io and the test, emulator).** Leaving saves it, including
+what `on_leave` writes; `ctx.save()` stays a stub. The file is `/XTApps/<app_id>/state.xtsv`: `XTSV`,
+version 1, a 72-byte header (u16 0x48 at +6, the ciphertext length as u32 at +8), then the
+ciphertext (273 bytes for the probe's eleven-key state, 121 for three keys). The strings beside the
+path (`xtapps_keys`, `app.dek_store.slots`, `dk_%02X…`, `dek_wrap_alg`, `wrapped_dek_pack`) suggest a
+per-app data key kept wrapped in NVS. Integers are 32-bit: `math.maxinteger` and the float `2^40` come
+back as 2147483647; 3.25 stays a float. The owner's device restores state the same way (the gamebook,
+same day).
+
+**The 2 s `on_draw` busy loop** no longer stalls on AES either, but the host cuts the script short: the
+probe's note written before the loop survives ("on_draw 2000 ms started at 27469"), the one after
+never does, `ctx.state` is saved (13 AES blocks), and the app stops repainting and taking taps (both
+cores in the idle task, `xteink_ui` polling normally per `tools/tcbwalk.py`) until the Home pad leaves
+it. That is the stock's script budget, not an emulator fault; its value and the device's behaviour
+are not measured.
+
+**Build environment.** A fresh QEMU configure on this Mac now fails in `crypto/tls*.c` (Homebrew's
+gnutls 3.8.13 is found but its include path does not reach those files), and the old `qemu/build`
+pointed at libgcrypt 1.12.3's removed Cellar include path. The Makefile's configure line gains
+`--disable-gnutls` (nothing here uses TLS) and `qemu/build` was reconfigured with it.
+
+**A known intermittent, not from these patches: `spinlock_acquire` asserts (line 141).** The first full
+`make test` with the patches (172 passed, 2 failed) lost `test_stock_runs_both_status_apps` to
+`assert failed: 0x40384060 <cached disabled>:141` on stock 7.2.4: 7.2.4's `spinlock_acquire`
+(FUN_40383f50+0x110, "lock->owner == SPINLOCK_FREE || …") called from `xQueueReceive` (FUN_42373db8)
+in a task, i.e. a lock word that is neither free nor the other core's. The same assert is in
+`.x4emu/pio2/console.log` from 14:55, before these patches (the 12:07 binary, stock 7.6.8,
+FUN_40383f68+0x110 reached from an ISR that interrupted the idle task). Both failing tests pass
+alone, twice. Suspected: a load-dependent race in the two-core TCG's S32C1I lock path or in a model
+raising interrupts from another thread; not investigated. The other failure of that run,
+`test_stock_relabelled_menu`, was the familiar tap that repainted something other than the menu.
+The second full run was green: **174 passed, 1 skipped, 13.5 min** (`make test`, the rebuilt `qemu/build`).

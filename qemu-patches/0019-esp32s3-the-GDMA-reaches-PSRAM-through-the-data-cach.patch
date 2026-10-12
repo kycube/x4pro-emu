@@ -1,0 +1,57 @@
+From 924b37cd2e40d9975fef78efacf969c0555291c8 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 15:40:20 -0500
+Subject: [PATCH 19/20] esp32s3: the GDMA reaches PSRAM through the data
+ cache's MMU
+
+The GDMA's address space was rooted at the internal DRAM region alone, so
+every descriptor buffer outside 0x3FC80000..0x3FDF0000 failed to read.
+On the ESP32-S3 the GDMA reaches external RAM through the data cache's MMU
+(EDMA), and ESP-IDF 5/6 hands it PSRAM buffers at their 0x3C000000..
+addresses: DMA-AES and DMA-SHA (esp_aes_dma_core.c, esp_sha_dma.c) do it
+whenever the caller's buffer lives in PSRAM. The AES model then warned
+"[AES] Error reading from GDMA buffer" and returned with AES_STATE still
+IDLE, and the driver spun forever on AES_STATE waiting for DONE (the
+Xteink stock firmware 7.6.8 saving a Lua app's state on exit: descriptors
+in DRAM, buffers at 0x3C95D9E8 / 0x3C95DA60).
+
+Give the GDMA a container address space holding an alias of the DRAM at
+its bus address and an alias of the data cache window at 0x3C000000. The
+cache's IOMMU translates each page to PSRAM (read/write) or flash
+(read-only), exactly as for the CPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/xtensa/esp32s3.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/hw/xtensa/esp32s3.c b/hw/xtensa/esp32s3.c
+index 4a24a04..67a9d20 100644
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -784,7 +784,21 @@ static void esp32s3_machine_init(MachineState *machine)
+ 
+     /* GDMA Realization */
+     {
+-        object_property_set_link(OBJECT(&ss->gdma), "soc_mr", OBJECT(dram), &error_abort);
++        /* The GDMA reaches internal SRAM through the data bus and external RAM through the
++         * data cache's MMU (EDMA). ESP-IDF hands it PSRAM buffers at their 0x3C000000..
++         * addresses (DMA-AES and DMA-SHA in IDF 5/6 do), so its address space holds both
++         * windows, not the internal DRAM alone. */
++        MemoryRegion *dma_bus = g_new(MemoryRegion, 1);
++        MemoryRegion *dma_dram = g_new(MemoryRegion, 1);
++        MemoryRegion *dma_extmem = g_new(MemoryRegion, 1);
++        memory_region_init(dma_bus, OBJECT(ss), "esp32s3.gdma-bus", 0x100000000ULL);
++        memory_region_init_alias(dma_dram, OBJECT(ss), "esp32s3.gdma-dram", dram,
++                                 0, memmap[ESP32S3_MEMREGION_DRAM].size);
++        memory_region_add_subregion(dma_bus, memmap[ESP32S3_MEMREGION_DRAM].base, dma_dram);
++        memory_region_init_alias(dma_extmem, OBJECT(ss), "esp32s3.gdma-extmem", &ss->cache.dcache,
++                                 0, memmap[ESP32S3_MEMREGION_DCACHE].size);
++        memory_region_add_subregion(dma_bus, memmap[ESP32S3_MEMREGION_DCACHE].base, dma_extmem);
++        object_property_set_link(OBJECT(&ss->gdma), "soc_mr", OBJECT(dma_bus), &error_abort);
+         sysbus_realize(SYS_BUS_DEVICE(&ss->gdma), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->gdma), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_GDMA_BASE, mr, 0);
+-- 
+2.54.0 (Apple Git-157)
+

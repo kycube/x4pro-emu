@@ -1,7 +1,7 @@
 From 6b907155ec790c8f424f35470fdfe2b0bd9b7b40 Mon Sep 17 00:00:00 2001
 From: x4pro-emu <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 15:03:45 -0500
-Subject: [PATCH 03/18] esp32s3.usj: present SOF on every INT_RAW read while a
+Subject: [PATCH 03/20] esp32s3.usj: present SOF on every INT_RAW read while a
  host is attached
 
 ESP-IDF's connection monitor clears SOF from the tick hook; bunched ticks made it
@@ -32,5 +32,5 @@ index 1c1a7d3..146c080 100644
          break;
      case R_INT_ST:
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 

@@ -1,7 +1,7 @@
 From d1df048d5a97a7972600546a5a2e9740a370f057 Mon Sep 17 00:00:00 2001
 From: x4pro-emu <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 15:37:06 -0500
-Subject: [PATCH 05/18] xteink-x4pro: cache occupy/lock DONE overlay, SPI-path
+Subject: [PATCH 05/20] xteink-x4pro: cache occupy/lock DONE overlay, SPI-path
  probe answers, BUSY on reset
 
 - EXTMEM_DCACHE_OCCUPY_CTRL / LOCK_CTRL report DONE so IDF 6.x firmware leaves ROM.
@@ -131,5 +131,5 @@ index ddde866..c2718fc 100644
  };
  
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 

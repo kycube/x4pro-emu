@@ -20,6 +20,13 @@ written by the menu presenter from an `/sdcard/XTApps` enumeration). Step b and 
 Rock, built by `tools/gamebook.py` from `stories/gull-rock/`, played on the device with state kept across
 visits. `docs/lua-apps.md` §4c is the host's measured limits (no files or `require` for a folder app, the
 1024-command frame cap, layers); new apps start there.
+**And: leaving a Lua app no longer hangs the emulator** (qemu-patches 0019/0020, the last 2026-10-12
+entry of `docs/log.md`). The AES model was there all along. The GDMA could not reach the PSRAM buffers
+ESP-IDF's DMA-AES uses, and two AES model errors (OFB IV, INC32) turned up on the way.
+`ctx.state` now round-trips through `/XTApps/<id>/state.xtsv` across Exit and reboot as on the device
+(`tests/test_lua_state.py`; `tests/test_aes.py` is the qtest known-answer suite). Open from it: the
+script time budget (a 2 s `on_draw` is cut short and leaves the app inert until Home) is unmeasured,
+and DMA-SHA through the same GDMA path is untested (no stock path seen using it yet).
 
 **Work is organised as squads: read §10 before starting anything.** Sessions 5–8 ran four to five agents in
 parallel with cost balancing (Fable for models and symbol-less firmware reading, Opus for C/Python work with

@@ -187,7 +187,7 @@ quit, request_refresh, save, screen, set_tick_rate, state, sys, system`. `invali
 | `ctx.display` | `full_refresh`, `defer_auto_full` |
 | `ctx.log` | `info`, `warn`, `error` — see the black-hole note below |
 | `ctx.system` | `set_as_lockscreen_app` |
-| `ctx.state` | an **empty table** on entry |
+| `ctx.state` | a table: empty on the first start, then what the last leave saved (§4c, Persistence) |
 
 **`ctx.sys` — twelve plain functions.** `has_key` / `has_bt_keyboard` / `has_bt_gamepad` are on
 `ctx.input`, not here.
@@ -329,14 +329,21 @@ guest time, not the device's.
 - **Refresh:** `ctx.invalidate()` → one `fast` refresh; `ctx.display:full_refresh()` → a `full` one
   (with `invalidate` in the same callback the two coalesce into one full refresh). There is nothing
   faster than `fast`.
-- **Persistence:** `ctx.save()` always returns `false` (a stub). `ctx.state` holds any Lua value in
-  memory but is empty after a reboot. Leaving the app (Home pad → Exit) with anything in `ctx.state`
-  **hangs the emulator** on the AES accelerator (not modelled): the firmware seems to encrypt the
-  state into `%s/%s/state.xtsv` on exit. **On the device it works** (2026-10-12, the gamebook):
-  leaving with the Home pad saves `ctx.state` and re-entering restores it; the exit is clean.
+- **Persistence:** `ctx.save()` always returns `false` (a stub) and is not needed: leaving the app
+  (Home pad → Exit) saves `ctx.state` — including what `on_leave` writes, not what `on_unload` writes —
+  encrypted into `/XTApps/<app_id>/state.xtsv` (magic `XTSV`, version 1, a 72-byte header, then the
+  ciphertext; 121 bytes for a three-key state), and the next start hands it back before `on_load`,
+  across a cold boot too. Nested tables, strings, booleans and floats survive; integers are 32-bit,
+  so `math.maxinteger` and the float `2^40` both come back as the integer 2147483647. The device
+  does the same (2026-10-12, the gamebook: re-entering restores it, the exit is clean). The emulator
+  hung on that exit until qemu-patches/0019 (the GDMA could not reach the PSRAM buffers ESP-IDF's
+  DMA-AES encrypts from; AES-256 in CTR mode with a 32-bit counter, i.e. GCM);
+  `tests/test_lua_state.py` exits, re-enters and reboots an app with state.
 - **Time budget:** the firmware carries "script callback exceeded time budget (watchdog)" and a new
-  `ctx.longtask` (`start`, `feed`, `stop`; 11 s per start or feed); a 2 s busy loop in `on_draw` hit
-  the same AES wait in the emulator, so the real budget is not measured.
+  `ctx.longtask` (`start`, `feed`, `stop`; 11 s per start or feed). A 2 s busy loop in `on_draw` is
+  cut short: the script never reaches the code after the loop, `ctx.state` is saved as on a leave,
+  and the app stops repainting and taking taps until the Home pad leaves it (emulator, 2026-10-12;
+  the exact budget is not measured and the device is not checked).
 
 `docs/gamebook.md` is the worked example built on these.
 
@@ -354,7 +361,7 @@ Shorter than it was — `apps/probe` (§7) answered the API shape, the `on_input
 - **Fonts.** `ctx.fonts:handle(name)` is nil for every built-in name, so a second text size is
   probably an app-supplied font pack; how a handle would then reach `g:text` (a fourth argument is
   accepted and ignored) is unknown.
-- **`ctx.save` and `ctx.state`.** `state` is an empty table on entry and `save` was not called.
+- **`ctx.save`** is a stub returning `false`; `ctx.state` is saved on leave and restored on start (§4c).
 - **`set_tick_rate` units**, and what the number `on_tick` receives means.
 - **`ctx.lock`** (`set_interval`, `flush_once`, `interval_sec = 30`, `reason = "idle"`) belongs to
   the lock-screen route, which is still blocked: `ctx.system.set_as_lockscreen_app()` raises the

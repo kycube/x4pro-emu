@@ -1,7 +1,7 @@
 From 0bd39a18b6e2da334f167e9ba073c03eb764e16b Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 18:22:48 -0500
-Subject: [PATCH 09/18] esp32s3.spi: count dummy cycles at the read mode's line
+Subject: [PATCH 09/20] esp32s3.spi: count dummy cycles at the read mode's line
  width
 
 USR_DUMMY_CYCLELEN holds cycles minus one, and in QIO/DIO modes the address
@@ -59,5 +59,5 @@ index 90250e7..87ce863 100644
  
  static void esp32s3_spi_begin_transaction(ESP32S3SpiState *s)
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 

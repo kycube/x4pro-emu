@@ -1,7 +1,7 @@
 From f53b65ab07212e849ce123c4c0508ac216e5a88a Mon Sep 17 00:00:00 2001
 From: x4pro-emu <kf1178@gmail.com>
 Date: Sun, 6 Sep 2026 14:22:59 -0500
-Subject: [PATCH 01/18] xteink-x4pro: machine subclass, USB Serial/JTAG console
+Subject: [PATCH 01/20] xteink-x4pro: machine subclass, USB Serial/JTAG console
  model, I/O access logger
 
 - hw/misc/esp32s3_usj.c: CDC half of the USB Serial/JTAG controller backed by a
@@ -547,5 +547,5 @@ index 0000000..a7e090c
 +    uint64_t flushes;
 +};
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 
