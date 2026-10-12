@@ -1111,3 +1111,29 @@ What moved since 2026-09-07, and what it means here:
   default branch, not the submodule pin, so a fresh clone without `--recurse-submodules` built whatever upstream
   was at (CI was safe: its checkout is `submodules: recursive`). The rule is now `git submodule update --init
   --recursive firmware`; checked on a fresh local clone (firmware at 7db14a01, freeink-sdk at cb9167d).
+
+**The 7.6.8 re-baseline (same day, one Opus 5.5 agent; the first attempt on Fable was stopped when the owner
+moved all squad work to Opus 5.5, its Ghidra analysis kept).** `tools/stockver.d/7.6.8.json` and
+`docs/stock-7.6.8.md`; the three code sites are 7.5.4's code byte for byte with only call displacements
+moved: dev stub 0x4234fb60, menu-slot predicate FUN_4235cc24 (gate A `b6 29 07` at 0x4235cc36, the
+`presenter+176` load `22 08 b0` at 0x4235cc3e); IROM app offset = VA - 0x41da0000. The string packs did change
+shape: the XTTM container went from version 9 to 10, packs carry **sixteen languages** (de, it, fr, es, pl, nl,
+sv, ga, pt, da, cs, el added) and **u32 offsets** (counts 17 groups, labels 291, toasts 925, now loadable), so
+`PackSpec` gained an optional `offset_width` (2 or 4, default 2) and `stockstrings.py` reads and writes either
+width; 7.2.4 and 7.5.4 output and patched images are byte-identical to before. Label ids 0..48 are unchanged,
+Bluetooth onward moved (`label_group_moves`). Emulator, redacted scratch copies: all three patches give Home,
+the 7-row menu, the app list with Hello Lua, the app drawing and counting taps, and the light panel with
+Memory / Developer / Screen Capture; a relabel past the u16 ceiling renders.
+
+**The finding that matters: the Lua route needs no patch on 7.5.4 or 7.6.8.** Unpatched, both show a
+**Mini Apps** row (between Cloud and Settings) as soon as `/sdcard/XTApps` holds an app, and run the unsigned
+hello app. The flag session 8 called "never written" is set by the menu presenter (7.6.8 FUN_4217db7c from
+an `/sdcard/XTApps` enumeration, FUN_421ed3b0; 7.5.4 FUN_4214bd3c / FUN_421b09e0) — session 8's control boot
+had a card without apps. `docs/stock-7.5.4.md` §4 and `docs/lua-apps.md` are corrected. So a Lua app on the
+owner's device is a card copy, with no firmware write. Coordinator checks: the three sites disassembled,
+both unpatched menu screenshots looked at, 50 fast tests passed; `make test` **132 passed, 1 failed** in
+10 min — `test_replay`'s first tap was read by the firmware in 0.03 s and drew nothing for 30 s, the input
+race of NEXT_PHASE §0 h (still open), in a CrossPoint test nothing here touches; it passed twice alone.
+Open: the firmware's own pack reader (the meaning of header byte 3 = 1); the new `.xtapp`
+install/decrypt/uninstall strings and a 64-app limit; `tests/golden/stock-lua-hello.png` (7.2.4-made) differs
+from 7.6.8's hello screen in its three text lines, so a 7.6.8 Lua test needs its own goldens.

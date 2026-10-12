@@ -106,6 +106,12 @@ reads the counts and label packs and refuses the toasts with a message naming th
   `presenter+140`; the 7.5.4 nav-menu opener (0x4214c040–0x4214c190) shows no such store or stub
   call, so the flag looks unreachable by data. Not chased: the patch makes it moot. No NVS route to
   enable Mini Apps was found in the time box.
+  **Corrected 2026-10-12 (`docs/stock-7.6.8.md` §2):** the flag is written, and that conclusion was
+  wrong. FUN_4214bd3c sets `presenter+176` to "an enumeration of `/sdcard/XTApps` finds an app"
+  (FUN_421b09e0) just before the builder runs, so an **unpatched 7.5.4 shows the Mini Apps row
+  whenever the card holds an app**; re-booted with `tests/data/hello-app` on the card, the six rows
+  include Mini Apps. The control boot in §3 had five rows because its card had no app.
+  `lua-apps-row` only forces the row for a card without apps.
 - The icon table, the `Display` method names, the layout constants, the meaning of the five `XTF0`
   hits: untouched (same open items as 7.2.4).
 - `tools/device.py` still targets app0 and assumes app0 boots; nothing here changes that.

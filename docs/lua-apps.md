@@ -11,6 +11,13 @@ firmware build, and without touching a single native code path.
 Everything below marked *confirmed* was seen running in the emulator (`tests/test_lua_apps.py`,
 which reproduces all of it from scratch). What is not confirmed is listed at the end, honestly.
 
+**2026-10-12: on 7.5.4 and 7.6.8 no patch is needed.** Both show a **"Mini Apps"** row by themselves
+as soon as `/sdcard/XTApps` holds an app (the menu presenter enumerates the directory and sets the
+flag the row tests), and both list and run an unsigned app (`docs/stock-7.6.8.md`). So on the
+device as it ships today, a Lua app is a card copy and nothing else: no firmware write. The patch
+below is what 7.2.4 needs (its flag was not re-examined) and what forces the row on a card with no
+apps.
+
 ## The three pieces
 
 | piece | what it is | tool |
@@ -372,7 +379,8 @@ in plain sight, so retuning one is editing numbers. Both carry the same two work
 at the top of each file: `fill()` stacks `g:line` because the host has no filled shape, and the big
 clock is seven-segment digits made of those fills because there is only one text size.
 
-**Installing one on the card** (the app image must already carry the `lua-apps-row` patch, §1):
+**Installing one on the card** (on 7.2.4 the app image must carry the `lua-apps-row` patch, §1;
+7.5.4 and 7.6.8 show the Mini Apps row by themselves once an app is on the card):
 
 ```
 .venv/bin/python tools/xtapp.py install /path/to/sd.img apps/status-typographic
