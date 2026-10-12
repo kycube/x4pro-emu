@@ -429,26 +429,31 @@ APB_SARADC DMA mode, RMT, I2S, touch sensor pads, ULP.
 
 ## 10. How the work is run from here: squads
 
-The owner's instruction (session 4): the session runs on Fable 5.1 as the **coordinator** and forms
-**squads** of agents per milestone, delegating to lower models where the coordinator deems it
-appropriate. Session 4 ran the first squad (CI, packaging, brightness) this way; the protocol below is
-what worked, and the remaining plan is cut into squads in the order to run them.
+The session's **coordinator** forms **squads** of agents per milestone. Session 4 ran the first squad
+(CI, packaging, brightness) this way; the protocol below is what worked, and the remaining plan is cut
+into squads in the order to run them.
 
 ### 10.1 Model tiers (who does what)
 
-- **Coordinator, Fable 5.1 (this session).** Reads `CLAUDE.md`, §0 and the last `docs/log.md` entry,
-  picks the next squad, writes each agent's brief, reviews every diff, runs the final `make test`,
-  writes the log entry and updates this file and `CLAUDE.md`. Keeps for itself, or gives to a Fable
-  subagent: anything that reads the stock app without symbols (`.xic`, the GT911 key byte, the PLL
-  flag, any "spins forever"), any new peripheral model whose behaviour must be inferred (APB_SARADC
-  DMA, RMT, I2S, USB OTG), Espressif-model bugs, waveform grayscale, the debug-console protocol and
-  parity-harness design, and any task whose acceptance test does not yet exist.
-- **Opus 5 agents.** Well-specified work with a mechanical acceptance check: CI iteration, packaging
-  and CLI features (`record/replay`, `watch`, `shell`, JSON shapes), tests and goldens for behaviour the
-  coordinator has already seen, UI hunts with a coordinate map, `nvsedit` features, stored-value
-  register overlays (RTC IO), timing tables from device logs, docs pages, upstream patch preparation.
-  Session 4 evidence: three Opus agents delivered CI, the package with `--json` (16/16 after the
-  switch) and the brightness search in parallel, each within its brief.
+**The owner's decision, 2026-10-12: Opus 5.5 does all of it.** Sessions 4–8 ran Fable 5.1 as coordinator
+and for the symbol-less reading and new models, with Opus 5 for well-specified work; that split was
+made before Opus 5.5 existed. Opus 5.5 is the stronger agentic model of the two at a much lower price,
+so it now takes every role below. Where an older plan line in this file says "Fable" for a task, read
+it as "the Opus 5.5 agent that does the firmware reading". Use Fable 5.1 only when the owner asks for it.
+
+- **Coordinator (Opus 5.5).** Reads `CLAUDE.md`, §0 and the last `docs/log.md` entry, picks the next
+  squad, writes each agent's brief, reviews every diff, runs the final `make test`, writes the log entry
+  and updates this file and `CLAUDE.md`.
+- **Agents (Opus 5.5)**, one brief per disjoint piece of work. The briefs differ by kind, not by model:
+  *reading and modelling* work (the stock app without symbols — `.xic`, the GT911 key byte, the PLL
+  flag, any "spins forever"; new peripheral models whose behaviour must be inferred — APB_SARADC DMA,
+  RMT, I2S, USB OTG; Espressif-model bugs; waveform grayscale; protocol and harness design; any task
+  whose acceptance test does not yet exist) gets a time box and "a finding is not a failure";
+  *well-specified* work (CI, packaging and CLI features, tests and goldens for behaviour already seen,
+  UI hunts with a coordinate map, `nvsedit` features, register overlays, timing tables, docs pages,
+  upstream patch preparation) gets a mechanical acceptance check. Session 4 evidence for the second
+  kind: three Opus agents delivered CI, the package with `--json` and the brightness search in
+  parallel, each within its brief.
 - **Sonnet / Haiku.** Not for model or firmware work in this repository; at most doc reformatting.
 
 ### 10.2 Protocol (what made the first squad work)
