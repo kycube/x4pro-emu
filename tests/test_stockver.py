@@ -261,3 +261,84 @@ def test_the_ota_image_is_handled_or_refused_but_never_guessed():
     for name, p in ver.patches.items():                  # its own sites, not 7.2.4's
         assert p.state(data, base) in ('original', 'applied'), \
             f'7.5.4 {name} at {p.app_offset:#x} holds neither of its byte strings'
+
+
+# ---------------------------------------------------------------- 7.6.8 (the OTA of 2026-10)
+APP768 = os.path.join(ROOT, 'images', 'device', 'stock-app0-7.6.8.bin')
+
+# 7.6.8's numbers, spelled out like V724 so a silent edit of tools/stockver.d/7.6.8.json fails here
+V768 = {
+    'app_elf_sha256': 'd3caaddfb175124e964933f2c69ce50be4285e37fd6ef311c03cf5f2eec24833',
+    'app_bytes': 6250640,
+    'dev_stub': (0x5afb60, '36 41 00 0c 02 1d f0', 4, 0x02, 0x12),
+    'patches': {'developer-menu':   (0x5afb60, '36 41 00 0c 02 1d f0', '36 41 00 0c 12 1d f0'),
+                'hidden-menu-rows': (0x5bcc36, 'b6 29 07', 'b6 29 ff'),
+                'lua-apps-row':     (0x5bcc3e, '22 08 b0', '22 a0 01')},
+    # (groups, limit_va, header_va, offset_width)
+    'packs': {'counts': (17, 0x3c431884, 0x3c430990, 4), 'labels': (291, 0x3c44ad88, 0x3c431884, 4),
+              'toasts': (925, 0x3c54f463, None, 4)},
+    'lang_count': 16,
+}
+
+
+def test_offset_width_is_optional_and_checked():
+    """`offset_width` (7.6.8's u32 packs) defaults to 2, so the 7.2.4 / 7.5.4 files mean what they
+    always meant; anything but 2 or 4 is refused naming the pack."""
+    doc = {'project': 'xteink_app', 'version': '9.9.9', 'app_elf_sha256': '00' * 32,
+           'packs': {'labels': {'groups': 3, 'limit_va': '0x100', 'header_va': '0x10'},
+                     'wide': {'groups': 3, 'limit_va': '0x100', 'header_va': '0x10',
+                              'offset_width': 4}}}
+    ver = stockver.parse(doc, os.path.join(stockver.DIR, '9.9.9.json'))
+    assert ver.packs['labels'].offset_width == 2 and ver.packs['wide'].offset_width == 4
+    for v in stockver.versions():
+        if v.version in ('7.2.4', '7.5.4'):
+            assert {s.offset_width for s in v.packs.values()} == {2}, v.label
+    doc['packs']['wide']['offset_width'] = 3
+    with pytest.raises(stockver.StockVerError, match='packs.wide: offset_width 3'):
+        stockver.parse(doc, os.path.join(stockver.DIR, '9.9.9.json'))
+
+
+def test_the_7_6_8_ota_image_is_identified_with_its_own_sites():
+    """The device took a second OTA, to 7.6.8 (app0, booting). Its file must select it, every site
+    must hold its original bytes at 7.6.8's own offsets, apply + revert must round-trip byte for
+    byte, and the three u32 / 16-language packs must parse to the label ids the file names."""
+    if not os.path.exists(APP768):
+        pytest.skip('images/device/stock-app0-7.6.8.bin not available')
+    import stockstrings                                                        # noqa: E402
+    data = bytearray(open(APP768, 'rb').read())
+    base, ver = stockver.identify(data)
+    assert (base, ver.version, os.path.basename(ver.path)) == (0, '7.6.8', '7.6.8.json')
+    assert ver.app_elf_sha256 == V768['app_elf_sha256'] == stockver.app_desc(data)['elf_sha256']
+    assert ver.app_bytes == V768['app_bytes'] == len(data)
+
+    stub = ver.need_dev_stub()
+    assert (stub.app_offset, stub.stub.hex(' '), stub.movi_index, stub.unpatched, stub.patched) \
+        == V768['dev_stub']
+    assert data[stub.app_offset:stub.app_offset + stub.size] == stub.stub
+    assert set(ver.patches) == set(V768['patches'])
+    for name, (off, before, after) in V768['patches'].items():
+        p = ver.need_patch(name)
+        assert (p.app_offset, p.original.hex(' '), p.patched.hex(' ')) == (off, before, after), name
+        assert p.state(data, base) == 'original', f'7.6.8 {name} at {off:#x}'
+    patched, _ = stockpatch.apply(bytes(data), ['all'])
+    assert stockver.identify(bytearray(patched))[1].version == '7.6.8'
+    assert all(p.state(patched, 0) == 'applied' for p in ver.patches.values())
+    assert stockpatch.revert(patched, ['all'])[0] == bytes(data), 'revert restores byte for byte'
+
+    assert ver.need_lang_count() == V768['lang_count']
+    assert set(ver.packs) == set(V768['packs'])
+    for name, (groups, limit, header, width) in V768['packs'].items():
+        s = ver.need_pack(name)
+        assert (s.groups, s.limit_va, s.header_va, s.offset_width) == (groups, limit, header, width)
+        p = stockstrings.parse_pack(data, base, name)
+        assert (p.groups, p.lang_count, p.width) == (groups, 16, 4), name
+    labels = stockstrings.parse_pack(data, base, 'labels')
+    for g, en in ver.known_groups.items():
+        assert labels.group_strings(g)[1] == en, f'label {g}'
+    assert labels.group_strings(0)[4] == 'Bücherregal' and labels.group_strings(0)[15] == 'Βιβλιοθήκη'
+
+    flash = bytearray(b'\xff' * stockdev.FLASH_SIZE)                 # 7.6.8 sits in app0
+    flash[0x10000:0x10000 + len(data)] = data
+    fbase, fver = stockver.identify(flash)
+    assert (fbase, fver.version) == (0x10000, '7.6.8')
+    assert all(p.state(flash, fbase) == 'original' for p in fver.patches.values())

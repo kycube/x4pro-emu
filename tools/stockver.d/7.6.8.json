@@ -1,0 +1,112 @@
+{
+  "project": "xteink_app",
+  "version": "7.6.8",
+  "app_elf_sha256": "d3caaddfb175124e964933f2c69ce50be4285e37fd6ef311c03cf5f2eec24833",
+  "app_sha256": "f68533a8c55c55144303605e6497a0178215d477ec2642375814e00612afe087",
+  "app_bytes": 6250640,
+  "built": "19:00:34 Sep 22 2026",
+  "idf": "v6.0.1",
+  "source": "images/device/stock-app0-7.6.8.bin",
+  "note": "The OTA the device took before 2026-10-12: app0 (flash 0x10000) of images/device/flash-2026-10-12-a.bin, booting; app1 still holds 7.5.4. Segments moved again: DROM loads at 0x3c380020 (0x2594f0 bytes, +513 KB over 7.5.4; DROM file offset = VA - 0x3c380000), IROM at 0x42000020 with 0x37f324 bytes (+273 KB) at file 0x260020, so app file offset = VA - 0x41da0000 for IROM. The three code sites kept their 7.5.4 shape byte for byte (only call displacements differ around them) and were found by those shapes (session of 2026-10-12, docs/stock-7.6.8.md). The string packs changed format: 16 languages and u32 offsets (offset_width 4). Emulator: the unpatched image shows a 'Mini Apps' row by itself when /sdcard/XTApps holds an app and runs the unsigned hello app (so does an unpatched 7.5.4, re-checked the same day); with all three patches: Home, the nav menu with seven visible rows (Read / Preload List / Statistics / All Files / USB / Cloud / Mini Apps; Settings, the eighth entry, below the panel edge as in 7.5.4), the app list running the hello app, and the light panel's Memory / Developer / Screen Capture / BGIO.",
+
+  "dev_stub": {
+    "app_offset": "0x5afb60",
+    "va": "0x4234fb60",
+    "stub": "36 41 00 0c 02 1d f0",
+    "movi_index": 4,
+    "unpatched": "0x02",
+    "patched": "0x12",
+    "evidence": "Found through its reader: the 20-byte wrapper shape of 7.5.4's FUN_4214ab34 (entry / l32i a8,a2,88 / l32i a10,a8,176 / l32r / callx8 / s8i a10,a2,32 / retw.n) occurs exactly once in 7.6.8 IROM, as FUN_4217c978 at file 0x3dc978, identical to 7.5.4's except the two l32r displacement bytes. Its l32r literal (0x42146fb4) holds 0x4234fb60, a 7-byte compile-time stub (entry a1,32 / movi.n a2,0 / retw.n) whose only reference besides that literal is the wrapper's callx8 (ghidra_stock.py callers/xrefs), in a cluster of 5..9-byte stubs at 0x4234fb34..0x4234fb60 (7.5.4: 0x4230dad4). The wrapper's single caller FUN_4217d0f0 is 335 bytes like 7.5.4's light-panel opener FUN_4214b2b4, with the same eight callees (memcpy, five neighbouring widget helpers, two distant ones) and 19 of 335 bytes different, all call/l32r displacements."
+  },
+
+  "patches": {
+    "developer-menu": {
+      "app_offset": "0x5afb60",
+      "va": "0x4234fb60",
+      "original": "36 41 00 0c 02 1d f0",
+      "patched": "36 41 00 0c 12 1d f0",
+      "description": "developer mode: Memory / Developer / Screen Capture in the light panel",
+      "detail": "movi.n a2,0 -> movi.n a2,1 in the developer-mode predicate stub (byte +4)",
+      "docs": "docs/xic.md; docs/stock-7.6.8.md",
+      "evidence": "Same site as dev_stub. tools/appdis.py at 0x4234fb60 shows entry a1,32 / movi.n a2,0 / retw.n, the instruction 7.5.4 has at 0x4230dad4 and 7.2.4 at 0x4233abe0. Emulator: the light panel shows Memory / Developer / Screen Capture."
+    },
+    "hidden-menu-rows": {
+      "app_offset": "0x5bcc36",
+      "va": "0x4235cc36",
+      "original": "b6 29 07",
+      "patched": "b6 29 ff",
+      "description": "nav menu: unhide the Preload List and Statistics rows (gate A)",
+      "detail": "bltui a9,2,+7 -> bltui a9,2,+255 in the menu-slot predicate at VA 0x4235cc24: slots 1 and 2 stop being skipped",
+      "docs": "docs/stock-firmware.md, \"Probed in session 7\"; docs/stock-7.6.8.md",
+      "evidence": "7.5.4's 31-byte menu-slot predicate (FUN_42319508) occurs byte for byte exactly once in 7.6.8, as FUN_4235cc24 at file 0x5bcc24, including its last load l8ui a2,a8,176. Its single caller is the 84-byte nav-menu builder FUN_4217db28 (4 of 84 bytes differ from 7.5.4's FUN_4214bce8, all call displacements), which reads the unchanged order table 00 01 02 04 05 06 03 07 at DROM 0x3c3e9940; the code that calls the builder (0x4217df5f) reads the unchanged slot -> page-id table 02 1c 16 09 0b 0a 0d 01 at 0x3c3e9948 (0x4217df28). The bltui a9,2,+7 sits at +0x12 = 0x4235cc36. Emulator: the menu grows by Preload List and Statistics."
+    },
+    "lua-apps-row": {
+      "app_offset": "0x5bcc3e",
+      "va": "0x4235cc3e",
+      "original": "22 08 b0",
+      "patched": "22 a0 01",
+      "description": "nav menu: a \"Mini Apps\" row that opens the Lua app list (page 0x09), also when the card has no app",
+      "detail": "l8ui a2,a8,176 -> movi a2,1 in the menu-slot predicate: slot 3 is always shown",
+      "docs": "docs/lua-apps.md; docs/stock-7.6.8.md",
+      "evidence": "The same load as 7.5.4's lua-apps-row, 8 bytes after gate A in the byte-identical predicate FUN_4235cc24: slot 3 is shown when the byte at presenter+176 is non-zero. The firmware writes that flag itself, each time the menu opens: FUN_4217db7c (67 bytes, called from the opener at 0x4217df58 right before the builder call at 0x4217df5f) stores presenter+176 = (FUN_421ed3b0(presenter+172, ..., 0, 1) != 0), an enumeration of /sdcard/XTApps (string 0x3c3c1158) that stops at the first app. 7.5.4 has the same pair (FUN_4214bd3c, FUN_421b09e0). Unpatched boots: five menu rows with no app on the card, a sixth 'Mini Apps' row with tests/data/hello-app installed (an unpatched 7.5.4 with the same card shows the row too), so this patch only matters for a card without apps, where the row opens an empty 'No apps available' list. Emulator with all three patches: 'Mini Apps' after Cloud, entering the app list (label group 11 'Extensions'), which lists and runs the unsigned hello app."
+    }
+  },
+
+  "packs": {
+    "counts": {
+      "groups": 17,
+      "limit_va": "0x3c431884",
+      "header_va": "0x3c430990",
+      "offset_width": 4,
+      "what": "count formats (%d books, %d/%d)",
+      "evidence": "The 7.5.4 header shape no longer occurs (lang_count is 16 and the offsets are u32). Found as the second entry (offset 0x7c, size 0xef2) of the XTTM resource container at DROM 0x3c430914 (the 7.5.4 container is at 0x3c3e6d64 with the counts at its same +0x7c), then validated: header at file 0xb0990 = u16 17, u8 16, u8 1, lang ids 0..15, u32 blob_size 2714, 17 x 16 u32 offsets, blob at 0x3c430de8 ending at 0x3c431882; 24 + 1088 + 2714 = 3826 = the directory's size; every offset is 0 or the start of a NUL-terminated string. Two zero bytes follow, then the label header. Content: 7.5.4's 18 groups minus '%d fonts' (7.5.4 group 2)."
+    },
+    "labels": {
+      "groups": 291,
+      "limit_va": "0x3c44ad88",
+      "header_va": "0x3c431884",
+      "offset_width": 4,
+      "what": "every menu / settings / panel label",
+      "evidence": "Third entry of the XTTM container (offset 0xf70, size 0x19504); header at file 0xb1884 = u16 291, u8 16, u8 1, lang ids 0..15, u32 blob_size 85,036, 291 x 16 u32 offsets, blob at 0x3c43615c ending at 0x3c44ad88; 24 + 18,624 + 85,036 = 103,684 = 0x19504. The container's next entry (the bitmap directory, 30 00 00 00 2c 00 00 00 ...) starts at 0x3c44ad88, the limit. Group 0 = 书架 / Bookshelf / 書架 / 本棚 / Bücherregal / ... / Βιβλιοθήκη. difflib over the first four languages: 267 of 7.5.4's 269 groups align 1:1; ids up to 48 are unchanged, 50 and up moved (see label_group_moves and docs/stock-7.6.8.md)."
+    },
+    "toasts": {
+      "groups": 925,
+      "limit_va": "0x3c54f463",
+      "offsets_va": "0x3c4e7f80",
+      "blob_va": "0x3c4f66c0",
+      "blob_size": 363939,
+      "offset_width": 4,
+      "what": "toasts, dialogs, buttons (headerless)",
+      "evidence": "The 7.2.4 blob head (NUL, 取消, Cancel, キャンセル, then Abbrechen, Annulla ...) is at DROM 0x3c4f66c0 (file 0x1766c0); walking back in 64-byte steps (16 languages x u32) while every word is 0 or a string start gives 925 groups from 0x3c4e7f80 (925 x 64 = 0xe740 bytes, ending exactly at the blob), preceded by a table of IROM function pointers as in 7.5.4. The highest offset is 0x58d92 and the last string ends at 0x3c54f462; the ordinary string table's user_config begins at 0x3c54f463, the limit. Group 0 = Cancel, 3 = 'Region set successfully', 913..924 = the language names Deutsch .. Ελληνικά in lang-id order 4..15."
+    }
+  },
+  "lang_count": 16,
+  "known_groups": {
+    "0": "Bookshelf",
+    "9": "Read",
+    "11": "Extensions",
+    "12": "Mini Apps",
+    "13": "All Files",
+    "14": "USB",
+    "16": "Settings",
+    "61": "Bluetooth",
+    "75": "Developer",
+    "76": "Memory",
+    "78": "Boost",
+    "79": "Full Refresh",
+    "80": "Light",
+    "82": "Screen Capture",
+    "83": "Sleep Lock",
+    "109": "Language",
+    "160": "Cloud",
+    "192": "Upgrade",
+    "193": "Device information",
+    "215": "System Font"
+  },
+
+  "label_group_moves": {
+    "what": "7.5.4 label id -> 7.6.8 label id for the groups stockstrings.py names (difflib alignment of the zh-CN / en / zh-TW / ja tuples; no renames among them). 267 of 269 groups align 1:1. 7.5.4's 'Font' (49) is replaced by seven font-picker groups 49..55 ('All', 'No fonts available', ... 'Size'), two groups are inserted at 148..149 ('Vertically Center Text', ...), 'Get Fonts' (211) is replaced by ten font-download groups 219..228, 'Open App' / 'Uninstall App' are inserted at 250..251 and 'TTF' / 'XTF' / 'BIN' at 269..271",
+    "9": 9, "11": 11, "12": 12, "13": 13, "14": 14, "16": 16, "55": 61, "69": 75, "70": 76, "72": 78,
+    "73": 79, "74": 80, "76": 82, "77": 83, "103": 109, "152": 160, "184": 192, "185": 193, "207": 215
+  }
+}

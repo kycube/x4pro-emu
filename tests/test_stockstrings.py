@@ -234,6 +234,38 @@ def test_works_on_a_16mb_flash_image(tmp_path):
     assert open(flash, 'rb').read() == open(DUMP, 'rb').read()
 
 
+def test_7_6_8_wide_packs_read_and_write(tmp_path):
+    """Stock 7.6.8's packs are 16 languages with u32 offsets (`offset_width` 4 in its version
+    file): the same list / in-place / compact / appended / restore paths, with an appended offset
+    past the u16 ceiling to prove the offsets are written as u32. (Boot-checked once by hand: the
+    nav menu then reads "Files" and "Transfer", docs/stock-7.6.8.md.)"""
+    src = os.path.join(ROOT, 'images', 'device', 'stock-app0-7.6.8.bin')
+    if not os.path.exists(src):
+        pytest.skip('images/device/stock-app0-7.6.8.bin not available')
+    app = tmp_path / 'app768.bin'
+    shutil.copyfile(src, app)
+    out = run(app, 'list', '--lang', 'de')
+    assert '291 groups x 16 languages (zh-CN, en, zh-TW, ja, de, it, fr, es, pl, nl, sv, ga, pt, ' \
+           'da, cs, el)' in out and 'free tail 0 bytes' in out
+    assert '     0  Bücherregal  [Bookshelf]' in out
+    assert '17 groups x 16 languages' in run(app, 'list', '--pack', 'counts')
+    assert '925 groups x 16 languages' in run(app, 'list', '--pack', 'toasts', '--lang', 'el')
+    assert 'Βιβλιοθήκη' in run(app, 'get', '0', '--lang', '15')
+
+    assert '(in-place' in run(app, 'set', '13', 'en', 'Files')
+    assert "free tail is 0 byte(s)" in run(app, 'set', '14', 'en', 'Transfer', rc=2)
+    assert 'compacted' in run(app, 'compact', '--pack', 'labels')
+    out = run(app, 'set', '14', 'en', 'Transfer')
+    assert '(appended' in out and 'INVALID' not in out
+    p = packs(app)
+    assert p.width == 4 and p.offsets[14 * 16 + 1] > stockstrings.U16_MAX
+    assert p.group_strings(13)[1] == 'Files' and p.group_strings(14)[1] == 'Transfer'
+    assert p.group_strings(14)[4] == 'USB', 'the shared string stays for the other languages'
+    assert esptool_ok(app) == (True, True)
+    run(app, 'restore', '--from', src)
+    assert open(app, 'rb').read() == open(src, 'rb').read(), 'restore is not byte-exact'
+
+
 # ---------------------------------------------------------------- the emulator half
 @pytest.fixture
 def relabelled(tmp_path, request, stock_card):                                  # noqa: F811

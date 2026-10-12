@@ -84,6 +84,12 @@ THE SCHEMA (`tools/stockver.d/<version>.json`, one file per version -- this docs
     is followed by the offset table) or **headerless** (`offsets_va` + `blob_va` + `blob_size`).
     `limit_va` is the first VA after the pack that holds live data -- the free tail never reaches it.
 
+    `"offset_width": 4` (optional, default 2) says the pack's offsets -- and, when headed, its
+    blob_size -- are u32 instead of u16. Stock 7.6.8 (16 languages) needs it; its headed packs are
+        u16 group_count; u8 lang_count; u8 1; u8 lang_ids[lang_count]; u32 blob_size;
+        u32 offsets[group_count][lang_count]; char blob[blob_size];
+    where 7.2.4 / 7.5.4 (width 2) have u16 lang_count, lang_ids[4], u16 blob_size, u16 offsets.
+
 THE API THE THREE TOOLS USE
     identify(data, base=None) -> (base, Version)   the whole check: app_base, esp_app_desc, the
                                                    version file, the ELF hash. Raises UnknownVersion
@@ -270,6 +276,7 @@ class PackSpec:
     blob_size: Optional[int] = None
     what: str = ''
     evidence: str = ''
+    offset_width: int = 2                # bytes per offset (and per header blob_size): 2 or 4
 
 
 @dataclass(frozen=True)
@@ -404,7 +411,10 @@ def parse(doc, path='<memory>') -> Version:
                         else _int(d['blob_va'], f'{w}.blob_va'),
                         blob_size=None if d.get('blob_size') is None
                         else _int(d['blob_size'], f'{w}.blob_size'),
-                        what=_text(d, 'what', w), evidence=_text(d, 'evidence', w))
+                        what=_text(d, 'what', w), evidence=_text(d, 'evidence', w),
+                        offset_width=_int(d.get('offset_width', 2), f'{w}.offset_width'))
+        if spec.offset_width not in (2, 4):
+            _err(w, f'offset_width {spec.offset_width} must be 2 (u16) or 4 (u32)')
         if spec.groups <= 0:
             _err(w, f'groups {spec.groups} must be positive')
         if spec.header_va is None and (spec.offsets_va is None or spec.blob_va is None
@@ -629,7 +639,8 @@ def _describe(v, data=None):
                  f'byte +{stub.movi_index} {stub.unpatched:#04x} -> {stub.patched:#04x}'
                  if stub else '  dev_stub     -- not located in this version')
     lines.append(f'  patches      {", ".join(v.patches) if v.patches else "-- none located"}')
-    lines.append(f'  packs        ' + (', '.join(f'{n} ({p.groups} groups)'
+    lines.append(f'  packs        ' + (', '.join(f'{n} ({p.groups} groups'
+                                                 f'{", u32 offsets" if p.offset_width == 4 else ""})'
                                                  for n, p in v.packs.items())
                                        if v.packs else '-- none located'))
     lines.append(f'  lang_count   {v.lang_count if v.lang_count is not None else "-- not located"}'

@@ -25,6 +25,12 @@ THE PACK FORMAT (docs/stock-firmware.md §6)
     936 slots use 752 distinct offsets), so overwriting a string in place changes **every** slot that
     points at it -- see `set` below.
 
+    **Stock 7.6.8 widened the packs** (`"offset_width": 4` in its version file): sixteen languages
+    (zh-CN, en, zh-TW, ja, de, it, fr, es, pl, nl, sv, ga, pt, da, cs, el) and u32 offsets, so a
+    headed pack reads `u16 group_count; u8 lang_count = 16; u8 1; u8 lang_ids[16]; u32 blob_size;
+    u32 offsets[group_count][16]`, and the headerless toast table is u32 per slot. Everything below
+    -- in place, appended, compact, restore -- works the same on either width (docs/stock-7.6.8.md).
+
     **Where the packs are is per version** (`tools/stockver.py`): the numbers below live in
     `tools/stockver.d/<version>.json` (`packs`, `lang_count`, `known_groups`), one file per stock
     version, and an image picks its own by what its `esp_app_desc` says (project + version, with
@@ -106,8 +112,13 @@ from stockver import PackSpec                                                   
 from stockdev import (app_base, image_layout, refresh_image, verify_image,      # noqa: E402
                       StockDevError)
 
-LANG_NAMES = ('zh-CN', 'en', 'zh-TW', 'ja')     # lang_ids 0..3, in the packs' own order
+# lang_ids in the packs' own order: 7.2.4 / 7.5.4 carry the first four, 7.6.8 all sixteen (the
+# order of its toast pack's language-name groups 913..924: Deutsch, Italiano, Français, ...)
+LANG_NAMES = ('zh-CN', 'en', 'zh-TW', 'ja', 'de', 'it', 'fr', 'es', 'pl', 'nl', 'sv', 'ga', 'pt',
+              'da', 'cs', 'el')
 U16_MAX = 0xFFFF
+OFFSET_MAX = {2: U16_MAX, 4: 0xFFFFFFFF}         # by PackSpec.offset_width
+OFFSET_FMT = {2: 'H', 4: 'I'}
 
 
 class StockStringsError(ValueError):
@@ -176,24 +187,37 @@ class Pack:
         lc, label = self.lang_count, ver.label
         segs = segment_map(data, base)
         self.segs = segs
+        self.width = spec.offset_width                      # 2: u16 offsets (7.2.4, 7.5.4), 4: u32
+        self.fmt, self.off_max = OFFSET_FMT[self.width], OFFSET_MAX[self.width]
         if spec.header_va is not None:
             self.header_off = va_to_file(segs, spec.header_va, f'{spec.name} pack header', label)
-            groups, langs = struct.unpack_from('<HH', data, self.header_off)
-            ids = bytes(data[self.header_off + 4:self.header_off + 8])
-            self.blob_size = struct.unpack_from('<H', data, self.header_off + 8)[0]
-            if langs != lc or ids[:lc] != bytes(range(lc)) or groups != spec.groups:
+            if self.width == 2:
+                groups, langs = struct.unpack_from('<HH', data, self.header_off)
+                ids = bytes(data[self.header_off + 4:self.header_off + 8])
+                self.size_off, wide = self.header_off + 8, None
+            else:          # 7.6.8: u16 groups, u8 lang_count, u8 1, lang_ids[lang_count], u32 size
+                groups, langs, wide = struct.unpack_from('<HBB', data, self.header_off)
+                ids = bytes(data[self.header_off + 4:self.header_off + 4 + langs])
+                self.size_off = self.header_off + 4 + langs
+            self.blob_size = struct.unpack_from('<' + self.fmt, data, self.size_off)[0]
+            if (langs != lc or ids[:lc] != bytes(range(lc)) or groups != spec.groups
+                    or wide not in (None, 1)):
                 raise StockStringsError(
                     f'the {spec.name} pack at {spec.header_va:#x} reads group_count={groups} '
-                    f'lang_count={langs} lang_ids={list(ids)}, expected {spec.groups}, '
-                    f'{lc}, {list(range(lc))}: this is not stock {label} as {ver.file} '
+                    f'lang_count={langs} lang_ids={list(ids)}'
+                    + ('' if wide is None else f' header byte 3={wide}') +
+                    f', expected {spec.groups}, '
+                    f'{lc}, {list(range(lc))}' + ('' if wide is None else ', 1') +
+                    f': this is not stock {label} as {ver.file} '
                     f'describes it')
             self.groups = groups
-            self.offsets_off = self.header_off + 10
+            self.offsets_off = self.size_off + self.width
         else:
             self.header_off = None
             self.groups, self.blob_size = spec.groups, spec.blob_size
             self.offsets_off = va_to_file(segs, spec.offsets_va, f'{spec.name} pack offsets', label)
-        self.blob_off = (self.offsets_off + self.groups * lc * 2 if spec.header_va is not None
+        self.blob_off = (self.offsets_off + self.groups * lc * self.width
+                         if spec.header_va is not None
                          else va_to_file(segs, spec.blob_va, f'{spec.name} pack blob', label))
         self.start_off = self.header_off if self.header_off is not None else self.offsets_off
         self.limit_off = va_to_file(segs, spec.limit_va, f'{spec.name} pack limit', label)
@@ -203,8 +227,8 @@ class Pack:
     def reload(self):
         d, n = self.data, self.groups * self.lang_count
         if self.header_off is not None:
-            self.blob_size = struct.unpack_from('<H', d, self.header_off + 8)[0]
-        self.offsets = list(struct.unpack_from(f'<{n}H', d, self.offsets_off))
+            self.blob_size = struct.unpack_from('<' + self.fmt, d, self.size_off)[0]
+        self.offsets = list(struct.unpack_from(f'<{n}{self.fmt}', d, self.offsets_off))
         if self.blob_off + self.blob_size > self.limit_off:
             raise StockStringsError(f'the {self.spec.name} blob ({self.blob_size} bytes at '
                                     f'{self.blob_off:#x}) runs into the data at '
@@ -265,12 +289,12 @@ class Pack:
                                     f'at {self.spec.limit_va:#x}')
         self.data[self.blob_off:self.blob_off + len(blob)] = blob
         if self.header_off is not None:
-            struct.pack_into('<H', self.data, self.header_off + 8, size)
+            struct.pack_into('<' + self.fmt, self.data, self.size_off, size)
         elif size != self.blob_size:
             raise StockStringsError(f'{self.spec.name} has no blob_size field: its blob cannot grow')
 
     def write_offsets(self, offsets):
-        struct.pack_into(f'<{len(offsets)}H', self.data, self.offsets_off, *offsets)
+        struct.pack_into(f'<{len(offsets)}{self.fmt}', self.data, self.offsets_off, *offsets)
 
 
 def open_image(path):
@@ -358,9 +382,9 @@ def set_string(data, base, name, group, lang, text, append=False, shared=False):
                 (f', or overwrite all {len(others) + 1} slots that share the string with --shared'
                  if others and len(new) <= old_len else ''))
         off = p.free_start
-        if off > U16_MAX:
-            raise StockStringsError(f'{name}: the free tail starts at offset {off}, past the u16 '
-                                    f'ceiling {U16_MAX}')
+        if off > p.off_max:
+            raise StockStringsError(f'{name}: the free tail starts at offset {off}, past the '
+                                    f'u{8 * p.width} ceiling {p.off_max}')
         blob = bytearray(p.blob) + bytes(p.pad)
         blob[off:off + need] = new + b'\0'
         size = max(p.blob_size, off + need)
@@ -407,8 +431,8 @@ def compact_pack(data, base, name):
     if len(blob) > p.blob_size:
         raise StockStringsError(f'{name}: the repacked blob is {len(blob)} bytes, larger than the '
                                 f'{p.blob_size} it has to fit in')
-    if len(blob) - 1 > U16_MAX:
-        raise StockStringsError(f'{name}: the repacked blob does not fit u16 offsets')
+    if len(blob) - 1 > p.off_max:
+        raise StockStringsError(f'{name}: the repacked blob does not fit u{8 * p.width} offsets')
     offsets = [placed[strings[o]] if o else 0 for o in p.offsets]
     was = [p.string(o) for o in p.offsets]
     p.write_blob(bytes(blob) + b'\0' * (p.blob_size - len(blob)), p.blob_size)
@@ -488,7 +512,8 @@ def main(argv=None):
         return p
 
     lp = add_pack(sub.add_parser('list', help='print every group of a pack'), PACK_NAMES + ('all',))
-    lp.add_argument('--lang', help='print only this language (zh-CN, en, zh-TW, ja or 0..3)')
+    lp.add_argument('--lang', help='print only this language (zh-CN, en, zh-TW, ja or 0..3; '
+                    '7.6.8 adds de, it, fr, es, pl, nl, sv, ga, pt, da, cs, el: 0..15)')
     lp.add_argument('--grep', help='only groups where some language contains this text (case-insensitive)')
 
     gp = add_pack(sub.add_parser('get', help='print one group'))
@@ -520,9 +545,9 @@ def main(argv=None):
         packs = tuple(ver.packs) if getattr(a, 'pack', None) == 'all' else (a.pack,)
 
         if a.cmd == 'list':
-            lang = lang_index(a.lang) if a.lang else None
             for name in packs:
                 p = parse_pack(data, base, name)
+                lang = lang_index(a.lang, p.langs) if a.lang else None
                 print(f'{a.image}: {kind_of(data, base, ver)}\n'
                       f'{name} pack: {p.groups} groups x {p.lang_count} languages '
                       f'({", ".join(p.langs)}), blob {p.blob_size} bytes at file {p.blob_off:#x}'
@@ -534,7 +559,7 @@ def main(argv=None):
                     print_group(p, g, lang, prefix='  ')
         elif a.cmd == 'get':
             p = parse_pack(data, base, a.pack)
-            print_group(p, a.group, lang_index(a.lang) if a.lang else None)
+            print_group(p, a.group, lang_index(a.lang, p.langs) if a.lang else None)
         elif a.cmd == 'set':
             r = set_string(data, base, a.pack, a.group, a.lang, a.text, a.append, a.shared)
             dst = write_out(a.image, data, a.out)
