@@ -80,6 +80,9 @@ def test_art_round_trips_and_fits_the_engine():
 
 
 def test_the_committed_app_is_what_the_tool_builds(tmp_path):
+    if not os.path.exists(gamebook.LETTERING_FONT):
+        pytest.skip('fonts/libre-baskerville not fetched (fonts/ is not committed; tools/gamebook.py '
+                    'prints the curl line)')
     out = tmp_path / 'gull-rock'
     rep = gamebook.build(STORY, str(out))
     assert rep['source_bytes'] < gamebook.MAX_SOURCE

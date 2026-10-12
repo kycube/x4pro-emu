@@ -54,6 +54,8 @@ import xtapp                                     # noqa: E402
 ENGINE = os.path.join(HERE, 'gamebook_engine.lua')
 LETTERING_FONT = os.path.join(os.path.dirname(HERE), 'fonts', 'libre-baskerville',
                               'LibreBaskerville-variable.ttf')
+# fonts/ is not committed (fonts/README.md); this is where the build's display type comes from
+LETTERING_URL = 'https://raw.githubusercontent.com/google/fonts/main/ofl/librebaskerville/LibreBaskerville%5Bwght%5D.ttf'
 MAX_SOURCE = 200_000
 
 # Layout, in the 480 x 800 portrait frame; the engine carries the same numbers.
@@ -228,6 +230,9 @@ def load_scenes(story_dir):
 def lettering(lines, width=480):
     """Display type for the cover and the endings: Libre Baskerville (OFL), thresholded to 1 bit.
     `lines` = [(text, size, weight)], centred; returns a 1-bit image cropped to its ink rows."""
+    if not os.path.exists(LETTERING_FONT):
+        raise GamebookError(f'the lettering font is missing: mkdir -p {os.path.dirname(LETTERING_FONT)} && '
+                            f'curl -sfL "{LETTERING_URL}" -o {LETTERING_FONT}  (OFL; fonts/README.md)')
     rows = []
     for text, size, weight in lines:
         f = ImageFont.truetype(LETTERING_FONT, size)
