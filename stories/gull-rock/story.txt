@@ -1,0 +1,142 @@
+title: The Keeper of Gull Rock
+app_id: gull-rock
+start: landing
+
+== landing
+@image storm
+For three nights the light on Gull Rock has stayed dark, and no word has come from Elias Marr, its keeper of thirty years.
+
+Tam the boatman will not tie up. He holds the boat off the landing with an oar while the swell lifts you level with the steps, and you jump. Your boots find the weed-slick stone. Behind you the boat is already turning for the mainland.
+
+Above you the tower is a black finger against a blacker sky. Somewhere out in the rain, a ship is due before midnight.
+
+* Climb straight to the lamp room -> stair
+* Look in the keeper's cottage first -> cottage
+
+== cottage
+@image cottage
+The cottage door is unlatched. Inside, the fire is long cold. A plate of bread and herring sits half eaten on the table, a chair pushed back as if Elias stood up in a hurry.
+
+His logbook lies open beside the plate. Across the floor runs a trail of wet footprints, bare, going not toward the door but to a trapdoor in the corner. Its iron ring is cold and beaded with water.
+
+* Read the logbook -> log
+* Lift the trapdoor -> cave
+* Leave it, and climb the tower -> stair
+
+== log
+@image log
+@set read_log
+The last pages are in a hand that grows less steady with each night.
+
+"Oct 9. The light under the water again, below the landing, green as bottle glass."
+
+"Oct 10. She sang tonight. The old hymn my mother sang, the one about the harbour. I did not think anyone alive still knew it."
+
+"Oct 11. Low water at eleven. I am going down to see. If I do not come back, the oil is in the store under the stair. Whatever happens, keep the light."
+
+You close the book. Low water at eleven. That was three nights ago.
+
+* Lift the trapdoor -> cave
+* Climb the tower and keep the light -> stair
+
+== stair
+@image stair
+One hundred and fourteen iron steps wind up the inside of the tower. The wind finds every gap in the stone and makes the whole column hum like a struck glass.
+
+Halfway up you stop. Below you, faint and regular, something is knocking. Three knocks, a pause, three knocks. It comes from under the floor of the tower, from the rock itself.
+
+* Keep climbing -> lamp
+* Go back down toward the knocking -> cave
+
+== lamp
+@image lamp
+The lamp room is all glass and brass, and cold as a church. The great lens stands in the middle like a beehive made of ice. You strike a match. The wick is dry, the reservoir empty.
+
+Through the streaming panes you see it: the lights of a ship, low and to the south, steering for the gap between the Rock and the reef. Without the beam she will not know the reef is there.
+
+* Run down to the store for oil -> oil
+* Swing the hand lantern from the gallery -> lantern
+
+== lantern
+You take the storm lantern from its hook and step out onto the gallery. The wind tries to tear it from your hand. You swing it in long arcs, left and right, left and right, until your arm burns.
+
+The ship's lights hold their course. One small flame on a rail is nothing to a helmsman in this weather. When the lights finally swing, it is too late, and the sound that carries across the water is not one you will forget.
+
+@end The Small Light
+Some lights are too small to keep.
+
+* Begin again -> landing
+
+== oil
+The store under the stair smells of paraffin and tar. You haul a full can onto your shoulder and turn for the steps.
+
+The trapdoor in the tower floor is standing open. You are sure it was shut. From below, very clearly, a voice says your name. Not shouted. Said, the way someone says it across a kitchen table.
+
+* Carry the oil up and do not answer -> lit
+* Answer the voice -> cave
+
+== lit
+@image beam
+You fill the reservoir with shaking hands, trim the wick and set the clockwork turning. The lens catches the flame and throws it out across the water, one great white blade sweeping the rain.
+
+The ship's lights waver, then swing hard to the east, away from the reef and out into open water.
+
+You keep the light until dawn. When Tam's boat comes at first light, the trapdoor is shut, and whatever knocked there knocks no more. Elias Marr is never found.
+
+@end The Light Holds
+The ship was saved. The keeper was not.
+
+* Begin again -> landing
+
+== cave
+@image cave
+Rough steps lead down through the rock into a cave the sea has hollowed out. The air is thick with salt. The tide is out, and pools gleam on the floor like black mirrors.
+
+Far back, where the cave narrows, there is a light under the water. Green as bottle glass. And very softly, someone is singing.
+
+* Follow the light and the song -> hymn ? read_log
+* Follow the light and the song -> song ? !read_log
+* Go back up while you still can -> boat
+
+== song
+You wade toward the light. The song is lovely, and so sad, and it seems to come from just ahead, always just ahead. The water is at your knees, then your waist. It is warm. That should frighten you, and somehow it does not.
+
+When you think to look back, the steps are gone under the incoming tide.
+
+@end The Ebb
+The sea keeps what it is given.
+
+* Begin again -> landing
+
+== hymn
+@image ledge
+You know the tune. It is the hymn from the log, the one about the harbour, and now you can hear what Elias heard: it is not coming from the light. It is coming from a ledge above it, cracked and hoarse, a man singing to keep himself awake.
+
+You climb. Elias Marr is wedged on the ledge, one leg broken, a dead lantern in his lap. "You found the log," he says. "Good. Then you know there's a ship."
+
+* Get him up the steps, then light the lamp -> two_keepers
+
+== two_keepers
+@image beam
+It takes a long time. He swears at every step and you swear back. At the top he sits against the lamp-room wall and talks you through it: fill the reservoir, trim the wick, wind the clockwork.
+
+The beam goes out over the water just as the ship's lights reach the gap. They falter, then swing wide of the reef.
+
+In the morning Tam brings the boat in close and stares at the two of you on the landing. "I thought," he says, and doesn't finish.
+
+@end Two Keepers
+Both the light and the keeper came home.
+
+* Begin again -> landing
+
+== boat
+You scramble back up the steps and slam the trapdoor behind you. The singing stops at once, as if someone had shut a door in another room.
+
+You do not climb the tower. You sit by the cold fire with your coat around you and wait for morning, and you do not look at the window.
+
+At first light Tam comes for you. As you row away you see, on the reef, the dark shape of a ship lying on her side.
+
+@end The Dark Tower
+The light was not kept.
+
+* Begin again -> landing

@@ -1,0 +1,11 @@
+{
+  "app_id": "gull-rock",
+  "display_name": "The Keeper of Gull Rock",
+  "version": "1.0",
+  "author": "x4pro-emu",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ]
+}
