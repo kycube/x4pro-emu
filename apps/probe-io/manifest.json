@@ -1,0 +1,12 @@
+{
+  "app_id": "probe-io",
+  "display_name": "IO Probe",
+  "version": "1.0",
+  "author": "x4pro-emu",
+  "description": "Measures what a gamebook needs: files, require, drawing speed, long callbacks, memory, saved state, input events, layers, ticks, refresh modes.",
+  "entry": "index.lua",
+  "permissions": [
+    "sys.battery",
+    "sys.status"
+  ]
+}

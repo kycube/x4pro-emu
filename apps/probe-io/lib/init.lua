@@ -1,0 +1,3 @@
+-- probe-io: `require('lib')` finds this only if the searcher tries <name>/init.lua.
+local a1, a2 = ...
+return { name = 'lib/init', arg1 = tostring(a1), arg2 = tostring(a2) }

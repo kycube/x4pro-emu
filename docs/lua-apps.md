@@ -297,6 +297,48 @@ carries this table as `ADV_BY_WIDTH` and a `textw()` over it; copy both into any
 text. The one caveat: this is the face the host draws Lua text with today. If a future firmware or a
 different installed system font changes it, re-run `apps/probe-metrics` — that is what it is for.
 
+## 4c. Limits of the 7.6.8 host (the 2026-10-12 probe, `apps/probe-io/`)
+
+Measured in the emulator on unpatched 7.6.8 with `apps/probe-io/` (22 pages, each draws its own
+evidence; `apps/probe-io/mkcard.py CARD` puts it and its test files on a card). Times are emulator
+guest time, not the device's.
+
+- **A folder app has no files and no modules.** `ctx.data:read_text(name)` accepts only 1–64-character
+  lower-case `.txt` / `.tsv` names without `/` or `..` (`"invalid_name"` otherwise) and answers
+  `"not_found"` even for files present in the app directory: lookups go through a host "package
+  source" that is empty for an app installed as a folder. `require('mod')` fails the same way
+  ("module source unavailable"); there is no `package` table. What does work: **data inside
+  `index.lua`** — a 200 KB script with a 200 KB string literal loaded exactly; 700 KB failed with
+  "Script load failed" against the host's **1 MB Lua heap budget**. (The reader object's methods are
+  registered as `read_line`, `seek`, `tell`, `close`, for whatever source does fill the package.)
+- **A frame keeps its first 1024 drawing commands** and drops the rest silently (`g:clear` and each
+  `g:text` count). **A layer has no such cap**: `local L = ctx.layers:create(w, h)`,
+  `L:draw_with(function(g) ... end)` (the global `g` is redirected; `g:size()` still says 480 × 800),
+  then `g:layer(L, x, y)` blits it as one command, transparently (only black is drawn). A layer keeps
+  its contents across `on_draw` calls; `L:dispose()` frees it. **Text drawn into a layer does not
+  appear.** Speed: 10,000 `g:line` calls in one draw took 87 ms, 40,000 took 226 ms.
+- **Pixels:** `g:line(x, y, x, y)` and `g:circle(x, y, 0)` draw one pixel, line ends are inclusive;
+  `g:rect` with a width or height of 1 or 2 draws **nothing**. Integers are 32-bit.
+- **Input:** the side buttons arrive as `{type = 'key', key = 'up' | 'down', state = 'down'}` (one
+  event per press, no release); swipes as `{type = 'touch', gesture = 'swipe_up' | 'swipe_down' |
+  'swipe_left' | 'swipe_right', x, y}` with x, y where the swipe ended. A tap occasionally arrives as
+  `swipe_up` at (0, 0).
+- **Ticks:** 50 ms by default; `on_tick(ctx, n)` gets the interval in ms. `set_tick_rate` reads a
+  *string* from its second argument — `ctx:set_tick_rate('realtime' | 'high' | 'normal' | 'low' |
+  'idle')`, 33 / 50 / 100 / 500 / 2000 ms per the disassembly (not yet seen on screen).
+- **Refresh:** `ctx.invalidate()` → one `fast` refresh; `ctx.display:full_refresh()` → a `full` one
+  (with `invalidate` in the same callback the two coalesce into one full refresh). There is nothing
+  faster than `fast`.
+- **Persistence:** `ctx.save()` always returns `false` (a stub). `ctx.state` holds any Lua value in
+  memory but is empty after a reboot. Leaving the app (Home pad → Exit) with anything in `ctx.state`
+  **hangs the emulator** on the AES accelerator (not modelled): the firmware seems to encrypt the
+  state into `%s/%s/state.xtsv` on exit. Whether it is restored on the device is not yet known.
+- **Time budget:** the firmware carries "script callback exceeded time budget (watchdog)" and a new
+  `ctx.longtask` (`start`, `feed`, `stop`; 11 s per start or feed); a 2 s busy loop in `on_draw` hit
+  the same AES wait in the emulator, so the real budget is not measured.
+
+`docs/gamebook.md` is the worked example built on these.
+
 ## 5. What is not confirmed
 
 Shorter than it was — `apps/probe` (§7) answered the API shape, the `on_input` event and the

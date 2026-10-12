@@ -1,0 +1,18 @@
+THE LANTERN ROAD — a test passage for probe-io
+“Are you certain?” asked Renée, holding the lantern high.
+The café was closed; its façade glowed under the rain…
+‘Only one door stays open,’ said the old señor,
+“and it is not the one you think.”
+Über the bridge, past the Straße of the clockmakers,
+the path forks in two:
+  — turn to 12 if you follow the river,
+  — turn to 47 if you climb towards the château.
+Zoë counted her coins: 3 € and a brass token marked «Ø».
+Naïve travellers trust the map; wise ones trust the crows.
+The signpost reads Århus, Köln, Łódź, Athènes — Αθήνα.
+“Keep the lantern lit,” she whispered, “whatever the crows say.”
+At the third milestone a voice calls your name. Do you answer?
+If you answer, turn to 88. If you keep walking, turn to 104.
+The rain thins; somewhere a bell rings eleven, then twelve.
+Your pack holds: rope, bread, a copper key, and the map’s torn corner.
+END OF PASSAGE — if this line reads cleanly, the bytes arrived intact.
