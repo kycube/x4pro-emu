@@ -42,12 +42,12 @@ jobs:
       CI_TMP: ${{ github.workspace }}/ci-tmp
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # firmware/ is a submodule and carries freeink-sdk as one of its own.
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -87,7 +87,7 @@ jobs:
 
       - name: Restore QEMU cache
         id: qemu-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           # The clone *and* qemu/build: ninja is incremental, but only against the sources it
           # recorded; a fresh clone would be newer than every cached object and rebuild the lot.
@@ -104,7 +104,7 @@ jobs:
 
       - name: Restore PlatformIO cache
         id: pio-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           # Toolchain and framework packages only. The firmware build output is not cached.
           path: ~/.platformio
@@ -135,14 +135,14 @@ jobs:
       - name: Save QEMU cache
         # Saved here rather than at job end so a red test run still leaves a usable QEMU cache.
         if: steps.qemu-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: qemu
           key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
 
       - name: Save PlatformIO cache
         if: steps.pio-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-${{ hashFiles('firmware/platformio.ini') }}
@@ -179,7 +179,7 @@ jobs:
 
       - name: Upload screenshots and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: screenshots-and-logs
           path: ci-artifacts
