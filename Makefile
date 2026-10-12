@@ -27,8 +27,10 @@ qemu/.x4pro-patched: qemu/.git
 	cd qemu && git am --3way ../qemu-patches/*.patch
 	touch $@
 
+# The submodule pin (CrossPoint 1.6.0 + one commit), not upstream's default branch: the tests and the
+# device oracles were made against it, and a plain clone would build whatever upstream is at today.
 firmware/platformio.ini:
-	git clone --recurse-submodules https://github.com/crosspoint-reader/crosspoint-reader.git firmware
+	git submodule update --init --recursive firmware
 
 qemu: qemu/build/build.ninja
 	cd qemu/build && ninja -j$(NPROC) qemu-system-xtensa
