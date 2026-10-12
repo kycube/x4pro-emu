@@ -1175,5 +1175,8 @@ without `luac`) and an emulator test that plays the log branch against three gol
 On the Mini Apps list the first tap on the app's card sometimes only repaints the list; the test taps
 until the cover is up.
 
-Not yet seen: persistence (Continue, the endings tally across visits) — that needs the real reader or
-an AES model.
+**On the reader (same day).** Copied over the reader's USB mode into `XTApps/gull-rock/` (three files,
+SHA-256 checked on the card, no `._` files), Mini Apps appeared by itself, and the owner played it:
+the plates are crisp with no ghosting between scenes, the side buttons turn pages, and **`ctx.state`
+persists** — after leaving with the Home pad (Exit) and coming back, the cover offers Continue; the
+exit is clean. So the AES hang is the emulator's alone, and Lua apps can keep state on the device.

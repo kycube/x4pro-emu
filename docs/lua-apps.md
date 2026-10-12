@@ -332,7 +332,8 @@ guest time, not the device's.
 - **Persistence:** `ctx.save()` always returns `false` (a stub). `ctx.state` holds any Lua value in
   memory but is empty after a reboot. Leaving the app (Home pad → Exit) with anything in `ctx.state`
   **hangs the emulator** on the AES accelerator (not modelled): the firmware seems to encrypt the
-  state into `%s/%s/state.xtsv` on exit. Whether it is restored on the device is not yet known.
+  state into `%s/%s/state.xtsv` on exit. **On the device it works** (2026-10-12, the gamebook):
+  leaving with the Home pad saves `ctx.state` and re-entering restores it; the exit is clean.
 - **Time budget:** the firmware carries "script callback exceeded time budget (watchdog)" and a new
   `ctx.longtask` (`start`, `feed`, `stop`; 11 s per start or feed); a 2 s busy loop in `on_draw` hit
   the same AES wait in the emulator, so the real budget is not measured.

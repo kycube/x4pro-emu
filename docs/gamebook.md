@@ -101,8 +101,8 @@ Everything here follows from the 7.6.8 probe (`apps/probe-io/`, `docs/lua-apps.m
   `ctx.display:full_refresh()`, and the two coalesce into one full refresh, so a plate never ghosts
   into the next scene (seen in the emulator: one `full` per passage change).
 - **Progress** lives in `ctx.state` (passage, page, flags, endings found; flat strings and numbers
-  only). `ctx.save()` is a stub in 7.6.8; the host appears to encrypt `ctx.state` into
-  `state.xtsv` when the app is left, so on the device the title page should offer **Continue** and
-  remember the endings. **Not yet seen working:** in the emulator, leaving an app with anything in
-  `ctx.state` hangs on the AES accelerator, which is not modelled — so the emulator test never leaves
-  the app, and persistence is to be confirmed on the reader.
+  only). `ctx.save()` is a stub in 7.6.8; the host saves `ctx.state` itself when the app is left
+  (apparently encrypted, into `state.xtsv`). **Confirmed on the reader (2026-10-12):** after a few
+  pages, Home pad → Exit, and back in, the cover offers **Continue**; the app exits cleanly. In the
+  emulator the same exit hangs on the AES accelerator, which is not modelled, so the emulator test
+  never leaves the app.

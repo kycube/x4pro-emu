@@ -16,6 +16,10 @@ and step c (the deployment decision) only matters for native patches such as the
 confirmed (CI green), and item f is answered for 7.6.8 (its toast pack is readable; `presenter+176` is
 written by the menu presenter from an `/sdcard/XTApps` enumeration). Step b and d now target 7.6.8:
 `tools/ghidra_stock.py --image images/device/stock-app0-7.6.8.bin --version 7.6.8 …`.
+**Also 2026-10-12: the first Lua app on the reader is a gamebook** (`docs/gamebook.md`): The Keeper of Gull
+Rock, built by `tools/gamebook.py` from `stories/gull-rock/`, played on the device with state kept across
+visits. `docs/lua-apps.md` §4c is the host's measured limits (no files or `require` for a folder app, the
+1024-command frame cap, layers); new apps start there.
 
 **Work is organised as squads: read §10 before starting anything.** Sessions 5–8 ran four to five agents in
 parallel with cost balancing (Fable for models and symbol-less firmware reading, Opus for C/Python work with
