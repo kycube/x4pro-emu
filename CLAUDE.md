@@ -2,12 +2,22 @@
 
 Linux/macOS-hosted emulator for unmodified Xteink X4 Pro firmware images, driven from a shell:
 buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots to its home screen,
-opens books, pages, sleeps and wakes in it; the stock `xteink_app` 7.2.4 boots to its home screen,
-paints, lights the frontlight, takes touch, and its WiFi start comes up and stops itself (no radio).
+opens books, pages, sleeps and wakes in it; the stock `xteink_app` (7.2.4, 7.5.4, 7.6.8) boots to its home
+screen, paints, lights the frontlight, takes touch, runs its Lua apps (a gamebook among them), and its WiFi
+start comes up and stops itself (no radio). `README.md` is the public overview.
 Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`**, §0 (resume) and §10 (the
 work runs as squads: the coordinator forms agents per milestone, and since 2026-10-12 **Opus 5.5 does all of
 it** — coordination, well-specified tasks, symbol-less firmware reading and new models alike; Fable 5.1 only
 when the owner asks for it).
+
+**The repository is public: keep it presentable and the README current.** `README.md` is what visitors see
+on GitHub. In the same commit as anything user-visible — a tool or CLI command, an app, a supported firmware
+version, a newly modelled peripheral, a removed limitation — update `README.md` (its feature list, "What is not
+emulated", the docs table) and list any new document in `docs/README.md`. When a golden the README shows
+changes, rerun `tools/readme_images.py`. No stray files at the root or in `docs/`: scratch work goes to the
+session scratchpad or the gitignored `images/`; nothing from `images/` (device dumps hold the owner's WiFi
+credentials) or `fonts/` (proprietary copies) is ever committed. Write README claims you can point to a test or a
+log entry for.
 
 ## What is NOT emulated (how it shows up for a firmware developer)
 
@@ -52,12 +62,12 @@ qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (giti
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
 x4emu/         the CLI as a package (pipx install . → `x4emu`; docs/x4emu.md); tools/x4emu is its in-repo shim
-tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, xic2png.py, stockver.py (+ stockver.d/: the per-version offsets the three stock tools read), stockdev.py, stockpatch.py, stockstrings.py, xtfont.py, xtapp.py, gamebook.py (+ gamebook_engine.lua, pixart.py), ghidra_stock.py (+ ghidra/), device.py, epdtrace.py, appdis.py, tcbwalk.py
+tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, xic2png.py, stockver.py (+ stockver.d/: the per-version offsets the three stock tools read), stockdev.py, stockpatch.py, stockstrings.py, xtfont.py, xtapp.py, gamebook.py (+ gamebook_engine.lua, pixart.py), readme_images.py, ghidra_stock.py (+ ghidra/), device.py, epdtrace.py, appdis.py, tcbwalk.py
 tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants, stock, record/replay); fast: nvsedit, xic
 apps/          Lua apps for the stock (gull-rock: a gamebook, built; status-typographic, status-panels, probe, probe-io); docs/lua-apps.md
 stories/       gamebook sources (story.txt + scenes.py pixel art) that tools/gamebook.py builds into apps/; docs/gamebook.md
 firmware/      crosspoint-reader submodule (with freeink-sdk); firmware-patches/ = EpdBus trace
-docs/          hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures)
+docs/          README.md (the index), hardware.md (facts + sources), audit.md (brief audit), log.md, device/ (captures), images/ (README pictures)
 images/        gitignored: flash dumps, SD images, build outputs
 ```
 

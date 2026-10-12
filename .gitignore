@@ -1,4 +1,6 @@
-images/
+# device dumps (they hold the owner's WiFi credentials), card images, build output: never committed.
+# Anchored to the root so docs/images/ (the README's pictures) stays tracked.
+/images/
 .x4emu/
 .venv/
 __pycache__/
