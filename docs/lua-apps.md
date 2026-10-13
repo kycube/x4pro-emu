@@ -1,5 +1,8 @@
 # Writing a screen for the stock as a Lua app
 
+> This page is the **7.x** Lua host (7.2.4–7.6.8): apps as card folders. XTOS Licorice, the stock's
+> rewrite, installs signed packages instead and hides its Mini Apps entry: `docs/licorice-apps.md`.
+
 Session 8 (2026-09-07). The stock `xteink_app` 7.2.4 carries a complete, unreachable **Lua 5.5
 scripting host**: a page that lists apps from the card, a script host that loads `index.lua` from an
 app directory, and a drawing/services API bound into the interpreter. Nothing in the shipped UI

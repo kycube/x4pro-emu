@@ -1493,3 +1493,25 @@ end to end, +7 fast tests. Open: the code section and its launch-time decrypt (a
 names Licorice `v261013` through `stockver.release_tag` (14,778 functions); the README gains a Licorice
 section and picture; 3 GB of old scratch copies deleted (one listed two credential keys: both were empty
 strings, which 7.6.8 recreates after `redact`). `make test` **252 passed, 2 skipped**; CI green on every push.
+
+## 2026-10-13 — Licorice mini apps run: the code section, the launch, the hidden Mini Apps entry
+
+One Opus 5.5 agent (`docs/licorice-apps.md`, `tools/xtapp.py`). The code section is an `XTCO` table (16-byte
+header, up to 32 entries of 104 bytes: name, offset, length, then the files), flagged by feature-mask bit 0x2,
+encrypted with **AES-128-CTR** under the content key with `iv_code` as the starting counter, and checked by
+`hmac_code` = HMAC-SHA256 over the ciphertext; the entry is plain Lua source, loaded with `luaL_loadbufferx`
+(`require` maps `a.b` to `a/b.lua`), no compression. Negative controls by hand: a flipped ciphertext byte →
+"Install failed", a flipped `iv_code` bit → "Cannot run yet" (the Lua host's open-failure toast), a package
+without code → "Cannot run yet". **The Mini Apps entry is hidden**: drawer item kind 3 shows only once NVS
+`fw/lua_nav` ≠ 0, which ten taps on Settings → About → "Model" (each under 2 s apart) set. `apps/probe` now
+installs, appears under Mini Apps, runs (its API dump on Lua 5.5, with `ctx.data` and TrueType text in the
+API), takes a tap and leaves through the Home pad's "Leave app" with no reset.
+
+Coordinator changes: the agent's test retried the ten-tap burst when it fell short under load. That hid a real
+nondeterminism (a tap landing during the status bar's minute repaint is dropped, and where that repaint falls
+follows the host's load), against the rule that no test retries inputs. Now `test_licorice_mini_apps_unlock`
+fires one burst right after a minute repaint, and the launch test sets `fw/lua_nav` with `nvsedit` before the
+boot. The two tests, three runs alone and two full `make test` runs: **262 passed, 2 skipped**. The agent saw
+`test_nvsedit::test_redacted_image_boots_to_home` (stock 7.2.4) fail once under load; it passed in both later
+full runs and alone; watch it. Open: the assets / data / fonts sections are read, not built; the >512 KB
+streamed path; the store-seed binding.

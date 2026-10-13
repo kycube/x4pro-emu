@@ -102,7 +102,8 @@ In October 2026 Xteink replaced the 7.x firmware with a rewrite, **XTOS Licorice
 from the device's own dump: the Bookshelf, the side drawer, the Desktop, All files and the reader, the
 side buttons, the front light, Dark mode, Wi-Fi and Bluetooth toggles, sleep and wake, auto power-off
 and USB mode (`tests/test_licorice.py`, `tests/test_usb_otg.py`). One panel-model fix was needed:
-Licorice scans the panel the other way up from every earlier firmware. What changed, what runs and
+Licorice scans the panel the other way up from every earlier firmware. Its signed mini-app packages
+install and run too (below). What changed, what runs and
 what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook
@@ -115,7 +116,10 @@ offers, and its hard limits (no file reads, a 1024-command frame cap, layers tha
 XTOS Licorice installs apps from a signed `.xtapp` package instead. Its format is reverse-engineered in
 [docs/licorice-apps.md](docs/licorice-apps.md): `tools/xtapp.py pack --format licorice` builds a package
 its installer accepts, and the emulator takes it from All Files to the **"Installed"** confirmation
-(`tests/test_licorice_apps.py`). The launch-time layer that decrypts and runs the code is still open.
+and on to running it: Mini Apps lists it, a tap launches it, it takes taps and leaves cleanly
+(`tests/test_licorice_apps.py`). Licorice's Lua host exposes more than 7.x's (a `ctx.data` file API,
+TrueType text; not exercised yet), and its Mini Apps entry stays hidden until ten taps on Settings →
+About → "Model".
 
 **The Keeper of Gull Rock** is a choose-your-own-adventure written and drawn for this project: 13
 passages, five endings, and eight 1-bit pixel-art plates drawn in code. `tools/gamebook.py` builds it

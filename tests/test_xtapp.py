@@ -16,8 +16,11 @@ seconds, no QEMU.
 The Licorice tests at the end cover the key-wrapped (XTOS 261013) format: the ECDH/HKDF/AES-KW DEK
 wrap (self-consistent: what `licorice_wrap_dek` produces, `licorice_unwrap_dek` -- the device side --
 recovers), the container header the installer parses, the stricter manifest rules and the classic/
-licorice `info` split. They need the `cryptography` package and skip without it; the live install is
-tests/test_licorice_apps.py (emulator) and the format is docs/licorice-apps.md.
+licorice `info` split; and the code section the launch decrypts: the "XTCO" table, AES-128-CTR under
+the DEK checked against a block-by-block re-implementation of the firmware's FUN_4210ad78 (random
+access at any offset included), hmac_code over the ciphertext, the section table and iv_code /
+hmac_code fields. They need the `cryptography` package and skip without it; the live install and
+launch are tests/test_licorice_apps.py (emulator) and the format is docs/licorice-apps.md.
 """
 import collections, json, os, shutil, struct, subprocess, sys
 import pytest
@@ -317,3 +320,184 @@ def test_licorice_device_pubkey_is_on_curve():
     pub = xtapp.licorice_device_pubkey()
     assert len(pub) == 65 and pub[0] == 0x04
     ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)   # raises if off-curve
+
+
+# ---------------------------------------------------------------- Licorice code section (launch)
+def _firmware_ctr(key, iv, data, offset=0):
+    """FUN_4210ad78 re-implemented from its decompile, block by block on AES-ECB: copy the IV into the
+    counter, add offset >> 4 big-endian over all 16 bytes (FUN_4224d258), and with offset & 15 != 0
+    encrypt the counter once into the stream block and step it (the mbedtls_aes_crypt_ecb + +1 the
+    firmware does before calling mbedtls_aes_crypt_ctr); then mbedtls_aes_crypt_ctr itself: a new
+    stream block whenever nc_off wraps to 0, the counter incremented with carry from byte 15 up.
+    An oracle independent of `xtapp.licorice_ctr` (which uses the library's CTR mode)."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    ecb = Cipher(algorithms.AES(bytes(key)), modes.ECB()).encryptor()
+    ctr = bytearray(iv)
+    add = offset >> 4
+    for i in range(15, -1, -1):                       # FUN_4224d258: a 64-bit value into 16 bytes
+        add += ctr[i]
+        ctr[i] = add & 0xff
+        add >>= 8
+
+    def step():
+        for i in range(15, -1, -1):
+            ctr[i] = (ctr[i] + 1) & 0xff
+            if ctr[i]:
+                break
+    nc_off, stream = offset & 15, b''
+    if nc_off:
+        stream = ecb.update(bytes(ctr))
+        step()
+    out = bytearray()
+    for b in bytes(data):
+        if nc_off == 0:
+            stream = ecb.update(bytes(ctr))
+            step()
+        out.append(b ^ stream[nc_off])
+        nc_off = (nc_off + 1) & 15
+    return bytes(out)
+
+
+def test_licorice_ctr_is_the_firmware_decrypt():
+    """`licorice_ctr` against the firmware's AES-128-CTR (FUN_4210ad78) re-implemented above: the same
+    keystream from offset 0, the same bytes for any slice decrypted on its own at its own offset (how
+    FUN_42109d7c reads one file out of a streamed section), the counter carrying over all 128 bits,
+    and encryption = decryption."""
+    pytest.importorskip('cryptography')
+    import random
+    rnd = random.Random(261013)
+    key = bytes(rnd.randrange(256) for _ in range(16))
+    data = bytes(rnd.randrange(256) for _ in range(1000))
+    for iv in (bytes(rnd.randrange(256) for _ in range(16)), b'\xff' * 16, bytes(8) + b'\xff' * 8):
+        whole = xtapp.licorice_ctr(key, iv, data)
+        assert whole == _firmware_ctr(key, iv, data) and whole != data
+        assert xtapp.licorice_ctr(key, iv, whole) == data
+        for off, n in ((0, 1), (5, 30), (16, 16), (17, 200), (999, 1), (333, 667)):
+            part = xtapp.licorice_ctr(key, iv, data[off:off + n], off)
+            assert part == whole[off:off + n] == _firmware_ctr(key, iv, data[off:off + n], off), (iv, off)
+
+
+def test_xtco_lays_out_the_code_section_the_firmware_parses():
+    """The decrypted code section (FUN_42108c44): "XTCO", u16 version 1, u16 0, u32 count, u32 table
+    end = 16 + 104 * count, then name[96] / u32 offset from the table end / u32 length per file."""
+    files = [('index.lua', b'function on_draw() end\n'), ('lib/util.lua', b'return {}\n')]
+    blob = xtapp.build_xtco(files)
+    assert blob[:4] == b'XTCO' and struct.unpack_from('<HHII', blob, 4) == (1, 0, 2, 16 + 2 * 104)
+    end = 16 + 2 * 104
+    assert blob[16:16 + 9] == b'index.lua' and blob[16 + 9:16 + 96] == bytes(87)
+    assert struct.unpack_from('<II', blob, 16 + 96) == (0, len(files[0][1]))
+    assert struct.unpack_from('<II', blob, 16 + 104 + 96) == (len(files[0][1]), len(files[1][1]))
+    assert blob[end:] == files[0][1] + files[1][1]
+    assert xtapp.read_xtco(blob) == files
+    for bad, message in (([], '1..32'), ([('f%d.lua' % i, b'') for i in range(33)], '1..32'),
+                         ([('', b'x')], 'no NUL'), ([('x' * 96, b'')], 'no NUL'),
+                         ([('a.lua', b''), ('a.lua', b'')], 'twice')):
+        with pytest.raises(xtapp.XtappError, match=message):
+            xtapp.build_xtco(bad)
+    with pytest.raises(xtapp.XtappError, match='not an XTCO'):
+        xtapp.read_xtco(b'XTCQ' + blob[4:])
+    with pytest.raises(xtapp.XtappError, match='table end'):
+        xtapp.read_xtco(blob[:12] + struct.pack('<I', end + 1) + blob[16:])
+    with pytest.raises(xtapp.XtappError, match='does not fit'):
+        xtapp.read_xtco(blob[:-1])
+
+
+def test_licorice_code_section_round_trips_through_the_firmware_decrypt():
+    """A container with a code section: feature mask 0x2, the section at 0x18 (after the manifest,
+    inside the total size), iv_code / hmac_code in the manifest; the stored bytes are ciphertext
+    (no XTCO, no source), the tag is HMAC-SHA256(DEK, ciphertext), and the firmware's decrypt
+    (`_firmware_ctr`, key = DEK) gives back the XTCO table and the files. A flipped ciphertext byte
+    fails the tag (the install's "Install failed"); a wrong IV decrypts to no XTCO (the launch's
+    "Cannot run yet") -- both seen in the emulator, docs/licorice-apps.md."""
+    import hashlib, hmac
+    pub, scalar = _keypair()
+    files = [('index.lua', b'local n = 0\nfunction on_draw(ctx, g) g:clear(0) g:text(10, 40, "hi") end\n')]
+    manifest = collections.OrderedDict((('app_id', 'probe'), ('display_name', 'API Probe'),
+                                        ('version', '1.0'), ('entry', 'index.lua')))
+    dek, iv = bytes(range(16)), bytes(range(16, 32))
+    data, got_dek = xtapp.build_licorice_container(manifest, pub, dek=dek, code_files=files, iv=iv)
+    assert got_dek == dek
+    head, obj = xtapp.read_licorice_container(data)
+    sec = xtapp.licorice_sections(data)
+    off, length = sec['code']
+    assert head['feature_mask'] == xtapp.LICORICE_FEATURE_CODE == sec['feature_mask'] == 0x2
+    assert off >= 0x80 + head['manifest_length'] and off % 16 == 0
+    assert off + length == head['total_size'] == len(data)
+    assert all(sec[n] == (0, 0) for n in ('assets', 'unused', 'icons', 'data', 'fonts'))
+    assert obj['iv_code'] == iv.hex() and len(obj['hmac_code']) == 64
+    stored = data[off:off + length]
+    assert b'XTCO' not in stored and b'on_draw' not in stored, 'the code section must be encrypted'
+    assert bytes.fromhex(obj['hmac_code']) == hmac.new(dek, stored, hashlib.sha256).digest()
+    plain = _firmware_ctr(dek, iv, stored)
+    assert plain == xtapp.build_xtco(files) and xtapp.read_xtco(plain) == files
+    assert xtapp.read_licorice_code(data, dek) == files
+    # the DEK the device unwraps is the one the section is encrypted with
+    eph, wrapped = bytes.fromhex(obj['dek_wrap_ephemeral_pub']), bytes.fromhex(obj['wrapped_dek_pack'])
+    assert xtapp.licorice_unwrap_dek(scalar, eph, wrapped) == dek
+
+    tampered = bytearray(data)
+    tampered[off + 20] ^= 0x55
+    with pytest.raises(xtapp.XtappError, match='hmac_code'):
+        xtapp.read_licorice_code(bytes(tampered), dek)
+    bad_iv = bytearray(iv)
+    bad_iv[0] ^= 1
+    swapped = data.replace(iv.hex().encode(), bytes(bad_iv).hex().encode())
+    assert len(swapped) == len(data)
+    with pytest.raises(xtapp.XtappError, match='not an XTCO'):
+        xtapp.read_licorice_code(swapped, dek)
+    # a fresh IV each time unless one is given
+    a, _ = xtapp.build_licorice_container(manifest, pub, dek=dek, code_files=files)
+    b, _ = xtapp.build_licorice_container(manifest, pub, dek=dek, code_files=files)
+    assert xtapp.read_licorice_container(a)[1]['iv_code'] != xtapp.read_licorice_container(b)[1]['iv_code']
+
+
+def test_licorice_code_files_takes_every_lua_file_entry_first(tmp_path):
+    """What goes into the code section: every *.lua, relative paths with "/" (so `require "lib.x"`
+    finds "lib/x.lua"), the entry first; other files are reported, not packed; no entry is an error
+    (the Lua host's "entry missing")."""
+    d = write_manifest(tmp_path / 'app', {'app_id': 'demo', 'display_name': 'Demo'})
+    (d / 'lib').mkdir()
+    (d / 'lib' / 'x.lua').write_text('return 1\n')
+    (d / 'a.lua').write_text('return 2\n')
+    (d / 'story.txt').write_text('text\n')
+    files, skipped = xtapp.licorice_code_files(str(d))
+    assert [n for n, _ in files] == ['index.lua', 'a.lua', 'lib/x.lua']
+    assert skipped == ['story.txt']
+    (d / 'index.lua').unlink()
+    with pytest.raises(xtapp.XtappError, match='entry missing'):
+        xtapp.licorice_code_files(str(d))
+    assert [n for n, _ in xtapp.licorice_code_files(str(d), 'a.lua')[0]] == ['a.lua', 'lib/x.lua']
+
+
+@pytest.mark.parametrize('broken, message', [
+    ({'app_id': 'probe', 'display_name': 'X', 'iv_code': '00' * 16}, 'iv_code'),
+    ({'app_id': 'probe', 'display_name': 'X', 'hmac_code': '00' * 32}, 'hmac_code'),
+    ({'app_id': 'probe', 'display_name': 'X', 'entry': 'x' * 32 + '.lua'}, '1..31 bytes'),
+])
+def test_licorice_manifest_rules_for_the_code_section(broken, message):
+    """pack writes iv_code / hmac_code itself; the entry name must fit FUN_42108648's 32-byte field."""
+    pytest.importorskip('cryptography')
+    with pytest.raises(xtapp.XtappError, match=message):
+        xtapp.validate_manifest_licorice(broken)
+
+
+@pytest.mark.skipif(not os.path.exists(xtapp.LICORICE_IMAGE), reason='Licorice app image not available')
+def test_pack_licorice_cli_builds_a_runnable_package(tmp_path):
+    """`pack --format licorice` packs apps/probe's index.lua into an encrypted code section (the
+    package tests/test_licorice_apps.py installs and runs); `info` shows the section; with
+    `--manifest-only` there is none (feature mask 0)."""
+    pytest.importorskip('cryptography')
+    out = tmp_path / 'probe.xtapp'
+    text = run('pack', os.path.join(ROOT, 'apps', 'probe'), '--format', 'licorice', '-o', out)
+    assert 'code section: index.lua' in text and 'feature mask 0x2' in text, text
+    data = out.read_bytes()
+    off, length = xtapp.licorice_sections(data)['code']
+    assert length > 0 and off + length == len(data)
+    info = run('info', out)
+    assert f'section code     {off:#x} + {length} (encrypted)' in info, info
+    assert 'warning' not in info, info
+    assert json.loads(run('info', out, '--json'))['sections']['code'] == [off, length]
+    bare = tmp_path / 'bare.xtapp'
+    run('pack', os.path.join(ROOT, 'apps', 'probe'), '--format', 'licorice', '--manifest-only', '-o', bare)
+    assert xtapp.licorice_sections(bare.read_bytes())['code'] == (0, 0)
+    assert xtapp.licorice_sections(bare.read_bytes())['feature_mask'] == 0

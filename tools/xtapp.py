@@ -2,20 +2,38 @@
 r"""Build, inspect and install `.xtapp` Lua app containers for the stock `xteink_app`.
 
   xtapp.py new NAME OUT_DIR [--display-name T] [--author A]   scaffold manifest.json + index.lua
-  xtapp.py pack APP_DIR [-o OUT] [--format classic|licorice]  write APP_DIR/app.xtapp
-  xtapp.py info FILE.xtapp                                    header + manifest of a container
-  xtapp.py install SD.img APP_DIR [--as DIR] [--format ...]   copy the app onto a card image
+  xtapp.py pack APP_DIR [-o OUT] [--format classic|licorice] [--manifest-only]   write APP_DIR/app.xtapp
+  xtapp.py info FILE.xtapp [--json]                           header + manifest (+ sections) of a container
+  xtapp.py install SD.img APP_DIR [--as DIR] [--format ...] [--manifest-only]   copy the app onto a card image
 
 Two container generations share the `.xtapp` name and the `XTAP` magic:
 
 * **classic** (stock `xteink_app` 7.2.4-7.6.8): a plain 0x80-byte header + a plain-JSON manifest,
-  no signature, no key. This is the default and everything below describes it.
+  no signature, no key. This is the default and the sections after this list describe it.
 * **licorice** (XTOS Licorice 261013, the device's current firmware): a mandatory-encrypted,
-  device-key-wrapped package its installer accepts from All Files. `--format licorice` builds one;
-  the format, the ECDH/HKDF/AES-KW key wrap and what is proven live in **docs/licorice-apps.md**.
-  A package this tool builds installs through Licorice's own UI (verified in the emulator: the
-  "Installed" toast, the app at `/sdcard/XTApps/<app_id>/app.xtapp`); it does not yet carry a
-  runnable code section (that launch-time layer is still being reversed, docs/licorice-apps.md).
+  device-key-wrapped package its installer accepts from All Files, and that runs from its Mini Apps
+  page. `--format licorice` builds one; the whole format, with addresses and what is proven, is
+  **docs/licorice-apps.md**. In short:
+
+      0x00  "XTAP", u16 1, u16 0x80, u32 total size, u32 feature mask (0x2 = code encrypted)
+      0x10  manifest offset 0x80 / length          0x18  code section offset / length
+      0x20  assets   0x28  (unused)   0x30  icons (clear)   0x38  data   0x40  fonts   (all 0 here)
+      0x80  the manifest JSON: the author's fields + dek_wrap_alg / dek_wrap_key_id /
+            dek_wrap_ephemeral_pub / wrapped_dek_pack (a 16-byte DEK, P-256 ECDH + HKDF-SHA256 +
+            AES-KW to the firmware's fixed key) + iv_code (16 bytes hex) + hmac_code (32 bytes hex)
+      then  the code section = AES-128-CTR(key DEK, IV iv_code) of an "XTCO" table holding every
+            *.lua of APP_DIR (the manifest `entry`, default index.lua, first), and
+            hmac_code = HMAC-SHA256(DEK, that ciphertext)
+
+  The installer checks the wrap and the HMAC and copies the package to
+  `/sdcard/XTApps/<app_id>/app.xtapp`; the Lua host decrypts the code section in RAM at each
+  launch and runs the entry as Lua source. Verified in the emulator (tests/test_licorice_apps.py):
+  install from All files ("Installed"), Mini Apps (shown once Settings -> About -> "Model" has been
+  tapped ten times quickly, which sets NVS fw/lua_nav), the probe app running, a tap reaching
+  on_input, the Home pad's "Leave app" back to the list. `--manifest-only` leaves the code out: the
+  package installs, but opening it says "Cannot run yet". `install --format licorice` puts
+  `<app_id>.xtapp` on the card root for the user to install from All files; only `*.lua` files are
+  packed (no assets/data/fonts sections), app_id must be ASCII letters only.
 
 A "Lua app" is a directory on the card, `/sdcard/XTApps/<dir>/`, holding `manifest.json`,
 `index.lua` (the script that runs) and `app.xtapp` (this container). The stock lists it under the
@@ -72,9 +90,11 @@ the card is touched.
 
 `pack()`, `read_container()`, `validate_manifest()`, `install()` and `scaffold()` are importable;
 they raise `XtappError` with a message that says which rule was broken. The Licorice helpers
-(`pack_licorice()`, `build_licorice_container()`, `read_licorice_container()`, `licorice_wrap_dek()`,
-`licorice_device_pubkey()`, `licorice_section_hmac()`, `validate_manifest_licorice()`) are importable
-too; the key-wrap ones need the `cryptography` package (P-256 / HKDF / AES-KW).
+(`pack_licorice()`, `install_licorice()`, `build_licorice_container()`, `read_licorice_container()`,
+`licorice_sections()`, `read_licorice_code()`, `build_xtco()`, `read_xtco()`, `licorice_code_files()`,
+`licorice_ctr()`, `licorice_wrap_dek()`, `licorice_unwrap_dek()`, `licorice_device_pubkey()`,
+`licorice_section_hmac()`, `validate_manifest_licorice()`) are importable too; the crypto ones need
+the `cryptography` package (P-256 / HKDF / AES-KW / AES-CTR).
 """
 import argparse, collections, hashlib, hmac, json, os, re, shutil, struct, subprocess, sys, tempfile
 
@@ -112,6 +132,26 @@ LICORICE_PERMISSIONS = ('sys.battery', 'sys.status', 'net.http', 'net.https', 's
                         'storage.user_file', 'device.status', 'device.keep_awake', 'bluetooth')
 LICORICE_VERSIONS = ('1.0', '0.8', '0.7')         # FUN_42108590 accepts major 1 minor 0, or 0.7/0.8
 _P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+# The section table: (name, header offset of the u32 offset/u32 length pair, feature-mask bit). Read
+# by FUN_42108380 into the container struct (+0x28..+0x57); the installer (FUN_42108f68) bounds-checks
+# all but 0x28 (offset > 0x7f, offset+length <= total size, FUN_4224d1a8) and HMAC-checks the four
+# with a bit; the launch-time open (FUN_4210944c) decrypts those four. A bit that is clear means the
+# section is stored in the clear and not HMAC-checked. 'icons' is never encrypted: FUN_4210a134 reads
+# app_icon_l / app_icon_s from it for the Mini Apps list without the DEK. 0x28 is never read here.
+LICORICE_SECTIONS = (('code', 0x18, 0x02), ('assets', 0x20, 0x04), ('unused', 0x28, 0),
+                     ('icons', 0x30, 0), ('data', 0x38, 0x08), ('fonts', 0x40, 0x10))
+LICORICE_FEATURE_CODE = 0x02          # bit 1: the code section is AES-CTR encrypted + HMAC'd
+XTCO_MAGIC = b'XTCO'                  # the code section's own container (FUN_42108c44: 0x4f435458)
+XTCO_HEAD = 16                        # "XTCO", u16 version 1, u16 0, u32 count, u32 table end
+XTCO_ENTRY = 104                      # name[96] (NUL-padded), u32 offset (from the table end), u32 len
+XTCO_NAME = 96
+XTCO_MAX_FILES = 32                   # FUN_42108c44 / FUN_4210944c refuse a count above 0x20
+LICORICE_INMEM_MAX = 0x80000          # FUN_4210944c: a code section <= 512 KB is read into RAM whole
+LICORICE_FILE_MAX = 0x100000          # FUN_42109d7c: a streamed file over 1 MB is "out_of_memory"
+LICORICE_IV_FIELDS = ('iv_code', 'hmac_code', 'iv_assets', 'hmac_assets', 'iv_data', 'hmac_data',
+                      'iv_fonts', 'hmac_fonts')
+LICORICE_GENERATED = ('dek_wrap_alg', 'dek_wrap_key_id', 'dek_wrap_ephemeral_pub',
+                      'wrapped_dek_pack') + LICORICE_IV_FIELDS     # written by pack, not the author
 
 
 class XtappError(ValueError):
@@ -292,8 +332,134 @@ def licorice_unwrap_dek(scalar, ephemeral_pub, wrapped):
 
 def licorice_section_hmac(dek, data):
     """A section's integrity tag = HMAC-SHA256(DEK, section bytes) (FUN_4210a630), what the manifest
-    carries as hmac_code / hmac_assets / hmac_data / hmac_fonts."""
+    carries as hmac_code / hmac_assets / hmac_data / hmac_fonts. The bytes are the section as stored
+    in the file, i.e. the CIPHERTEXT: the installer (FUN_42107f3c) and the launch (FUN_42107fcc) both
+    check the tag before anything is decrypted (encrypt-then-MAC)."""
     return hmac.new(bytes(dek), bytes(data), hashlib.sha256).digest()
+
+
+def licorice_ctr(key, iv, data, offset=0):
+    """AES-128-CTR as FUN_4210ad78 runs it (mbedtls_aes_crypt_ctr, in place): the 16-byte counter
+    block starts at `iv` and counts big-endian over all 128 bits; `offset` is the byte position of
+    `data` inside the section's keystream (the counter advanced by offset // 16 with FUN_4224d258,
+    offset % 16 keystream bytes skipped), so a file in the middle of a section decrypts on its own.
+    Encryption and decryption are the same operation. The key is the DEK itself."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except ImportError:
+        raise XtappError('the Licorice format needs the `cryptography` package (pip install '
+                         'cryptography)') from None
+    key, iv = bytes(key), bytes(iv)
+    if len(key) != 16 or len(iv) != 16:
+        raise XtappError(f'AES-128-CTR wants a 16-byte key and IV, got {len(key)} / {len(iv)}')
+    ctr = (int.from_bytes(iv, 'big') + (offset >> 4)) % (1 << 128)
+    enc = Cipher(algorithms.AES(key), modes.CTR(ctr.to_bytes(16, 'big'))).encryptor()
+    enc.update(bytes(offset & 15))                       # skip into the first keystream block
+    return enc.update(bytes(data)) + enc.finalize()
+
+
+def build_xtco(files):
+    """The code section's plaintext (FUN_42108c44 / FUN_4210944c parse it after the decrypt): a
+    16-byte header -- "XTCO", u16 version 1, u16 0, u32 file count (1..32), u32 table end (= 16 +
+    104 * count, checked exactly) -- then one 104-byte entry per file -- name (UTF-8, NUL-padded to
+    96 bytes), u32 offset counted from the table end, u32 length -- then the file bytes. `files` is a
+    sequence of (name, bytes); the Lua host looks names up verbatim: the manifest `entry` (default
+    "index.lua") for the script it runs, "a/b.lua" for `require "a.b"` (FUN_420c7eb8)."""
+    files = [(str(n), bytes(b)) for n, b in files]
+    if not 1 <= len(files) <= XTCO_MAX_FILES:
+        raise XtappError(f'the code section holds 1..{XTCO_MAX_FILES} files (FUN_42108c44), '
+                         f'got {len(files)}')
+    seen, table, blobs, off = set(), bytearray(), [], 0
+    for name, blob in files:
+        raw = name.encode('utf-8')
+        if not raw or b'\0' in raw or len(raw) >= XTCO_NAME:
+            raise XtappError(f'code file name {name!r}: 1..{XTCO_NAME - 1} bytes, no NUL '
+                             f'(an empty name fails the open)')
+        if name in seen:
+            raise XtappError(f'code file {name!r} twice')
+        seen.add(name)
+        table += raw.ljust(XTCO_NAME, b'\0') + struct.pack('<II', off, len(blob))
+        blobs.append(blob)
+        off += len(blob)
+    head = XTCO_MAGIC + struct.pack('<HHII', 1, 0, len(files), XTCO_HEAD + XTCO_ENTRY * len(files))
+    return head + bytes(table) + b''.join(blobs)
+
+
+def read_xtco(blob, where='code section'):
+    """[(name, bytes)] of a decrypted code section, refused the way FUN_42108c44 refuses it (magic,
+    version 1, count 1..32, the exact table end, empty names, a file past the section)."""
+    blob = bytes(blob)
+    if len(blob) < XTCO_HEAD or blob[:4] != XTCO_MAGIC:
+        raise XtappError(f'{where}: not an XTCO section (magic {blob[:4]!r}); a wrong DEK or IV '
+                         f'decrypts to noise')
+    version, _, count, end = struct.unpack_from('<HHII', blob, 4)
+    if version != 1:
+        raise XtappError(f'{where}: XTCO version {version}, expected 1')
+    if not 1 <= count <= XTCO_MAX_FILES or end != XTCO_HEAD + XTCO_ENTRY * count or end > len(blob):
+        raise XtappError(f'{where}: {count} files / table end {end:#x} in {len(blob)} bytes')
+    out = []
+    for i in range(count):
+        e = XTCO_HEAD + XTCO_ENTRY * i
+        name = blob[e:e + XTCO_NAME].split(b'\0')[0]
+        off, length = struct.unpack_from('<II', blob, e + XTCO_NAME)
+        if not name or end + off + length > len(blob):
+            raise XtappError(f'{where}: entry {i} ({name!r}) at {off:#x}+{length} does not fit')
+        out.append((name.decode('utf-8'), blob[end + off:end + off + length]))
+    return out
+
+
+def licorice_code_files(app_dir, entry='index.lua'):
+    """The files `pack --format licorice` puts in the code section: every `*.lua` under `app_dir`
+    (relative paths with "/", so `require "lib.x"` finds "lib/x.lua"), the entry first. Raises when
+    the entry is missing. Returns (files, skipped) -- skipped: the other files, which go nowhere (the
+    assets and data sections are not built by this tool)."""
+    files, skipped = [], []
+    for root, dirs, names in os.walk(app_dir):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+        for n in sorted(names):
+            if n.startswith('.'):
+                continue
+            rel = os.path.relpath(os.path.join(root, n), app_dir).replace(os.sep, '/')
+            if n.endswith('.lua'):
+                files.append((rel, open(os.path.join(root, n), 'rb').read()))
+            elif rel not in ('manifest.json', 'app.xtapp'):
+                skipped.append(rel)
+    if not any(n == entry for n, _ in files):
+        raise XtappError(f'{app_dir}: no {entry} -- the Lua host runs the manifest "entry" '
+                         f'(default index.lua) out of the code section and stops with '
+                         f'"entry missing" without it')
+    files.sort(key=lambda f: (f[0] != entry, f[0]))
+    return files, skipped
+
+
+def licorice_sections(data):
+    """{name: (offset, length)} of a Licorice container's section table (LICORICE_SECTIONS), plus
+    'feature_mask'. A length of 0 is an absent section."""
+    data = bytes(data)
+    out = {name: struct.unpack_from('<II', data, off) for name, off, _ in LICORICE_SECTIONS}
+    out['feature_mask'] = struct.unpack_from('<I', data, 0x0c)[0]
+    return out
+
+
+def read_licorice_code(data, dek):
+    """The code section of a Licorice container, the way the launch reads it (FUN_4210944c ->
+    FUN_42107fcc -> FUN_42108c44): with feature bit 0x2 set, the manifest's hmac_code must equal
+    HMAC-SHA256(DEK, the stored bytes), then AES-128-CTR(DEK, iv_code) decrypts them; then the XTCO
+    table. Returns [(name, bytes)]. `dek` is the 16-byte content key (pack's report has it)."""
+    head, obj = read_licorice_container(data)
+    off, length = licorice_sections(data)['code']
+    if not length:
+        raise XtappError('no code section (a manifest-only package: it installs but cannot run)')
+    sec = bytes(data)[off:off + length]
+    if len(sec) != length:
+        raise XtappError(f'the code section {off:#x}+{length} runs past the file')
+    if head['feature_mask'] & LICORICE_FEATURE_CODE:
+        want = bytes.fromhex(obj.get('hmac_code', ''))
+        if not hmac.compare_digest(want, licorice_section_hmac(dek, sec)):
+            raise XtappError('hmac_code does not match HMAC-SHA256(DEK, code section): the firmware '
+                             'refuses the install and the launch')
+        sec = licorice_ctr(dek, bytes.fromhex(obj['iv_code']), sec)
+    return read_xtco(sec)
 
 
 def validate_manifest_licorice(obj, where='manifest.json'):
@@ -327,32 +493,66 @@ def validate_manifest_licorice(obj, where='manifest.json'):
         if field in obj:
             raise XtappError(f'{where}: drop {field!r} -- `pack --format licorice` wraps a fresh DEK '
                              f'and writes the dek_wrap_* fields itself')
+    for field in LICORICE_IV_FIELDS:
+        if field in obj:
+            raise XtappError(f'{where}: drop {field!r} -- `pack --format licorice` encrypts the code '
+                             f'section with a fresh IV and writes iv_code / hmac_code itself')
+    entry = obj.get('entry', 'index.lua')
+    if not isinstance(entry, str) or not entry or len(entry.encode('utf-8')) > 0x1f:
+        raise XtappError(f'{where}: "entry" must name a file of the code section in 1..31 bytes '
+                         f'(FUN_42108648 copies it into a 32-byte field), got {entry!r}')
     return obj
 
 
-def build_licorice_container(manifest_obj, pubkey, dek=None):
-    """A manifest-only Licorice container (feature mask 0: no encrypted code/assets/data/fonts yet).
-    Wraps a DEK for `pubkey`, writes the dek_wrap_* fields into the manifest, and lays out the 0x80
-    header the installer parses (FUN_42108380). Returns (bytes, dek). The header, confirmed by a live
-    install: XTAP magic, version u16 = 1, header-size u16 = 0x80, total-size u32 at 0x08, feature
-    mask u32 at 0x0c, manifest offset/length at 0x10/0x14."""
+def build_licorice_container(manifest_obj, pubkey, dek=None, code_files=None, iv=None):
+    """A Licorice container: the 0x80 header the installer parses (FUN_42108380), the manifest with
+    a DEK wrapped for `pubkey` (the dek_wrap_* fields), and -- given `code_files`, [(name, bytes)] --
+    the code section. Returns (bytes, dek).
+
+    The header, confirmed by live installs: XTAP magic, version u16 = 1, header-size u16 = 0x80,
+    total-size u32 at 0x08, feature mask u32 at 0x0c, manifest offset/length at 0x10/0x14, then the
+    section table (LICORICE_SECTIONS: code at 0x18). Without `code_files` the package is
+    manifest-only (feature mask 0, every section length 0): it installs, but the Lua host finds no
+    entry and the Mini Apps list answers "Launch failed".
+
+    With `code_files` the code section is build_xtco(code_files) encrypted with AES-128-CTR under
+    the DEK and a fresh 16-byte IV (`iv` to fix it), placed after the manifest (16-byte aligned);
+    the manifest gains iv_code (32 hex) and hmac_code (64 hex = HMAC-SHA256(DEK, ciphertext)), and
+    the feature mask bit 0x2 -- the exact inputs FUN_42107fcc checks and decrypts at launch."""
     obj = collections.OrderedDict(manifest_obj)
     dek, E, wrapped = licorice_wrap_dek(pubkey, dek)
     obj['dek_wrap_alg'] = LICORICE_ALG
     obj['dek_wrap_key_id'] = LICORICE_KEY_ID
     obj['dek_wrap_ephemeral_pub'] = E.hex()
     obj['wrapped_dek_pack'] = wrapped.hex()
+    code = b''
+    if code_files is not None:
+        iv = bytes(iv) if iv is not None else os.urandom(16)
+        if len(iv) != 16:
+            raise XtappError(f'the code IV must be 16 bytes, got {len(iv)}')
+        plain = build_xtco(code_files)
+        if len(plain) > LICORICE_INMEM_MAX:
+            raise XtappError(f'the code section is {len(plain)} bytes; above {LICORICE_INMEM_MAX} the '
+                             f'firmware streams it from the card (FUN_42109d7c), a path this tool '
+                             f'does not build or test')
+        code = licorice_ctr(dek, iv, plain)
+        obj['iv_code'] = iv.hex()
+        obj['hmac_code'] = licorice_section_hmac(dek, code).hex()
     blob = json.dumps(obj, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
     if not 1 <= len(blob) <= MANIFEST_MAX:
         raise XtappError(f'the manifest is {len(blob)} bytes; the firmware accepts 1..{MANIFEST_MAX}')
-    total = HEADER_SIZE + len(blob)
+    pad = (-(HEADER_SIZE + len(blob)) % 16) if code else 0
+    code_off = HEADER_SIZE + len(blob) + pad
+    total = code_off + len(code) if code else HEADER_SIZE + len(blob)
     head = bytearray(HEADER_SIZE)
     head[0:4] = MAGIC
     struct.pack_into('<HH', head, 4, VERSION, HEADER_SIZE)        # version 1, header size 0x80
-    struct.pack_into('<I', head, 0x08, total)                    # total/payload size (FUN_42108380 bound)
-    struct.pack_into('<I', head, 0x0c, 0)                        # feature mask: no encrypted sections
+    struct.pack_into('<I', head, 0x08, total)                    # total size (FUN_42108380 bound)
+    struct.pack_into('<I', head, 0x0c, LICORICE_FEATURE_CODE if code else 0)   # feature mask
     struct.pack_into('<II', head, 0x10, MANIFEST_OFF, len(blob))  # manifest offset + length
-    return bytes(head) + blob, dek
+    if code:
+        struct.pack_into('<II', head, 0x18, code_off, len(code))  # the code section
+    return bytes(head) + blob + bytes(pad) + code, dek
 
 
 def read_licorice_container(data, where='app.xtapp'):
@@ -396,10 +596,11 @@ def is_licorice_container(data):
         return False
 
 
-def pack_licorice(app_dir, out=None, image=LICORICE_IMAGE):
+def pack_licorice(app_dir, out=None, image=LICORICE_IMAGE, code=True):
     """Write a Licorice `app.xtapp` (or `out`) from `<app_dir>/manifest.json`, wrapping a fresh DEK
-    for the device key derived from `image`. The package is manifest-only (installable, not yet
-    runnable). Returns a report. `app_dir` is only read."""
+    for the device key derived from `image`, with the code section built from every `*.lua` in
+    `app_dir` (licorice_code_files; `code=False`: manifest-only, installable but not runnable).
+    Returns a report (its 'dek' is the content key, for read_licorice_code). `app_dir` is only read."""
     mpath = os.path.join(app_dir, 'manifest.json')
     if not os.path.exists(mpath):
         raise XtappError(f'{mpath} not found: a Lua app directory holds manifest.json')
@@ -407,16 +608,23 @@ def pack_licorice(app_dir, out=None, image=LICORICE_IMAGE):
     if not os.path.exists(image):
         raise XtappError(f'{image} not found: the Licorice device key is read from the stock app '
                          f'image (gitignored under images/). Pass --image to point at it')
-    data, dek = build_licorice_container(obj, licorice_device_pubkey(image))
+    files, skipped = licorice_code_files(app_dir, obj.get('entry', 'index.lua')) if code else ([], [])
+    data, dek = build_licorice_container(obj, licorice_device_pubkey(image), code_files=files or None)
     dst = out or os.path.join(app_dir, 'app.xtapp')
     with open(dst, 'wb') as f:
         f.write(data)
-    return {'out': dst, 'bytes': len(data), 'manifest_bytes': len(data) - HEADER_SIZE,
+    sec = licorice_sections(data)
+    warnings = [f'{n} is not packed (only *.lua files go into the code section; this tool builds no '
+                f'assets/data section)' for n in skipped]
+    return {'out': dst, 'bytes': len(data),
+            'manifest_bytes': struct.unpack_from('<I', data, 0x14)[0],
+            'code_offset': sec['code'][0], 'code_bytes': sec['code'][1],
+            'code_files': [n for n, _ in files], 'feature_mask': sec['feature_mask'],
             'app_id': obj['app_id'], 'display_name': obj['display_name'],
-            'permissions': list(obj.get('permissions', [])), 'dek': dek.hex(),
-            'note': 'manifest-only: installs through Licorice (the "Installed" toast), lands at '
-                    '/sdcard/XTApps/<app_id>/app.xtapp; no runnable code section yet '
-                    '(docs/licorice-apps.md)'}
+            'permissions': list(obj.get('permissions', [])), 'dek': dek.hex(), 'warnings': warnings,
+            'note': ('runnable: install it from All Files, then open it from the drawer\'s Mini Apps '
+                     '(docs/licorice-apps.md)') if files else
+                    'manifest-only: installs through Licorice, but "Launch failed" when opened'}
 
 
 # ---------------------------------------------------------------- the commands
@@ -483,11 +691,12 @@ def install(img, app_dir, as_dir=None):
     return rep
 
 
-def install_licorice(img, app_dir, image=LICORICE_IMAGE, as_name=None):
+def install_licorice(img, app_dir, image=LICORICE_IMAGE, as_name=None, code=True):
     """Put a Licorice `.xtapp` package onto a card so Licorice can install it from All Files. Unlike
     classic install, this does NOT drop a folder in /XTApps -- Licorice ignores that; it copies the
     built package to the card root as `<app_id>.xtapp`, where it shows up in All Files. The user (or
-    `tests/test_licorice_apps.py`) then taps it and confirms "Install this package?"."""
+    `tests/test_licorice_apps.py`) then taps it and confirms "Install this package?". `code` as in
+    pack_licorice."""
     if not os.path.isdir(app_dir):
         raise XtappError(f'{app_dir} is not a directory')
     if not os.path.exists(img):
@@ -495,7 +704,7 @@ def install_licorice(img, app_dir, image=LICORICE_IMAGE, as_name=None):
     if not shutil.which('mcopy'):
         raise XtappError('mcopy not found (brew install mtools / apt install mtools)')
     with tempfile.TemporaryDirectory() as tmp:
-        rep = pack_licorice(app_dir, os.path.join(tmp, 'app.xtapp'), image)
+        rep = pack_licorice(app_dir, os.path.join(tmp, 'app.xtapp'), image, code)
         name = (as_name or rep['app_id']) + '.xtapp'
         mtools(img, 'mcopy', '-o', rep['out'], f'::/{name}')
     listing = mtools(img, 'mdir', '-b', '::/', check=False).stdout
@@ -628,6 +837,8 @@ def main(argv=None):
                    help='classic (7.x, default) or licorice (XTOS 261013, key-wrapped)')
     p.add_argument('--image', default=LICORICE_IMAGE,
                    help='licorice: the stock app image the device key is read from')
+    p.add_argument('--manifest-only', action='store_true',
+                   help='licorice: no code section (installs, does not run)')
 
     p = sub.add_parser('info', help='print the header and manifest of an .xtapp')
     p.add_argument('file')
@@ -641,6 +852,8 @@ def main(argv=None):
                    help='classic (-> /XTApps/<id>/) or licorice (-> card root <id>.xtapp)')
     p.add_argument('--key-image', dest='key_image', default=LICORICE_IMAGE,
                    help='licorice: the stock app image the device key is read from')
+    p.add_argument('--manifest-only', action='store_true',
+                   help='licorice: no code section (installs, does not run)')
 
     a = ap.parse_args(argv)
     try:
@@ -653,11 +866,16 @@ def main(argv=None):
                   f'`xtapp.py install SD.img {a.out_dir}` (docs/lua-apps.md)')
         elif a.cmd == 'pack':
             if a.format == 'licorice':
-                rep = pack_licorice(a.app_dir, a.out, a.image)
+                rep = pack_licorice(a.app_dir, a.out, a.image, not a.manifest_only)
                 print(f'{rep["out"]}: {rep["bytes"]} bytes = {HEADER_SIZE:#x} header + '
-                      f'{rep["manifest_bytes"]} manifest (licorice, key-wrapped)\n'
+                      f'{rep["manifest_bytes"]} manifest + {rep["code_bytes"]} code '
+                      f'(licorice, key-wrapped, feature mask {rep["feature_mask"]:#x})\n'
                       f'  app_id {rep["app_id"]!r}, display_name {rep["display_name"]!r}, '
-                      f'permissions {rep["permissions"] or "none"}\n  note: {rep["note"]}')
+                      f'permissions {rep["permissions"] or "none"}\n'
+                      f'  code section: {", ".join(rep["code_files"]) or "none"}\n'
+                      f'  note: {rep["note"]}')
+                for w in rep['warnings']:
+                    print(f'  warning: {w}')
             else:
                 rep = pack(a.app_dir, a.out)
                 print(f'{rep["out"]}: {rep["bytes"]} bytes = {HEADER_SIZE:#x} header + '
@@ -671,9 +889,12 @@ def main(argv=None):
             licorice = is_licorice_container(raw)
             reader = read_licorice_container if licorice else read_container
             head, obj = reader(raw, a.file)
+            sections = licorice_sections(raw) if licorice else None
             if a.json:
-                print(json.dumps({'format': 'licorice' if licorice else 'classic',
-                                  'header': head, 'manifest': obj}, indent=2, ensure_ascii=False))
+                doc = {'format': 'licorice' if licorice else 'classic', 'header': head, 'manifest': obj}
+                if licorice:
+                    doc['sections'] = sections
+                print(json.dumps(doc, indent=2, ensure_ascii=False))
             else:
                 keys = (('magic', 'version', 'header_size', 'total_size', 'feature_mask',
                          'manifest_offset', 'manifest_length') if licorice else
@@ -684,18 +905,30 @@ def main(argv=None):
                 for k in keys:
                     v = head[k]
                     print(f'  {k:<16} {v if isinstance(v, str) else f"{v:#x} ({v})"}')
+                for name, _, bit in LICORICE_SECTIONS if licorice else ():
+                    off, ln = sections[name]
+                    if ln:
+                        how = ('encrypted' if sections['feature_mask'] & bit else 'clear') if bit else 'clear'
+                        print(f'  section {name:<8} {off:#x} + {ln} ({how})')
                 print('  manifest:')
                 for line in json.dumps(obj, indent=2, ensure_ascii=False).splitlines():
                     print(f'    {line}')
                 try:
-                    (validate_manifest_licorice if licorice else validate_manifest)(obj, a.file)
+                    if licorice:                    # the fields pack writes are not the author's
+                        validate_manifest_licorice(collections.OrderedDict(
+                            (k, v) for k, v in obj.items() if k not in LICORICE_GENERATED), a.file)
+                    else:
+                        validate_manifest(obj, a.file)
                 except XtappError as e:
                     print(f'  warning: {e}')
         elif a.cmd == 'install' and a.format == 'licorice':
-            rep = install_licorice(a.image, a.app_dir, a.key_image)
+            rep = install_licorice(a.image, a.app_dir, a.key_image, code=not a.manifest_only)
             print(f'{a.image}: {rep["card_path"]} <- {a.app_dir} (licorice)\n'
-                  f'  {rep["display_name"]!r} ({rep["app_id"]}); install it from All Files on the '
+                  f'  {rep["display_name"]!r} ({rep["app_id"]}), code: '
+                  f'{", ".join(rep["code_files"]) or "none"}; install it from All Files on the '
                   f'device.\n  note: {rep["note"]}')
+            for w in rep['warnings']:
+                print(f'  warning: {w}')
         else:
             rep = install(a.image, a.app_dir, a.as_dir)
             print(f'{a.image}: {rep["card_dir"]}/ <- {a.app_dir}\n'

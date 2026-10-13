@@ -14,9 +14,11 @@ same day: make this a fully functional emulator; the old plan (items b–d below
 the lock screen, all against 7.6.8) matters less now — do not start them unless the owner brings them back.**
 Licorice in the emulator: reader, files, light panel and frontlight, Dark mode, Wi-Fi and Bluetooth toggles,
 sleep and wake, auto power-off, battery, USB mode (the OTG core, `docs/usb-otg.md`), and installing a signed
-package `tools/xtapp.py --format licorice` builds (`docs/licorice-apps.md`); the owner judged twelve of its
-screens 1:1 with the device by eye. **Next: launching an installed Licorice app** (the code section and the
-launch-time decrypt, `docs/licorice-apps.md` "Open"), then USB mass storage past the device descriptor.
+package `tools/xtapp.py --format licorice` builds and running it from Mini Apps (`docs/licorice-apps.md`); the
+owner judged twelve of its screens 1:1 with the device by eye. **Next: USB mass storage past the device
+descriptor** (the built-in host's SET_ADDRESS, configuration and bulk-only transport, `docs/usb-otg.md`), then
+the Licorice app sections beyond code (assets / data / fonts). WiFi and BLE traffic is the largest gap left
+and a project of its own: take it on deliberately.
 
 **Where things stand.** Every firmware runs unpatched: CrossPoint 1.6.0, the stock `xteink_app` 7.2.4, 7.5.4
 and 7.6.8, and Licorice 261013; the device runs **Licorice in app1** (7.6.8 in app0). `make test` is 252 tests in

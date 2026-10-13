@@ -74,7 +74,7 @@ The walk (2026-10-13, by hand, then `test_licorice_walk`, 20 s):
 | Images | a book cover is drawn as an ordered 1-bit dither: Licorice sends no LUTs (PSR REG 0, the panel's own waveforms), so nothing on it is grey; "Image mode" switches Built-in / External, not grey |
 | Settings | all seven subpages open (Account, General, Display, Network with OPDS / Calibre wireless / KOReader sync, Buttons, Reading, About); About reads "X4 Pro-EA30", the MAC and serial from the emulated efuses and "XT Licorice 261013" |
 | USB mode | comes up and waits for a computer ("USB mode — On"), since the USB OTG core is modelled (`docs/usb-otg.md`); before that TinyUSB asserted (`check_dwc2 177: ASSERT FAILED` … `tusb_rhport_init`) and the screen ended at "Could not start USB disk mode". Licorice restarts the CPU into the mode (two `RTC_SW_CPU_RST` banners). The built-in host reads its device descriptor, 0x303A:0x4002; no disk crosses the bus |
-| Installing a `.xtapp` | a package built with `tools/xtapp.py pack --format licorice` installs through the UI ("Installed" toast, lands at `/sdcard/XTApps/<app_id>/`); the 7.x-style `app.xtapp` gives "Install failed". The format is reverse-engineered in `docs/licorice-apps.md`. **Launching** an installed app is still open: the runnable code section is not built yet, so an installed app reports "Cannot run yet" |
+| Mini apps | a package built with `tools/xtapp.py pack --format licorice` installs through the UI ("Installed" toast, lands at `/sdcard/XTApps/<app_id>/`) and **runs**: Mini Apps (shown once ten taps on Settings → About → "Model" set NVS `fw/lua_nav`) lists it, a tap launches it, it takes taps, and the Home pad leaves it. The 7.x-style `app.xtapp` gives "Install failed". The format and the launch are in `docs/licorice-apps.md` |
 
 **The owner's check (2026-10-13).** Licorice has no screen capture, so the pixel-exact parity method of
 `docs/parity.md` has no device side here. The owner compared twelve emulator screens with the reader by eye
@@ -111,11 +111,9 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
-- Launching an installed app: the package format is reversed and a package installs (`docs/licorice-apps.md`),
-  but the runnable code section and the launch-time decrypt are not, so an installed app says "Cannot run
-  yet"; and where the Mini Apps list lives in the UI (not in the drawer's six items).
+- Mini apps beyond the code section: the assets / data / fonts sections are read but not yet built, and
+  the >512 KB streamed code path is untested (`docs/licorice-apps.md` "Open").
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no
   computer sees the disk.
 - What the RTC segments hold (the bootloader loads them; the emulator boots, so they are at least not
   in the way).
-- A Ghidra pass over the new image (`tools/ghidra_stock.py` assumes the 7.x layout and needs teaching).
