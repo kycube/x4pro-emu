@@ -21,7 +21,7 @@ the nav menu differs from tests/golden/stock-menu.png only inside the third entr
 It reuses test_stock.py's `stock_card`, `masked_diff`, `tap_repaints`, `state` and `wait_for`.
 """
 import os, shutil, subprocess, sys, pytest
-from conftest import x4emu, ROOT, PY, QEMU
+from conftest import x4emu, ROOT, PY, QEMU, instance_name, copy_image
 from test_stock import (DUMP, STATUS_BAR_COLS, PANEL_W, masked_diff, state, wait_for,   # noqa: F401
                         tap_repaints, stock_card)                        # noqa: F401 (fixture)
 
@@ -222,7 +222,7 @@ def test_works_on_a_16mb_flash_image(tmp_path):
     if not os.path.exists(DUMP):
         pytest.skip('device dump not available')
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP, flash)
+    copy_image(DUMP, flash)
     assert 'USB Mode' in run(flash, 'get', '11', '--lang', 'en')
     assert '16 MB flash image, app0 at 0x10000' in run(flash, 'set', '11', 'en', 'Transfer')
     assert packs(flash).group_strings(11)[1] == 'Transfer'
@@ -278,14 +278,14 @@ def relabelled(tmp_path, request, stock_card):                                  
     if not os.path.exists(MENU_GOLDEN):
         pytest.skip('tests/golden/stock-menu.png not available')
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP, flash)
+    copy_image(DUMP, flash)
     subprocess.run([PY, NVSEDIT, str(flash), 'set-u8', 'user_config', 'net_en', '0'],
                    check=True, stdout=subprocess.DEVNULL)
     subprocess.run([PY, TOOL, str(flash), 'set', '11', 'en', 'Transfer'],
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
-    name = 'st-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')
+    copy_image(stock_card, sd)
+    name = instance_name(request.node.name, request.node.nodeid)
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power')
     yield name, tmp_path

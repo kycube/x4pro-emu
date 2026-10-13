@@ -2,9 +2,10 @@
 
 The flow is the one `tests/test_touch_reader.py` walks by hand — boot CrossPoint, tap "Browse
 Files" on the Home menu, come back with the Home pad — but recorded into a journal and replayed
-onto two freshly booted instances. All three runs use `run --deterministic` (`-icount 3`: guest
-time follows the instruction count, so the same instruction stream reaches Home at the same guest
-millisecond), and the replay waits for the guest clock, not the host clock, before each input.
+onto two freshly booted instances. All three runs use `run --deterministic --icount shift=3,sleep=off`
+(guest time follows the instruction count, so the same instruction stream reaches Home at the same
+guest millisecond, and idle guest time passes without waiting for the host), and the replay waits for
+the guest clock, not the host clock, before each input.
 
 The acceptance is *identical screenshots*, not identical guest timestamps: the replay's waits are
 host-paced polls of `state.uptime_us`, so an input lands a few milliseconds late. That is harmless
@@ -22,11 +23,18 @@ BROWSE_FILES = (345, 350)      # the Home menu entry, in landscape panel pixels 
 BOOT_S = 300                   # host seconds for a boot / a replay subprocess (a loaded host is slow)
 
 
+# `--deterministic` is `-icount 3`; `sleep=off` on top lets the idle guest time between the inputs
+# (the `--quiet 2` waits, the replay's waits for each step's t_ms) pass at once instead of in real
+# time. It is also what keeps the host out of the guest clock entirely: with sleep=on an idle guest
+# waits in real time, so how long the host took leaks into guest time.
+ICOUNT = 'shift=3,sleep=off'
+
+
 def boot(name, images):
     """A deterministic CrossPoint on `name`, at Home. Nothing else: the journal's first step waits
     for its own guest time, and the recorded `--quiet 2` waits for the panel."""
     x4emu(name, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd',
-          '--deterministic', timeout=BOOT_S)
+          '--deterministic', '--icount', ICOUNT, timeout=BOOT_S)
     x4emu(name, 'wait-text', 'Entering activity: Home', '--timeout', 180, timeout=BOOT_S)
 
 

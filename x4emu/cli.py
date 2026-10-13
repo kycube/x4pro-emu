@@ -42,10 +42,11 @@ def build_parser():
                    help='guest time follows the instruction count (-icount 3 unless --icount says '
                         'otherwise) and the RTC starts from a fixed epoch, so a replayed script lands '
                         'its inputs at the same guest times and sees the same clock run to run')
-    p.add_argument('--boot-hold-power', nargs='?', type=int, const=c.BOOT_HOLD_POWER_MS, default=None, metavar='MS',
-                   help='start halted, hold the power button from reset for MS ms (default '
-                        f'{c.BOOT_HOLD_POWER_MS}), then release: the stock firmware boots cold '
-                        'instead of deep-sleeping in its boot-preflight')
+    p.add_argument('--boot-hold-power', nargs='?', type=int, const=c.BOOT_HOLD_AUTO, default=None, metavar='MS',
+                   help='start halted, hold the power button from reset, then release: the stock firmware '
+                        'boots cold instead of deep-sleeping in its boot-preflight. Without MS the button '
+                        'is held until the preflight has printed its decision (at most '
+                        f'{c.BOOT_HOLD_POWER_MS} ms of guest time); with MS for MS ms of guest time')
     p.add_argument('--machine', default='xteink-x4pro'); p.add_argument('--debug', default='guest_errors,unimp')
     p.add_argument('--dry-run', action='store_true'); p.add_argument('extra', nargs='*'); p.set_defaults(fn=c.cmd_run)
     sp.add_parser('stop').set_defaults(fn=c.cmd_stop)

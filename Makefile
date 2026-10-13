@@ -4,12 +4,14 @@ QEMU    := qemu/build/qemu-system-xtensa
 NPROC   := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 QEMU_REF ?= febae182e132e4055529be423a818225ebddaa3a
 
-.PHONY: setup build test qemu firmware models clean-run run help rom-symbols
+.PHONY: setup build test test-serial test-durations qemu firmware models clean-run run help rom-symbols
 
 help:
 	@echo "make setup   - venv, clone qemu (esp-develop @ $(QEMU_REF)) + apply patches, clone firmware"
 	@echo "make build   - build qemu, models, CrossPoint x4pro firmware"
-	@echo "make test    - model unit tests + pytest end-to-end (no device needed)"
+	@echo "make test    - model unit tests + pytest end-to-end on TEST_JOBS workers (no device needed)"
+	@echo "make test-serial    - the same, one test at a time"
+	@echo "make test-durations - re-measure tests/durations.json (the parallel run's order)"
 
 setup: .venv/bin/python qemu/.x4pro-patched firmware/platformio.ini
 	@echo "setup done"
@@ -17,7 +19,7 @@ setup: .venv/bin/python qemu/.x4pro-patched firmware/platformio.ini
 .venv/bin/python:
 	python3 -m venv .venv
 	.venv/bin/pip install -q --upgrade pip
-	.venv/bin/pip install -q esptool pyserial pillow pytest mcp capstone
+	.venv/bin/pip install -q esptool pyserial pillow pytest pytest-xdist mcp capstone
 
 qemu/.git:
 	git clone --branch esp-develop --depth 1 https://github.com/espressif/qemu.git qemu
@@ -61,13 +63,34 @@ models:
 
 build: qemu models firmware
 
-# PYTEST_ARGS: extra pytest flags (empty by default, so `make test` is unchanged).
-# CI passes --basetemp=... so the PNGs the tests write land in a known directory.
+# PYTEST_ARGS: extra pytest flags (empty by default). CI passes --basetemp=... so the PNGs the tests
+# write land in a known directory.
 PYTEST_ARGS ?=
+
+# `make test` runs pytest on TEST_JOBS pytest-xdist workers: every test boots its own emulator under
+# its own instance name (tests/conftest.py adds the worker to X4EMU_TEST_PREFIX), --maxschedchunk=1
+# hands the tests out one at a time, and tests/conftest.py orders them longest first from
+# tests/durations.json, so the long stock tests start at once. TEST_JOBS defaults to the host's CPU
+# count, at most TEST_JOBS_MAX (each emulator runs two vCPU threads, but mostly idles in WAITI): 4 on
+# CI's 4-vCPU runner, TEST_JOBS_MAX on the desk Mac. `make test TEST_JOBS=1` and `make test-serial`
+# run one test at a time; without pytest-xdist in .venv the tests run one at a time as well.
+TEST_JOBS_MAX ?= 8
+TEST_JOBS ?= $(shell n=$(NPROC); [ "$$n" -gt $(TEST_JOBS_MAX) ] && n=$(TEST_JOBS_MAX); echo $$n)
+XDIST_ARGS = $(shell [ "$(TEST_JOBS)" -gt 1 ] && $(PY) -c 'import xdist' 2>/dev/null && echo --numprocesses=$(TEST_JOBS) --maxschedchunk=1)
 
 test: models
 	$(MAKE) -C models test
+	$(if $(XDIST_ARGS),,@[ "$(TEST_JOBS)" -le 1 ] || echo "pytest-xdist is not in .venv (.venv/bin/pip install pytest-xdist): the tests run one at a time")
+	$(PY) -m pytest -q $(XDIST_ARGS) $(PYTEST_ARGS) tests
+
+test-serial: models
+	$(MAKE) -C models test
 	$(PY) -m pytest -q $(PYTEST_ARGS) tests
+
+# Re-measure every test's duration into tests/durations.json (merged: tests that did not run keep
+# their old value). Run it on an otherwise idle machine after adding or reshaping a long test.
+test-durations:
+	$(PY) -m pytest -q $(XDIST_ARGS) --record-durations=tests/durations.json $(PYTEST_ARGS) tests
 
 # One-command edit-to-pixels loop: build the firmware, assemble the image, boot, wait, screenshot.
 NAME ?= dev0

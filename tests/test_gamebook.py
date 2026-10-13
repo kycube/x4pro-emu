@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 import pytest
-from conftest import x4emu, ROOT, PY, instance_name
+from conftest import x4emu, ROOT, PY, instance_name, copy_image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -135,11 +135,11 @@ def gamebook_stock(tmp_path, request, stock_card):
         pytest.skip('mtools not available')
     name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP_768, flash)
+    copy_image(DUMP_768, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'redact'],
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
+    copy_image(stock_card, sd)
     rep = xtapp.install(str(sd), APP)
     assert rep['card_dir'] == '/XTApps/gull-rock', rep
     x4emu(name, 'stop', check=False)

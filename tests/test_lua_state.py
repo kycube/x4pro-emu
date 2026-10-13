@@ -9,9 +9,12 @@ probe, docs/log.md). tests/test_aes.py checks the accelerator itself against a h
 
 The app counts its own visits in ctx.state and draws what on_load got back as horizontal lines
 (one per earlier visit) plus a vertical marker when a string and a nested float came back intact,
-so the screenshot is read without OCR or goldens. Exit -> re-enter shows the state across a leave;
-a stop and a fresh cold boot from the same flash and card shows it across a power cycle, i.e. read
-back from the card and decrypted. Boots the owner's 7.6.8 dump as a redacted copy; skips without it.
+so the screenshot is read without OCR or goldens. Exit -> re-enter shows the state across a leave
+(`test_lua_state_survives_exit_on_stock_768`); a stop and a fresh cold boot from the same flash and
+card shows it across a power cycle, i.e. read back from the card and decrypted
+(`test_lua_state_survives_reboot_on_stock_768`; two tests on fresh cards, so a parallel run does not
+walk both halves one after the other). Boots the owner's 7.6.8 dump as a redacted copy; skips
+without it.
 """
 import json
 import os
@@ -20,7 +23,7 @@ import subprocess
 import sys
 
 import pytest
-from conftest import x4emu, ROOT, PY, instance_name
+from conftest import x4emu, ROOT, PY, instance_name, copy_image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -78,11 +81,11 @@ def state_stock(tmp_path, request, stock_card):
         pytest.skip('mtools not available')
     name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP_768, flash)
+    copy_image(DUMP_768, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'redact'],
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
+    copy_image(stock_card, sd)
     rep = xtapp.install(str(sd), str(write_app(tmp_path / APP_ID)))
     assert rep['card_dir'] == f'/XTApps/{APP_ID}', rep
     x4emu(name, 'stop', check=False)
@@ -138,7 +141,12 @@ def card_file(sd, path, out):
     return out.read_bytes() if r.returncode == 0 else None
 
 
-def test_lua_state_survives_exit_and_reboot_on_stock_768(state_stock):
+def no_aes_errors(name):
+    err = open(os.path.join(ROOT, '.x4emu', name, 'stderr.log'), errors='replace').read()
+    assert '[AES]' not in err, err
+
+
+def test_lua_state_survives_exit_on_stock_768(state_stock):
     name, tmp, flash, sd = state_stock
     start(name, flash, sd)
 
@@ -147,8 +155,15 @@ def test_lua_state_survives_exit_and_reboot_on_stock_768(state_stock):
     leave_app(name)                                 # saves {visits=1, ...}: the AES/GDMA path
     open_app(name, from_list=True)
     assert drawn(name, tmp, 'reentered') == (1, True), 'ctx.state did not come back after Exit'
-    leave_app(name)                                 # saves {visits=2, ...}
+    no_aes_errors(name)
 
+
+def test_lua_state_survives_reboot_on_stock_768(state_stock):
+    name, tmp, flash, sd = state_stock
+    start(name, flash, sd)
+
+    open_app(name)
+    leave_app(name)                                 # saves {visits=1, ...}
     x4emu(name, 'stop')
     blob = card_file(sd, f'/XTApps/{APP_ID}/state.xtsv', tmp / 'state.xtsv')
     assert blob is not None, f'no /XTApps/{APP_ID}/state.xtsv on the card'
@@ -156,7 +171,5 @@ def test_lua_state_survives_exit_and_reboot_on_stock_768(state_stock):
 
     start(name, flash, sd)                          # a cold boot: the state comes back from the card
     open_app(name)
-    assert drawn(name, tmp, 'rebooted') == (2, True), 'ctx.state did not survive a power cycle'
-
-    err = open(os.path.join(ROOT, '.x4emu', name, 'stderr.log'), errors='replace').read()
-    assert '[AES]' not in err, err
+    assert drawn(name, tmp, 'rebooted') == (1, True), 'ctx.state did not survive a power cycle'
+    no_aes_errors(name)

@@ -11,7 +11,8 @@ INPUT = '/machine/x4pro-input'
 
 
 class QMP:
-    def __init__(self, path, timeout=5.0):
+    def __init__(self, path, timeout=5.0, name=None):
+        self.name = name                  # the instance (set by `connect`): wait-quiet's input mark
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(timeout)
         self.sock.connect(path)
@@ -55,7 +56,7 @@ def connect(name, timeout=5.0):
     p = os.path.join(idir(name), 'qmp.sock')
     if not os.path.exists(p):
         sys.exit(f'no instance "{name}" (missing {p}); run `x4emu run` first')
-    return QMP(p, timeout)
+    return QMP(p, timeout, name)
 
 
 def pid_alive(name):

@@ -20,6 +20,15 @@ def x4emu(name, *args, check=True, timeout=120):
 # Mac. `instance_name` clamps to what actually fits the checkout it is running in.
 SOCK_MAX = 104          # the smaller of the two caps, so a name that fits here fits everywhere
 
+# Under pytest-xdist (`make test` runs the suite on several workers) every worker is its own pytest
+# process: X4EMU_TEST_PREFIX gains the worker number (`gw3` -> `3`, so `sp-` becomes `sp3-`, no
+# prefix becomes `gw3-`), and two workers never share an instance even for the names that are not
+# derived from the test node (`instance_name('rpa')`). Set here, at import, before any test runs.
+_WORKER = os.environ.get('PYTEST_XDIST_WORKER')
+if _WORKER:
+    _base = os.environ.get('X4EMU_TEST_PREFIX', '').rstrip('-')
+    os.environ['X4EMU_TEST_PREFIX'] = (_base or 'gw') + _WORKER.removeprefix('gw') + '-'
+
 
 def instance_name(node_name, node_id=None):
     """The `--name` for one test: readable, unique, and short enough for the socket paths.
@@ -33,11 +42,35 @@ def instance_name(node_name, node_id=None):
     two agents, or two workers -- never share an instance (each test stops its own name first)."""
     name = 'pytest-' + os.environ.get('X4EMU_TEST_PREFIX', '') + \
         node_name.replace('[', '-').replace(']', '').replace('=', '-')
-    room = SOCK_MAX - len(os.path.join(ROOT, '.x4emu')) - len('/console.sock') - 2   # '/' + NUL
+    x4root = os.environ.get('X4EMU_ROOT') or ROOT           # where x4emu puts .x4emu/ (docs/x4emu.md)
+    room = SOCK_MAX - len(os.path.join(x4root, '.x4emu')) - len('/console.sock') - 2   # '/' + NUL
     if len(name) > room or node_id:
         h = hashlib.sha1((node_id or node_name).encode()).hexdigest()[:8]
         name = name[:min(len(name), room - 9)] + '-' + h
     return name
+
+
+def copy_image(src, dst):
+    """A private copy of a flash or card image for one test (the firmware writes to both). On macOS an
+    APFS clone: instant and nothing written, copy-on-write keeps the source as it is. A full run
+    copies about 8 GB of 16 MB flash and 64/256 MB card images, and a parallel run starts with every
+    worker copying at once, while the other workers' emulators read their cards. Elsewhere, or when
+    the clone fails (another volume), a plain copy. Returns `dst` as a string."""
+    src, dst = str(src), str(dst)
+    if sys.platform == 'darwin':
+        try:
+            import ctypes
+            libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+            if os.path.lexists(dst):
+                os.remove(dst)
+            if libc.clonefile(src.encode(), dst.encode(), 0) == 0:
+                os.chmod(dst, 0o644)                # a clone keeps the source's mode
+                return dst
+        except (OSError, AttributeError):
+            pass
+    import shutil
+    shutil.copyfile(src, dst)
+    return dst
 
 
 def x4emu_input(name, *args, **kw):
@@ -80,7 +113,7 @@ def images(images_base, tmp_path):
     page 3 (2026-09-07). Copying 16 + 64 MB takes well under a second."""
     import shutil
     flash = tmp_path / 'flash.bin'; sd = tmp_path / 'sd.img'
-    shutil.copyfile(images_base['flash'], flash); shutil.copyfile(images_base['sd'], sd)
+    copy_image(images_base['flash'], flash); copy_image(images_base['sd'], sd)
     return {'flash': str(flash), 'sd': str(sd), 'dir': images_base['dir']}
 
 @pytest.fixture
@@ -112,6 +145,73 @@ def pytest_addoption(parser):
     parser.addoption('--golden-drift', metavar='FILE', default=None,
                      help='upstream watch only: a mismatch against a device golden on a healthy emulator '
                           'becomes xfail and a JSON line in FILE (docs/upstream.md)')
+    parser.addoption('--record-durations', metavar='FILE', default=None,
+                     help='write every test\'s duration (setup + call + teardown, seconds) to FILE as JSON '
+                          '(`make test-durations` refreshes tests/durations.json this way)')
+
+
+# --- the order of a parallel run: longest first ------------------------------------------------
+# `make test` runs pytest-xdist with --maxschedchunk=1, and xdist hands tests out in collection
+# order, so the collection is sorted by tests/durations.json (seconds per node id, measured by
+# `make test-durations`): the long stock tests start at once instead of last. A test the file does
+# not know yet counts as long (it may be a new stock walk), so it starts early too. Only under xdist:
+# a sequential run keeps the files' own order. Every worker sorts its own collection the same way
+# (xdist requires identical collections).
+#
+# Plain longest-first is not quite it: xdist keeps two tests queued on every worker (a worker needs
+# the next item before it can finish the current one), and its first batch is two consecutive items
+# per worker, so the two longest tests would run back to back on worker 0. Each of the first N (N =
+# workers) is therefore paired with one of the shortest, which runs in the long one's shadow.
+DURATIONS = os.path.join(ROOT, 'tests', 'durations.json')
+UNKNOWN_DURATION_S = 30.0
+
+
+def load_durations(path=DURATIONS):
+    import json
+    try:
+        with open(path) as f:
+            return {k: float(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def schedule_order(items, durations, workers):
+    """`items` longest first, the first `workers` of them each followed by one of the shortest."""
+    est = lambda it: durations.get(it.nodeid, UNKNOWN_DURATION_S)       # noqa: E731
+    ranked = sorted(items, key=lambda it: -est(it))                      # stable: ties keep file order
+    n = min(workers, len(ranked) // 2) if workers > 1 else 0
+    head, rest = ranked[:n], ranked[n:]
+    tails, rest = rest[len(rest) - n:][::-1], rest[:len(rest) - n]
+    paired = [x for pair in zip(head, tails) for x in pair]
+    return paired + rest
+
+
+def pytest_collection_modifyitems(session, config, items):
+    if not _WORKER:
+        return
+    workers = int(os.environ.get('PYTEST_XDIST_WORKER_COUNT', '1'))
+    items[:] = schedule_order(items, load_durations(), workers)
+
+
+_durations = {}
+
+
+def pytest_runtest_logreport(report):
+    # under xdist this runs in the controller too, with every worker's reports
+    if not _WORKER:
+        _durations[report.nodeid] = _durations.get(report.nodeid, 0.0) + report.duration
+
+
+def pytest_sessionfinish(session, exitstatus):
+    path = session.config.getoption('--record-durations')
+    if not path or _WORKER or not _durations:
+        return
+    import json
+    old = load_durations(path) if os.path.exists(path) else {}
+    old.update({k: round(v, 1) for k, v in _durations.items()})
+    with open(path, 'w') as f:
+        json.dump(dict(sorted(old.items())), f, indent=0)
+        f.write('\n')
 
 
 def _emu_health(name):

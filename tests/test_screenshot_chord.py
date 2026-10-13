@@ -1,11 +1,11 @@
 """CrossPoint's own screenshot (Power + Down chord -> /screenshots/*.bmp on the card) must equal
 the emulator's panel screenshot pixel for pixel: the panel model shows what the firmware wrote."""
 import os, shutil, subprocess
-from conftest import x4emu, ROOT
+from conftest import x4emu, ROOT, copy_image
 
 def test_device_style_bmp_matches_panel(images, emu, tmp_path):
     sd = tmp_path / 'sd-chord.img'
-    shutil.copyfile(images['sd'], sd)          # the firmware writes to the card
+    copy_image(images['sd'], sd)          # the firmware writes to the card
     x4emu(emu, 'run', '--flash', images['flash'], '--sd', str(sd), '--fast-epd')
     x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 90)
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)

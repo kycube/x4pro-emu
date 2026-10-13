@@ -96,11 +96,18 @@ class QTest:
         return bytes.fromhex(self.cmd(f'read 0x{addr:x} {n}')[2:])
 
     def close(self):
+        # A qtest QEMU does not exit when its stdin closes (it used to sit out the whole 10 s wait
+        # here): ask it to quit, and kill it if it does not within a few seconds.
         try:
             self.p.stdin.close()
-            self.p.wait(timeout=10)
         except Exception:
+            pass
+        self.p.terminate()
+        try:
+            self.p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             self.p.kill()
+            self.p.wait(timeout=5)
         self.err.close()
 
 

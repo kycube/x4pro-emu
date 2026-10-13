@@ -85,7 +85,7 @@ lives at `/Users/mini/x4pro-emu`; `/Users/mini/xteink x4/x4pro-emu` is a symlink
 ```
 make setup      # venv (.venv), clone qemu + apply qemu-patches/, clone firmware
 make build      # qemu (xtensa-softmmu), models, CrossPoint x4pro image (pio run -e x4pro)
-make test       # models unit tests + fixture replay + pytest end-to-end (no device needed)
+make test       # models unit tests + fixture replay + pytest on min(nproc, 8) xdist workers, ~2 min (no device needed)
 ```
 
 Homebrew/apt packages: git build-essential ninja meson pkg-config glib pixman libgcrypt libslirp
@@ -129,8 +129,8 @@ Stock firmware: `tools/mkflash.py images/stock.bin --raw images/device/flash-202
 from the device's files (`tools/mksd.py images/sd-full.img --src images/device/sd-files`: the stock's external
 font and cache plans live there; `images/sd-device.img` lacks them), then `x4emu --name stock run --flash
 images/stock.bin --sd images/sd-full.img --boot-hold-power`. Its boot-preflight rejects a cold boot unless
-the power button is held (`--boot-hold-power [MS]`, default 3000: pressed over QMP before the first
-instruction); without the flag it deep-sleeps and `x4emu --name stock press power` wakes it. Home (refresh 2)
+the power button is held (`--boot-hold-power [MS]`: pressed over QMP before the first instruction and held until
+the preflight's `boot-preflight: source=` decision line, at most 3000 ms of guest time; with MS, MS of guest time); without the flag it deep-sleeps and `x4emu --name stock press power` wakes it. Home (refresh 2)
 follows in ~5 s; with WiFi on (`net_en=1`) the cold boot runs the full PHY calibration ("Saving new
 calibration data") and WiFi still fails fast. Refresh 3 is the status-bar
 clock, completed at the next minute: the stock pre-sends the old plane after every refresh, so a trace ending
@@ -160,7 +160,7 @@ the same exit code); the shapes and an install guide are in `docs/x4emu.md`.
 | `state` | JSON: uptime, panel, refresh_count, last_mode, busy, gpio levels, usj/spi2 (`busy`, `transfer_ms`)/i2c0 counters, buttons, touch, gt911 (`frames`, `clears`, `input_seq`/`read_seq`, `pending`, `deferred`), `gpio_in` (per-pin firmware samples), battery, rtc, ledc channels (`fading`, `target_permille`), sleep, ana_i2c (analog-master transactions, `cal_starts`, `pll_cals`), saradc (oneshots, tsens reads), rf (radio-stub counters, `hot` polls), rtcio (`pad_writes`, `hold_mask`), gt911 `key_reads`, iolog_hot (unmodelled registers polled past the log cap) |
 | `log [--follow] [--since N] [--file uart0.log]` / `wait-text TEXT [--timeout S]` | console access; never blocks past the timeout |
 | `screenshot OUT.png [--diff OTHER.png]` | QMP screendump of the panel console (`device=epd`); `--diff` prints % pixels differing and exits 1 when they differ; a 480x800 device BMP is un-rotated automatically |
-| `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S s |
+| `wait-refresh [--count N] [--total N] [--timeout S]` / `wait-quiet [--seconds S]` | wait for N more refreshes / until refresh_count ≥ N / until the panel has been idle for S seconds of **guest** time since the later of the last refresh and the last input (returns at once when it already is; `idle_s`, `waited_s`) |
 | `press left\|right\|power [--ms 120] [--wait S] [--quiet S]` / `hold BTN --ms 3000` | active-low buttons, held for `--ms` of **guest** time and until the firmware has sampled the level twice (`state.gpio_in`, ≥ 8 ms apart: CrossPoint commits a button only when two polls agree), then until it has seen the release; `--wait` reports the refresh that follows, `--quiet` first waits for an idle panel; a power press while sleeping is extended to 1.5 s |
 | `chord power right [--ms 300]` | several buttons at once; Power + Down is CrossPoint's screenshot chord (writes `/screenshots/*.bmp` to the card) |
 | `tap X Y [--ms] [--wait] [--quiet]` / `swipe X1 Y1 X2 Y2 [--ms] [--wait] [--quiet]` / `home [--ms 250] [--wait] [--quiet]` | landscape panel pixels → GT911 portrait frame (inverse of swapXY/flipY); Home = the capacitive pad (Back in the stock). `tap`/`home` stay down for at least `--ms` of guest time **and until the firmware has consumed a frame carrying them** (`state.gt911.read_seq` ≥ the input's `input_seq`; up to 5 s), then until it has read the release (`release_read`); the GT911 model latches each frame until the firmware clears it, so a release can no longer be wiped unread (the old one-input-per-run loss, `docs/x4emu.md` "Input delivery"). `swipe` holds every point until read |
@@ -189,6 +189,10 @@ from the image header). `tools/tcbwalk.py DRAM.bin --rom … --app …` walks ev
 `--frame PC,A0,SP` backtraces a live CPU from `info registers -a`. When touch, I2C and the 3-second gauge
 poll stop together, check the tick there first (docs/log.md 2026-09-06, session 4).
 
+Tests: `make test` runs longest first from `tests/durations.json` (`make test-durations` re-measures it), every
+instance named with its xdist worker; `make test-serial` runs one at a time. Tests that wait on firmware timers
+(auto-dim, WiFi stop, font restart, replay) run with `x4emu run --icount shift=2,sleep=off` so guest idle time passes at
+once; never `shift=auto` (under load it made the stock's boot-preflight reject the held button on 12 of 12 boots).
 Tips: CrossPoint ignores input while it is painting, so use `--quiet 2` or `wait-quiet` before an
 input in scripts. Power: < 400 ms is a click (double-click toggles the frontlight), ≥ 400 ms held
 sleeps. Panel coordinates are the landscape 800x480 screenshot; CrossPoint draws its portrait UI

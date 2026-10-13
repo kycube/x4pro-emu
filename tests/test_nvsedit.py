@@ -15,7 +15,7 @@ its NVS: an image edited this way still boots to its home screen. Skips without 
 card files (images/device/sd-files), the built QEMU or the golden.
 """
 import os, shutil, struct, subprocess, sys, pytest
-from conftest import x4emu, ROOT, PY, QEMU
+from conftest import x4emu, ROOT, PY, QEMU, instance_name, copy_image
 from test_stock import DUMP, GOLDEN, masked_diff, state, wait_for, stock_card   # noqa: F401 (fixture)
 
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -85,7 +85,7 @@ def scratch(tmp_path):
     if not os.path.exists(DUMP):
         pytest.skip('device dump not available')
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP, flash)
+    copy_image(DUMP, flash)
     return flash
 
 
@@ -174,11 +174,11 @@ def redacted(tmp_path, request, stock_card):                                    
     if not os.path.exists(GOLDEN):
         pytest.skip('tests/golden/stock-home.png not available')
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP, flash)
+    copy_image(DUMP, flash)
     subprocess.run([PY, NVSEDIT, str(flash), 'redact'], check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
-    name = 'nvs-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')
+    copy_image(stock_card, sd)
+    name = instance_name(request.node.name, request.node.nodeid)
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd))
     yield name, tmp_path

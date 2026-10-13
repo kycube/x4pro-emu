@@ -19,13 +19,16 @@ from .qmp import BOARD, INPUT, QMP, connect, pid_alive
 
 PANEL_W, PANEL_H = 800, 480
 
-# `run --boot-hold-power` without a value. The stock's boot-preflight starts measuring the power
-# button at guest time ~530 ms and stops at its "effective" window (600 ms on this dump), i.e. it
-# wants the button still down at guest time ~1130 ms. Early boot (ROM, flash) runs at roughly half
-# real time here, so that point is reached after ~1.8 s of wall time; 3000 ms leaves margin on a
-# slower or loaded host and still costs nothing (the guest boots on, `run` just returns later).
-# The preflight's own `hold=…ms decision=…` console line says what the guest measured.
+# `run --boot-hold-power` without a value holds the button until the stock's boot-preflight has
+# decided: it samples the power button from guest time ~530 ms through its "effective" window (600
+# ms on the device's dumps) and then prints `boot-preflight: source=… hold=…ms decision=…` (~1.1 s
+# of guest time into the boot). The button is released when that line is in the console, or after
+# BOOT_HOLD_POWER_MS of guest time for a firmware that never prints it (CrossPoint). Both are guest
+# events, so a loaded host cannot cut the hold short. `--boot-hold-power MS` holds for MS ms of guest
+# time instead, whatever the console says (a deliberately short hold, say).
 BOOT_HOLD_POWER_MS = 3000
+BOOT_HOLD_AUTO = -1                       # argparse `const` of the bare flag (never a real duration)
+BOOT_PREFLIGHT = re.compile(rb'boot-preflight: source=[^\n]*\n')
 
 # `run --deterministic` is `-icount 3` (guest time follows the instruction count) plus a fixed RTC
 # seed: `cmd_run` passes `-global driver=x4pro.pcf8563,property=base-epoch,value=N` so the BM8563
@@ -149,6 +152,9 @@ def cmd_run(a):
         cmd += ['-global', 'driver=esp32s3.usj,property=host-connected,value=false']
     if a.gdb:
         cmd += ['-s', '-S']
+    until_preflight = a.boot_hold_power == BOOT_HOLD_AUTO
+    if until_preflight:
+        a.boot_hold_power = BOOT_HOLD_POWER_MS
     if a.boot_hold_power:
         if a.gdb:
             sys.exit('--boot-hold-power cannot be combined with --gdb (gdb owns the halted start)')
@@ -168,33 +174,79 @@ def cmd_run(a):
         cmd += ['-global', f'driver=esp32s3.i2c,property=trace-i2c,value={os.path.abspath(a.trace_i2c)}']
     cmd += a.extra
     json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd,
-               'boot_hold_power_ms': a.boot_hold_power}, open(os.path.join(d, 'run.json'), 'w'), indent=1)
+               'boot_hold_power_ms': a.boot_hold_power,
+               'boot_hold_until_preflight': until_preflight and bool(a.boot_hold_power)},
+              open(os.path.join(d, 'run.json'), 'w'), indent=1)
     if a.dry_run:
         out.line(' '.join(shlex.quote(c) for c in cmd))
         out.set(name=a.name, dry_run=True, cmd=cmd, boot_hold_power_ms=a.boot_hold_power)
         return
-    launch(a.name, cmd, a.boot_hold_power)
+    launch(a.name, cmd, a.boot_hold_power, until_preflight)
 
 
-def boot_hold(q, ms):
-    """Hold the power button (GPIO3, active-low) from reset for `ms` milliseconds of guest time.
+class _ConsoleTail:
+    """Incremental reader of an instance's console.log: `seen(pattern)` reads what is new and tells
+    whether the pattern has appeared (patterns that straddle two reads are found)."""
+    def __init__(self, path):
+        self.path, self.pos, self.buf = path, 0, b''
+
+    def seen(self, pattern):
+        try:
+            with open(self.path, 'rb') as f:
+                f.seek(self.pos)
+                new = f.read()
+        except OSError:
+            return False
+        self.pos += len(new)
+        self.buf = self.buf[-4096:] + new
+        return bool(pattern.search(self.buf))
+
+
+def boot_hold(q, ms, until_preflight=False):
+    """Hold the power button (GPIO3, active-low) from reset: for `ms` milliseconds of guest time, or
+    with `until_preflight` until the stock's boot-preflight has printed its decision (at most `ms`).
 
     The VM was started with `-S`, so the button is asserted before the first instruction runs;
     `cont` then releases the CPUs and the guest finds the button already down when it samples it.
     The stock firmware's boot-preflight wants that (`x4emu press power` after its deep sleep is the
     other way in). The preflight measures the hold on the guest clock, so the hold is measured there
     too (under `-icount` on a loaded host guest time runs slower than the host's); a guest clock that
-    stands still for 2 host seconds ends it. Returns the query-status reply after the release."""
+    stands still for 2 host seconds in a paused VM ends it (see `hold_until`). Returns (the
+    query-status reply after the release, the guest ms held, whether the preflight line was seen --
+    None without `until_preflight`)."""
     q.qom_set(INPUT, 'btn-power', True)
     q.cmd('cont')
-    hold_until(q, ms, lambda st: True, 0)
+    if until_preflight:
+        tail = _ConsoleTail(os.path.join(idir(q.name), 'console.log'))
+        decided = lambda st: tail.seen(BOOT_PREFLIGHT)          # noqa: E731
+        # hold_until holds for `ms` *and* until seen; here either ends the hold: check the line on
+        # every poll and stop at the first of the two
+        t0 = time.time()
+        st = board(q)
+        g0 = g_last = st['uptime_us']
+        t_moved = t0
+        seen = False
+        while True:
+            seen = decided(st)
+            now = time.time()
+            if st['uptime_us'] != g_last:
+                g_last, t_moved = st['uptime_us'], now
+            if seen or (st['uptime_us'] - g0) / 1000.0 >= ms or now - t0 >= 20 * ms / 1000.0 \
+                    or (now - t_moved >= 2.0 and vm_paused(q)):
+                break
+            time.sleep(0.01)
+            st = board(q)
+        held_ms = (st['uptime_us'] - g0) / 1000.0
+    else:
+        _, held_ms, _ = hold_until(q, ms, lambda st: True, 0)
+        seen = None
     q.qom_set(INPUT, 'btn-power', False)
-    return q.cmd('query-status')
+    return q.cmd('query-status'), held_ms, seen
 
 
-def launch(name, cmd, boot_hold_power=None):
+def launch(name, cmd, boot_hold_power=None, until_preflight=False):
     d = idir(name)
-    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'console.sock'):
+    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'console.sock', 'last_input.json'):
         try: os.remove(os.path.join(d, f))
         except FileNotFoundError: pass
     err = open(os.path.join(d, 'stderr.log'), 'wb')
@@ -206,13 +258,20 @@ def launch(name, cmd, boot_hold_power=None):
             sys.exit(f'qemu exited with {p.returncode}:\n' + open(os.path.join(d, 'stderr.log')).read())
         if os.path.exists(os.path.join(d, 'qmp.sock')):
             try:
-                q = QMP(os.path.join(d, 'qmp.sock')); st = q.cmd('query-status')
+                q = QMP(os.path.join(d, 'qmp.sock'), name=name); st = q.cmd('query-status')
             except (OSError, EOFError):
                 time.sleep(0.1)
                 continue                  # the socket exists but QEMU is not listening yet
             if boot_hold_power:           # the VM is halted (-S): press power, `cont`, release
-                st = boot_hold(q, boot_hold_power)
-                out.line(f'{name}: held power for {boot_hold_power} ms from reset')
+                st, held_ms, seen = boot_hold(q, boot_hold_power, until_preflight)
+                if seen is None:
+                    out.line(f'{name}: held power for {boot_hold_power} ms from reset')
+                else:
+                    out.line(f'{name}: held power for {held_ms:.0f} ms from reset'
+                             + (' (until the boot-preflight decided)' if seen
+                                else f' (no boot-preflight line within {boot_hold_power} ms)'))
+                out.set(boot_hold_held_ms=round(held_ms), boot_hold_preflight=seen)
+            mark_input(q)                 # the boot (and the hold): wait-quiet counts from here
             q.close()
             console = os.path.join(d, 'console.log')
             out.line(f'{name}: pid {p.pid}, qmp ok, status {st["status"]}, console {console}')
@@ -239,6 +298,7 @@ def cmd_stop(a):
         time.sleep(0.1)
     else:
         os.kill(pid, signal.SIGKILL)
+    forget_input(a.name)
     out.line(f'{a.name}: stopped')
     out.set(name=a.name, pid=pid, stopped=True, running=False)
 
@@ -246,6 +306,7 @@ def cmd_stop(a):
 @records('')
 def cmd_reset(a):
     q = connect(a.name); q.cmd('system_reset')
+    mark_input(q)
     out.line('reset')
     out.set(name=a.name, reset=True)
 
@@ -315,6 +376,10 @@ def cmd_console_send(a):
     data = a.text.encode() + (b'\n' if a.newline else b'')
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(3); s.connect(p)
     s.sendall(data); s.close()
+    try:
+        q = connect(a.name, 3); mark_input(q); q.close()
+    except (OSError, EOFError, RuntimeError):
+        pass
     out.line(f'sent {len(data)} bytes')
     out.set(name=a.name, sent=len(data))
 
@@ -346,7 +411,7 @@ def cmd_flash_app(a):
             out.line(f'  {off:#09x} {len(blob):9d}  {path}')
             written.append({'offset': off, 'size': len(blob), 'path': path})
     out.set(flash=flash, parts=written)
-    launch(a.name, info['cmd'], info.get('boot_hold_power_ms'))
+    launch(a.name, info['cmd'], info.get('boot_hold_power_ms'), info.get('boot_hold_until_preflight', False))
 
 
 def cmd_wait_text(a):
@@ -422,26 +487,126 @@ def cmd_wait_refresh(a):
     sys.exit(f'timeout waiting for refreshes (count={a.count}, total={a.total}, now={n})')
 
 
-def wait_quiet(q, quiet_s, timeout):
-    """Return once no refresh has started for quiet_s seconds (and BUSY is low)."""
-    t0 = time.time(); last = refresh_count(q); t_last = t0
-    while time.time() - t0 < timeout:
-        st = json.loads(q.qom_get(BOARD, 'state'))
-        if st['refresh_count'] != last:
-            last = st['refresh_count']; t_last = time.time()
-        if not st['busy'] and time.time() - t_last >= quiet_s:
-            return True
+# The last input to an instance, for wait-quiet: `.x4emu/NAME/last_input.json` holds the guest time
+# the last input `x4emu` delivered ended, the pid of the QEMU process it went to, and the board's
+# input counters right after it (`input_signature`). A mark counts only while that same process runs
+# and only if it is not in that process's future, so a mark left by an earlier boot can never make
+# wait-quiet wait for a guest time the new boot has not reached (`run`, `flash-app` and `stop` also
+# replace or delete it). Counters that differ from the mark's mean an input arrived some other way
+# -- a raw `x4emu qmp` qom-set, another QMP client -- at a time nobody wrote down: wait-quiet then
+# counts from the moment it saw the counters move, as a wait that starts at the call always did.
+def last_input_file(name):
+    return os.path.join(idir(name), 'last_input.json')
+
+
+def input_signature(st):
+    """The board's input counters (GT911 input sequence, button level changes), or None (an older
+    QEMU without them)."""
+    g = st.get('gt911') or {}
+    ch = (st.get('gpio_in') or {}).get('changes')
+    if 'input_seq' not in g or not isinstance(ch, dict):
+        return None
+    return [g['input_seq'], ch.get('left', 0), ch.get('right', 0), ch.get('power', 0)]
+
+
+def mark_input(q, st=None, uptime_us=None):
+    """Note that an input to `q`'s instance has just ended (at `uptime_us`, default now)."""
+    name = getattr(q, 'name', None)
+    pid = pid_alive(name) if name else None
+    if not pid:
+        return
+    try:
+        st = st or board(q)
+        path = last_input_file(name)
+        tmp = f'{path}.{os.getpid()}'
+        with open(tmp, 'w') as f:
+            json.dump({'pid': pid, 'uptime_us': st['uptime_us'] if uptime_us is None else uptime_us,
+                       'sig': input_signature(st)}, f)
+        os.replace(tmp, path)                  # atomic: a concurrent reader sees the old or the new mark
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError):
+        pass
+
+
+def forget_input(name):
+    try:
+        os.remove(last_input_file(name))
+    except FileNotFoundError:
+        pass
+
+
+def read_input_mark(name, pid, now_us):
+    """The mark of the last input to this QEMU process (`pid`), or None (none, or a stale one)."""
+    if not (name and pid):
+        return None
+    try:
+        with open(last_input_file(name)) as f:
+            m = json.load(f)
+        g = int(m['uptime_us'])
+        return m if m.get('pid') == pid and 0 <= g <= now_us else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def wait_quiet(q, quiet_s, timeout, info=None):
+    """Return True once the panel has been idle for `quiet_s` seconds of *guest* time (False after
+    `timeout` host seconds). Idle: BUSY low, and neither a refresh nor an input for `quiet_s`, counted
+    from the later of the last refresh (`state.last_refresh_us`, the guest time it started) and the end
+    of the last input (`mark_input`; an input that did not come through `x4emu` counts from when it was
+    seen, see above). A panel that has already been idle that long returns at once; this used to
+    restart the clock at the call and wait the full `quiet_s` again.
+
+    Before the first refresh, and with a QEMU that lacks `last_refresh_us` or the input counters, the
+    idle time starts at the call (and at every refresh seen meanwhile), as it always did. A paused VM
+    -- the deep-sleep model pauses it, so does a QMP `stop` -- leaves nothing to wait for: `quiet_s`
+    host seconds without the clock moving in a paused VM count as quiet, and a sleeping board is
+    quiet. `info` (a dict) receives `idle_s` (guest seconds idle when it returned)
+    and `waited_s` (host seconds spent here)."""
+    name = getattr(q, 'name', None)
+    pid = pid_alive(name) if name else None
+    t0 = time.time()
+    st = board(q)
+    g_call = g_moved = st['uptime_us']
+    t_moved = t0
+    count, g_count = st['refresh_count'], g_call     # the fallback: refreshes seen from here on
+    guest_idle = 'last_refresh_us' in st and input_signature(st) is not None
+    first_seen = {}                                  # input counters -> guest time first seen here
+    while True:
+        now = time.time()
+        g = st['uptime_us']
+        if g != g_moved:
+            g_moved, t_moved = g, now
+        if st['refresh_count'] != count:
+            count, g_count = st['refresh_count'], g
+        since = st['last_refresh_us'] if guest_idle and st['refresh_count'] else g_count
+        if guest_idle:
+            sig = input_signature(st)
+            seen = first_seen.setdefault(tuple(sig), g)
+            m = read_input_mark(name, pid, g)
+            if m is not None and m.get('sig') == sig:
+                since = max(since, int(m['uptime_us']))
+            else:
+                since = max(since, seen)
+                if seen == g_call and q.name:       # unmarked input before the call: remember it
+                    mark_input(q, st, g_call)
+        idle_s = (g - since) / 1e6
+        paused = now - max(t_moved, t0) >= quiet_s and vm_paused(q)
+        done = (not st['busy'] and idle_s >= quiet_s) or paused or st.get('sleep', {}).get('sleeping')
+        if done or now - t0 >= timeout:
+            if info is not None:
+                info.update(idle_s=round(max(idle_s, 0.0), 3), waited_s=round(now - t0, 3))
+            return bool(done)
         time.sleep(0.05)
-    return False
+        st = board(q)
 
 
 def cmd_wait_quiet(a):
     q = connect(a.name)
-    if not wait_quiet(q, a.seconds, a.timeout):
-        out.set(ok=False, refresh=refresh_count(q))
+    info = {}
+    if not wait_quiet(q, a.seconds, a.timeout, info):
+        out.set(ok=False, refresh=refresh_count(q), **info)
         sys.exit('panel never went quiet')
     out.line(f'quiet for {a.seconds}s')
-    out.set(ok=True, refresh=refresh_count(q), seconds=a.seconds)
+    out.set(ok=True, refresh=refresh_count(q), seconds=a.seconds, **info)
 
 
 # ---------------------------------------------------------------- input
@@ -489,13 +654,23 @@ def after_input(q, n0, a):
         sys.exit(f'no refresh within {a.wait}s after the input (count still {n0})')
 
 
+def vm_paused(q):
+    """True when the VM is not running (the deep-sleep model's pause, a QMP `stop`)."""
+    try:
+        return not q.cmd('query-status').get('running', True)
+    except (RuntimeError, OSError, EOFError):
+        return False
+
+
 def hold_until(q, ms, seen, max_s):
     """Keep an input as it is for at least `ms` of guest time and until `seen(state)` holds.
 
     `max_s` (host seconds) bounds the wait for `seen`; the guest-time part is bounded too: it gives
-    up once the guest clock has stood still for 2 host seconds (a paused VM: deep sleep, a `stop`)
-    or after 20x its length in host time. Returns (host seconds until `seen` first held, or None;
-    guest ms the input was held; the last state)."""
+    up once the guest clock has stood still for 2 host seconds in a paused VM (deep sleep, a `stop`)
+    or after 20x its length in host time. A clock that stands still in a *running* VM does not end
+    it: under `-icount` guest time only moves with executed instructions, and a vCPU blocked on the
+    host's disk or CPU for a moment would otherwise cut the hold short. Returns (host seconds until
+    `seen` first held, or None; guest ms the input was held; the last state)."""
     t0 = time.time()
     st = board(q)
     g0 = g_last = st['uptime_us']
@@ -508,7 +683,7 @@ def hold_until(q, ms, seen, max_s):
         held_ms = (st['uptime_us'] - g0) / 1000.0
         if st['uptime_us'] != g_last:
             g_last, t_moved = st['uptime_us'], now
-        stalled = now - t_moved >= 2.0
+        stalled = now - t_moved >= 2.0 and vm_paused(q)
         held = held_ms >= ms or stalled or now - t0 >= 20 * ms / 1000.0 + max_s
         if held and (seen_at is not None or now - t0 >= max_s or stalled):
             return seen_at, held_ms, st
@@ -537,6 +712,7 @@ def gt911_input(q, prop, down, up, ms, max_s=SEEN_MAX_S):
     q.qom_set(INPUT, prop, up)
     released = _gt911_seen(q, c1)
     rel_at, _, _ = hold_until(q, 0, released, RELEASE_MAX_S)
+    mark_input(q)
     return read_at, held_ms, rel_at
 
 
@@ -574,6 +750,7 @@ def button_input(q, buttons, ms):
             # a press that put the firmware to sleep is not going to be sampled again
             return st.get('sleep', {}).get('sleeping') or seen(st)
         rel_at, _, _ = hold_until(q, 0, released, BUTTON_SEEN_MAX_S)
+    mark_input(q)
     return read_at, held_ms, rel_at, pressed_samples
 
 
@@ -670,6 +847,7 @@ def cmd_swipe(a):
     c1 = gt911_clears(q)
     q.qom_set(INPUT, 'touch', '[]')
     rel_at = hold_until(q, 0, _gt911_seen(q, c1), RELEASE_MAX_S)[0]
+    mark_input(q)
     out.line(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2}) in {steps + 1} points'
              + (f', {unread} not read by the firmware' if unread else ', every point read by the firmware')
              + ('' if rel_at is not None else ', release not read'))
@@ -700,6 +878,7 @@ def cmd_battery(a):
     if a.charging is not None: q.qom_set(INPUT, 'charging', a.charging == 'on')
     res = {'soc': q.qom_get(BOARD, 'battery-soc'), 'mv': q.qom_get(BOARD, 'battery-mv'),
            'charging': q.qom_get(INPUT, 'charging')}
+    mark_input(q)
     out.line(json.dumps(res))
     out.obj(res)
 

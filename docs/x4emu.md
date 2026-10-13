@@ -71,6 +71,7 @@ Instances are independent; several can run at once.
 | `efuse.bin` | the efuse replay, generated on first `run` unless `--efuse` is given |
 | `last.png` | the most recent `screenshot` |
 | `record.json` | `{"file": …}` while `record` is journalling this instance's inputs — `run` removes it |
+| `last_input.json` | `{"pid", "uptime_us", "sig"}`: the guest time the last input ended, for `wait-quiet` (see Panel) — `run` and `stop` remove it |
 
 A five-command session:
 
@@ -106,7 +107,7 @@ rotated on it.
 
 | Command | Arguments | `--json` object |
 |---|---|---|
-| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count and the RTC starts from a fixed epoch, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N`, `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
+| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count and the RTC starts from a fixed epoch, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N` (QEMU's `-icount` value, e.g. `shift=2,sleep=off`, see below), `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag; 3000 for the bare flag, the bound of its hold) plus, with the flag, `"boot_hold_held_ms"` (guest ms the button was down) and `"boot_hold_preflight"` (bare flag: whether the preflight line was seen; `null` with an explicit MS); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
 | `stop` | — | `{"name", "pid", "stopped", "running": false}` (`stopped: false` when it was not running) |
 | `reset` | — | `{"name", "reset": true}` |
 | `status` | — | `{"name", "pid", "status", "running", "deep_sleep"}`; not running: `{"name", "pid": null, "status": "not running", "running": false, "deep_sleep": false}` |
@@ -126,25 +127,26 @@ boot-preflight: source=1 validation=2 gate=0 configured=1000ms effective=600ms h
 and deep-sleeps; the way in used to be `x4emu press power` (a 1.5 s hold), which wakes it into a
 second boot. With `--boot-hold-power` the button is held from the first instruction instead: QEMU is
 started halted (`-S`), `btn-power` is set over QMP, the CPUs are released (`cont`), and the button is
-released MS milliseconds later. The preflight then measures its full window and accepts the cold
-boot — `hold=600ms decision=0 reason=11` — so there is no deep sleep, no wake and no second boot
-(about 1–2 s and one `press power` saved per script; `tests/test_stock.py` boots this way).
+released once the guest is past the preflight. The preflight then measures its full window and
+accepts the cold boot — `hold=600ms decision=0 reason=11` — so there is no deep sleep, no wake and
+no second boot (about 1–2 s and one `press power` saved per script; `tests/test_stock.py` boots this
+way).
 
-`MS` is optional and defaults to **3000**: it is wall-clock time, and early boot (ROM, flash) runs at
-roughly half real time here, so the guest reaches the end of the 600 ms window after ~1.8 s of wall
-time — 3000 leaves margin without costing anything, since the guest boots on while `run` waits and
-Home is painted about 5 s in. On a slower or heavily loaded host, raise it: the preflight's own
-`hold=…ms decision=…` line in `console.log` says exactly what the guest measured (`decision=2
-reason=3` means the hold was too short). The flag cannot be combined with `--gdb`, which owns the
-halted start. `flash-app` repeats the hold when it relaunches such an instance.
+**Without `MS`** the button is held until the preflight has *decided*: `run` reads `console.log` while
+it holds and releases when the `boot-preflight: source=…` line is complete (~1.1 s of guest time
+into the boot on 7.2.4, 7.5.4 and 7.6.8), or after 3000 ms of guest time for a firmware that never
+prints one. Both ends are guest events, so a slow or loaded host cannot cut the hold short; the
+human line says which one ended it (`held power for 1672 ms from reset (until the boot-preflight
+decided)`). **With `MS`** the button is held for MS ms of *guest* time (`state.uptime_us`), whatever
+the console says — for a deliberately short hold, say (`decision=2 reason=3` in the preflight's line
+means it was too short). A guest clock that stands still for 2 host seconds ends either hold only in
+a paused VM: under `-icount` a vCPU blocked on the host's disk for a moment stops the clock too, and
+that must not release the button early. The flag cannot be combined with `--gdb`, which owns the halted start. `flash-app` repeats the same kind
+of hold when it relaunches such an instance.
 
-One caveat: the stock's **WiFi start does not survive a cold boot** in the emulator today. After a
-deep-sleep wake ESP-IDF reuses the PHY calibration kept in RTC memory; after a POWERON it runs the
-full calibration, and that blocks here after three `phy: error: pll_cal exceeds 2ms!!!` lines (the
-`radio_wifi` task stops — `state.ana_i2c`, `state.rf` and `state.saradc` stop counting at the
-analog-master transaction `m1 0x6b/0x02=0x4e` — while the rest of the system keeps running). With
-`user_config/net_en = 1` and the radio wanted, boot through the deep sleep and `press power`
-(`tests/test_stock.py::test_stock_wifi_fails_fast` does); everything else is happier cold.
+The stock's WiFi start survives the cold boot as well: a POWERON boot runs ESP-IDF's full PHY
+calibration, whose PLL-lock and DC-offset polls the emulator answers, and the driver gives up without
+air as after a wake (`tests/test_stock.py::test_stock_wifi_fails_fast` boots cold with `net_en` 1).
 
 #### `run --deterministic` — guest time that does not depend on the host
 
@@ -163,6 +165,18 @@ Two limits, both deliberate:
   `DETERMINISTIC_RTC_EPOCH` in `x4emu/commands.py`), so the BM8563 model starts from that second on
   every run instead of the host's wall clock and a firmware that *draws* a clock paints the same image
   run to run. Without the flag the RTC follows host time (`base-epoch` 0).
+- **Idle time is real time.** `-icount 3` leaves QEMU's `sleep=on`: while both cores idle in WAITI
+  the virtual clock advances with the host's, so how long the host takes leaks into guest time and
+  a minute of idle guest time costs a minute. `--icount shift=3,sleep=off` (explicit `--icount` wins
+  over `--deterministic`'s; the RTC pin stays) jumps the clock to the next timer instead: idle guest
+  time passes at once and the instruction stream alone decides the clock. `tests/test_replay.py`
+  runs that way, and the stock tests that wait for the firmware's own timers (the 60 s auto-dim, the
+  WiFi start, the font restart) use `--icount shift=2,sleep=off` (4 ns per instruction, about the
+  chip's 240 MHz); every `x4emu` wait and hold is in guest time, so they need nothing else. A
+  firmware left alone then reaches its inactivity timeouts within seconds of host time. Keep the
+  shift fixed: `shift=auto` re-rates the instructions to keep guest time near real time, so what the
+  guest gets done per guest millisecond depends on the host's load again — on a loaded host the
+  stock's boot-preflight counted a held power button as 0–450 ms and deep-slept.
 - **Guest timestamps are not reproduced exactly**, only the pixels. `x4emu`'s waits are host-paced
   polls (every 50 ms), so a replayed input lands a few milliseconds after the recorded guest time.
   Record inputs at moments when the firmware is idle (`--quiet 2`, `wait-quiet`) and that slack
@@ -182,7 +196,21 @@ Two limits, both deliberate:
 |---|---|---|
 | `screenshot` | `OUT.png`, `--diff OTHER` (PNG, or a 480x800 device BMP, which is un-rotated automatically) | `{"path"}`, and with `--diff` also `{"diff", "diff_percent", "diff_pixels"}`; exit 1 when any pixel differs |
 | `wait-refresh` | `--count N` (more refreshes from now, default 1), `--total N` (until `refresh_count ≥ N`), `--timeout S` | `{"ok": true, "refresh", "seconds"}`; on timeout `{"ok": false, "refresh", "error"}` and exit 1 |
-| `wait-quiet` | `--seconds S` (idle for S, default 2), `--timeout S` | `{"ok": true, "refresh", "seconds"}`; on timeout `{"ok": false, "refresh", "error"}` and exit 1 |
+| `wait-quiet` | `--seconds S` (idle for S, default 2), `--timeout S` | `{"ok": true, "refresh", "seconds", "idle_s", "waited_s"}`; on timeout `{"ok": false, "refresh", "idle_s", "waited_s", "error"}` and exit 1 |
+
+`wait-quiet` (and every input's `--quiet S`) waits until the panel has been idle for S seconds of
+**guest** time: BUSY low, and neither a refresh nor an input for S, counted from the later of the
+last refresh's start (`state.last_refresh_us`) and the end of the last input. A panel that has
+already been idle that long returns at once (`waited_s` 0; it used to restart its clock at the call
+and wait the full S again, about 2 minutes of a full test run). The last input is the one `x4emu`
+delivered (`press`/`hold`/`chord`/`tap`/`swipe`/`home`, `battery`, `console-send`, `reset`, and the
+boot itself), noted in `.x4emu/NAME/last_input.json` with the QEMU pid it went to, so a mark from an
+earlier boot is never used. An input that reached the board some other way (a raw `x4emu qmp`
+qom-set, another QMP client) shows as moved input counters (`state.gt911.input_seq`,
+`state.gpio_in.changes`) and counts from the moment `wait-quiet` saw them move — at the latest the
+call, as before. Before the first refresh, and with a QEMU without those fields, the idle time
+starts at the call. A sleeping board (the deep-sleep model pauses the VM) is quiet, and so is a VM
+paused some other way (a QMP `stop`) once its clock has stood still for S host seconds.
 
 ### Input
 

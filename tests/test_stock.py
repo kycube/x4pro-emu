@@ -35,7 +35,7 @@ instant "fade done" interrupt storms core 0's level-1 dispatcher forever, taking
 with it. `test_stock_idle_dims_frontlight_and_keeps_ticking` guards that.
 """
 import json, os, shutil, subprocess, sys, time, pytest
-from conftest import x4emu, ROOT, PY, instance_name
+from conftest import x4emu, ROOT, PY, instance_name, copy_image
 
 DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')
 GOLDEN = os.path.join(ROOT, 'tests', 'golden', 'stock-home.png')
@@ -81,6 +81,18 @@ def tap_repaints(name, x, y, tries=1, timeout=20):
 
 SD_FILES = os.path.join(ROOT, 'images', 'device', 'sd-files')
 
+# `-icount shift=2,sleep=off` for the tests that wait on the stock's own timers (the 60 s auto-dim,
+# the WiFi start at 14 s and its give-up 8 s later, the restart after a font switch): guest time
+# follows the instruction count (4 ns per instruction, about the chip's 240 MHz), and while both
+# cores idle in WAITI the clock jumps to the next timer instead of waiting for it in real time, so a
+# minute of idle guest time passes in a few host seconds. Every x4emu wait and hold is in guest time
+# (docs/x4emu.md, "Input delivery"), so nothing else changes; the tests still measure guest seconds
+# and the firmware sees the same timer order. A fixed shift, not `shift=auto`: auto re-rates the
+# instructions to keep guest time near real time, so on a loaded host the boot-preflight's sampling
+# loop got fewer iterations into its 600 ms window and rejected a held power button (hold=0..450ms
+# decision=2 on 12 boots at load 23; shift=2 and shift=3: hold=606/608ms on all 12).
+SKIP_IDLE = 'shift=2,sleep=off'
+
 
 @pytest.fixture(scope='session')
 def stock_card(tmp_path_factory):
@@ -108,8 +120,8 @@ def stock(tmp_path, request, stock_card):
     sleep and a power press (`boot_to_home(name, wake=True)`) — the DSLEEP path, which reuses the PHY
     calibration kept in RTC memory; no test takes it since the cold boot's full calibration is
     answered (docs/log.md 2026-09-06 S1). A dict param takes `net_en`, `boot_hold`, `trace_i2c`
-    (True: `--trace-i2c tmp_path/i2c.jsonl`) and `extra` (raw QEMU arguments appended after `--`,
-    e.g. a `-global` property)."""
+    (True: `--trace-i2c tmp_path/i2c.jsonl`), `icount` (`x4emu run --icount VALUE`, e.g. `SKIP_IDLE`)
+    and `extra` (raw QEMU arguments appended after `--`, e.g. a `-global` property)."""
     if not os.path.exists(DUMP):
         pytest.skip('device dump not available')
     param = getattr(request, 'param', 0)
@@ -122,15 +134,16 @@ def stock(tmp_path, request, stock_card):
     net_en, boot_hold = opts.get('net_en', 0), opts.get('boot_hold', True)
     name = instance_name(request.node.name, request.node.nodeid)   # '=' breaks -qmp unix:PATH
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP, flash)
+    copy_image(DUMP, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8', 'user_config', 'net_en', str(net_en)],
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
+    copy_image(stock_card, sd)
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--trace-epd', str(tmp_path / 'epd.jsonl'),
           *(['--boot-hold-power'] if boot_hold else []),
           *(['--trace-i2c', str(tmp_path / 'i2c.jsonl')] if opts.get('trace_i2c') else []),
+          *(['--icount', opts['icount']] if opts.get('icount') else []),
           *(['--', *opts['extra']] if opts.get('extra') else []))
     yield name, tmp_path
     x4emu(name, 'stop', check=False)
@@ -221,7 +234,7 @@ def hot_polls(st):
     return rows
 
 
-@pytest.mark.parametrize('stock', [1], indirect=True, ids=['wifi_on'])
+@pytest.mark.parametrize('stock', [{'net_en': 1, 'icount': SKIP_IDLE}], indirect=True, ids=['wifi_on'])
 def test_stock_wifi_fails_fast(stock):
     """With the device's NVS (WiFi on) the radio start must not park core 0: the PHY's polls on the
     analog-master I2C block (0x6000E050, the DC-offset comparator 0x6000E04C, the RF PLL lock flag
@@ -267,6 +280,7 @@ def test_stock_wifi_fails_fast(stock):
     assert after['gt911']['frames'] > before['gt911']['frames']
 
 
+@pytest.mark.parametrize('stock', [{'net_en': 0, 'icount': SKIP_IDLE}], indirect=True, ids=['skip_idle'])
 def test_stock_idle_dims_frontlight_and_keeps_ticking(stock):
     """After ~60 s without input the stock fades the warm channel to 0 (LEDC fade, guest time); the
     tick, the gauge poll and touch must survive it, and the first tap fades the light back in."""

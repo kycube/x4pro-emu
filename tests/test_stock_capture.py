@@ -24,7 +24,7 @@ carries the owner's WiFi credentials, CLAUDE.md rule 6.
 """
 import os, shutil, subprocess, sys
 import pytest
-from conftest import x4emu, ROOT, PY, instance_name
+from conftest import x4emu, ROOT, PY, instance_name, copy_image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -48,13 +48,13 @@ def stock_dev(tmp_path, request, stock_card):
         pytest.skip('device dump not available')
     name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(DUMP, flash)
+    copy_image(DUMP, flash)
     for cmd in (['nvsedit.py', str(flash), 'set-u8', 'user_config', 'net_en', '0'],
                 ['stockdev.py', str(flash)]):
         subprocess.run([PY, os.path.join(ROOT, 'tools', cmd[0]), *cmd[1:]],
                        check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
+    copy_image(stock_card, sd)
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd),
           '--trace-epd', str(tmp_path / 'epd.jsonl'), '--boot-hold-power')

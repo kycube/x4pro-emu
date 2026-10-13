@@ -32,7 +32,7 @@ does not change it), so the test switches through the UI the way a user would.
 """
 import hashlib, json, os, shutil, struct, subprocess, sys, zipfile, zlib
 import pytest
-from conftest import ROOT, PY, x4emu
+from conftest import ROOT, PY, x4emu, instance_name, copy_image
 
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import xtfont                                                                  # noqa: E402
@@ -289,19 +289,21 @@ def stock_font(tmp_path, request, built, stock_card):
     stock falls back to the built-in base font silently.)"""
     if not os.path.exists(test_stock.DUMP):
         pytest.skip('device dump not available')
-    name = 'fh-' + request.node.name.replace('[', '-').replace(']', '').replace('=', '-')
+    name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
-    shutil.copyfile(test_stock.DUMP, flash)
+    copy_image(test_stock.DUMP, flash)
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8',
                     'user_config', 'net_en', '0'], check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
-    shutil.copyfile(stock_card, sd)
+    copy_image(stock_card, sd)
     xtfont.install_package(str(sd), built['report']['package'], direct=True)
     subprocess.run(['mcopy', '-o', '-i', f'{sd}@@{xtfont.PART_OFFSET}', CARD_SELECTION,
                     '::/XTData/system_fonts/selection.config'], check=True)
     assert 'font_id=misans-demibold' in mtype(sd, '::/XTData/system_fonts/selection.config')
     x4emu(name, 'stop', check=False)
-    x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power')
+    # SKIP_IDLE: the stock restarts itself a few seconds after "Applying system font" (a timer), and
+    # the idle guest time up to it passes at once instead of in real time (test_stock.SKIP_IDLE)
+    x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power', '--icount', test_stock.SKIP_IDLE)
     yield name, tmp_path, sd
     x4emu(name, 'stop', check=False)
 

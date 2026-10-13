@@ -150,7 +150,10 @@ jobs:
 
       - name: make test
         # PYTEST_ARGS is empty by default; here it pins pytest's tmp_path under the workspace so
-        # the screenshots the tests write can be collected below.
+        # the screenshots the tests write can be collected below (pytest-xdist puts each worker's
+        # under $CI_TMP/popen-gwN/). `make test` runs the tests on TEST_JOBS = nproc workers, at most
+        # 8: 4 on this 4-vCPU runner, longest first from tests/durations.json; every test's
+        # emulator instance carries its worker in its name (.x4emu/pytest-gwN-...).
         run: make test PYTEST_ARGS="--basetemp=$CI_TMP"
 
       - name: Collect screenshots and emulator logs
