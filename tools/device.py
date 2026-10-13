@@ -625,6 +625,31 @@ def extracted_stock_path(slot, desc):
     ver = desc['version'] if desc else 'unknown'
     return os.path.join(ROOT, 'images/device', f"stock-{slot['label']}-{ver}.bin")
 
+def staged_image(data, name):
+    """The bytes esptool writes, in a temporary file. Never the reference copy at
+    extracted_stock_path(): the stock tools and tests read that one as the pristine app, and a
+    backup taken while a patched app is installed would otherwise overwrite it -- in plan-only
+    mode too, since the old code wrote it before asking for --yes (found 2026-10-13)."""
+    path = os.path.join(tempfile.mkdtemp(), name)
+    with open(path, 'wb') as f:
+        f.write(data)
+    return path
+
+def pristine_note(data):
+    """Whether these app bytes are a known stock build byte for byte (tools/stockver.d app_sha256),
+    for the plan line: a patched copy (developer menu, relabelled strings) is restorable, but the
+    owner should see that it is one."""
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import stockver
+        for v in stockver.versions():
+            if v.app_sha256 == digest:
+                return f'pristine {v.project} {v.version} (sha256 {digest[:12]}...)'
+    except Exception as e:                       # the note is advisory; never block a restore on it
+        return f'sha256 {digest[:12]}... (could not check tools/stockver.d: {e})'
+    return f'NOT a pristine known stock build (sha256 {digest[:12]}...): a patched or unknown image'
+
 def cmd_flash_crosspoint(a):
     """Write a CrossPoint firmware.bin into an app slot on top of the stock bootloader and
     partition table, the way the community web flasher does. The slot defaults to app0 and
@@ -686,8 +711,7 @@ def cmd_flash_crosspoint(a):
         h1 = read_region(port, other['offset'], 0x1000, os.path.join(tmp, 'other-head.bin'))
         if any(b != 0xFF for b in h1):
             sys.exit(f"ABORT: {other['label']} is not blank; not overwriting it")
-        stock_img = extracted_stock_path(target, stock_desc)
-        open(stock_img, 'wb').write(backup[off:off + stock_size])
+        stock_img = staged_image(backup[off:off + stock_size], os.path.basename(extracted_stock_path(target, stock_desc)))
         esp_run(port, 'write-flash', hex(other['offset']), stock_img)
         back = read_region(port, other['offset'], 0x1000, os.path.join(tmp, 'other-head2.bin'))
         if back != backup[off:off + 0x1000]:
@@ -725,12 +749,13 @@ def cmd_restore_stock(a):
     size = app_image_size(backup[off:off + target['size']])
     if not size:
         sys.exit(f"ABORT: the backup holds no app image in {target['label']} to restore")
-    img = extracted_stock_path(target, desc)
-    open(img, 'wb').write(backup[off:off + size])
+    data = backup[off:off + size]
     what = f"{desc['project']} {desc['version']}" if desc else 'the app'
     print(f"plan: write {size} bytes of {what} from {vb[0]} into {target['label']} @{off:#x} on {port}")
+    print(f"      the image is {pristine_note(data)}")
     if not a.yes:
         sys.exit('pass --yes to proceed')
+    img = staged_image(data, os.path.basename(extracted_stock_path(target, desc)))
     esp_run(port, 'write-flash', hex(off), img, before='default-reset')
     tmp = tempfile.mkdtemp()
     back = read_region(port, off, 0x1000, os.path.join(tmp, 'head.bin'))
