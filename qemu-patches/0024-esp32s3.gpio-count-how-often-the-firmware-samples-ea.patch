@@ -1,0 +1,157 @@
+From 1c0aef4987bbc377a0ce4cea1bd1c25598e9a7ce Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 18:56:42 -0500
+Subject: [PATCH 24/24] esp32s3.gpio: count how often the firmware samples each
+ pin's current level
+
+Tooling that drives a button needs to know whether the firmware has seen
+the level, not only how long it was held: the guest polls between pieces
+of work, and with guest time following the host clock a loaded host makes
+those polls sparse. CrossPoint commits a button change only when two polls
+more than 5 ms apart agree, so a press held for a fixed host time can land
+in one sample, or in none.
+
+Every read of IN/IN1 is counted (in_reads). Per pin, the reads since its
+level last changed (or the chip reset) are counted as samples, at most one
+per sample-gap-us of guest time (property, default 8000), so a poll that
+reads several buttons, or a BUSY wait reading IN every millisecond, counts
+once per gap. state.gpio_in reports reads, the gap, and the samples and
+level changes of the three buttons; x4emu press holds a button until it has
+two samples, then waits for two samples of the release.
+---
+ hw/gpio/esp32s3_gpio_full.c         | 41 +++++++++++++++++++++++++++--
+ hw/xtensa/xteink_x4pro.c            |  8 ++++++
+ include/hw/gpio/esp32s3_gpio_full.h | 16 +++++++++++
+ 3 files changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/hw/gpio/esp32s3_gpio_full.c b/hw/gpio/esp32s3_gpio_full.c
+index 1ffedc8..11f0613 100644
+--- a/hw/gpio/esp32s3_gpio_full.c
++++ b/hw/gpio/esp32s3_gpio_full.c
+@@ -27,6 +27,7 @@
+ #include "hw/irq.h"
+ #include "hw/sysbus.h"
+ #include "hw/qdev-properties.h"
++#include "qemu/timer.h"
+ #include "hw/gpio/esp32s3_gpio_full.h"
+ 
+ #define R_BT_SELECT      0x00
+@@ -140,6 +141,11 @@ static void gpio_refresh(ESP32S3GpioFullState *s)
+     if (changed) {
+         for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
+             if ((changed >> n) & 1) {
++                /* a new level: its samples start from zero */
++                s->samples[n] = 0;
++                s->last_sample_ns[n] = INT64_MIN;
++                s->level_changes[n]++;
++                s->sample_watch |= 1ULL << n;
+                 qemu_set_irq(s->pin_out[n], (new >> n) & 1);
+             }
+         }
+@@ -170,6 +176,36 @@ bool esp32s3_gpio_full_is_output(ESP32S3GpioFullState *s, int pin)
+     return (s->enable >> pin) & 1;
+ }
+ 
++/* A read of IN (pins 0..31) or IN1 (32..48): count a sample for every watched pin of that word
++ * whose last sample is at least sample-gap-us of guest time old. */
++static void gpio_note_in_read(ESP32S3GpioFullState *s, uint64_t word_mask)
++{
++    s->in_reads++;
++    uint64_t w = s->sample_watch & word_mask;
++    if (!w) {
++        return;
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t gap = (int64_t)s->sample_gap_us * 1000;
++    for (int n = 0; n < ESP32S3_GPIO_PINS && w; n++) {
++        if (!((w >> n) & 1)) {
++            continue;
++        }
++        w &= ~(1ULL << n);
++        if (s->last_sample_ns[n] == INT64_MIN || now - s->last_sample_ns[n] >= gap) {
++            s->last_sample_ns[n] = now;
++            if (++s->samples[n] >= ESP32S3_GPIO_SAMPLES_CAP) {
++                s->sample_watch &= ~(1ULL << n);
++            }
++        }
++    }
++}
++
++uint32_t esp32s3_gpio_full_samples(ESP32S3GpioFullState *s, int pin)
++{
++    return (pin >= 0 && pin < ESP32S3_GPIO_PINS) ? s->samples[pin] : 0;
++}
++
+ static void gpio_pin_in_handler(void *opaque, int n, int level)
+ {
+     ESP32S3GpioFullState *s = ESP32S3_GPIO_FULL(opaque);
+@@ -198,8 +234,8 @@ static uint64_t gpio_read(void *opaque, hwaddr addr, unsigned int size)
+     case R_ENABLE:     r = (uint32_t)s->enable; break;
+     case R_ENABLE1:    r = (uint32_t)(s->enable >> 32); break;
+     case R_STRAP:      r = s->strap_mode; break;
+-    case R_IN:         r = (uint32_t)s->level; break;
+-    case R_IN1:        r = (uint32_t)(s->level >> 32); break;
++    case R_IN:         r = (uint32_t)s->level; gpio_note_in_read(s, 0xFFFFFFFFULL); break;
++    case R_IN1:        r = (uint32_t)(s->level >> 32); gpio_note_in_read(s, PINMASK & ~0xFFFFFFFFULL); break;
+     case R_STATUS:     r = (uint32_t)s->status; break;
+     case R_STATUS1:    r = (uint32_t)(s->status >> 32); break;
+     case R_PCPU_INT:   r = (uint32_t)gpio_pcpu_int(s); break;
+@@ -313,6 +349,7 @@ static void gpio_init(Object *obj)
+ static Property gpio_properties[] = {
+     DEFINE_PROP_UINT32("strap_mode", ESP32S3GpioFullState, strap_mode, 0x4),
+     DEFINE_PROP_UINT64("idle", ESP32S3GpioFullState, idle, 0),
++    DEFINE_PROP_UINT32("sample-gap-us", ESP32S3GpioFullState, sample_gap_us, 8000),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index e88c497..001ce17 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -417,6 +417,14 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+                 esp32s3_gpio_full_is_output(b->gpio, pins[i].pin) ? "true" : "false");
+         }
+         g_string_append_printf(j, "},\"gpio_irqs\":%" PRIu64 ",", b->gpio->irq_count);
++        /* how often the firmware has sampled each button's current level (esp32s3_gpio_full.h):
++         * `x4emu press` holds a button until it has been seen */
++        g_string_append_printf(j, "\"gpio_in\":{\"reads\":%" PRIu64 ",\"sample_gap_us\":%u,\"samples\":{"
++            "\"left\":%u,\"right\":%u,\"power\":%u},\"changes\":{\"left\":%" PRIu64 ",\"right\":%" PRIu64 ",\"power\":%" PRIu64 "}},",
++            b->gpio->in_reads, b->gpio->sample_gap_us,
++            esp32s3_gpio_full_samples(b->gpio, PIN_BTN_LEFT), esp32s3_gpio_full_samples(b->gpio, PIN_BTN_RIGHT),
++            esp32s3_gpio_full_samples(b->gpio, PIN_BTN_POWER),
++            b->gpio->level_changes[PIN_BTN_LEFT], b->gpio->level_changes[PIN_BTN_RIGHT], b->gpio->level_changes[PIN_BTN_POWER]);
+     }
+     if (b->usj) {
+         g_string_append_printf(j, "\"usj\":{\"tx_bytes\":%" PRIu64 ",\"rx_bytes\":%" PRIu64 ",\"flushes\":%" PRIu64 "},",
+diff --git a/include/hw/gpio/esp32s3_gpio_full.h b/include/hw/gpio/esp32s3_gpio_full.h
+index a6f5cf7..32ba847 100644
+--- a/include/hw/gpio/esp32s3_gpio_full.h
++++ b/include/hw/gpio/esp32s3_gpio_full.h
+@@ -42,8 +42,24 @@ struct ESP32S3GpioFullState {
+     uint32_t func_out_sel[ESP32S3_GPIO_PINS];
+     uint32_t clock_gate;
+     uint64_t irq_count;
++
++    /* Input sampling, for tooling that must know whether the firmware has seen a level: every
++     * read of IN/IN1 counts, and per pin, the reads since its level last changed are counted as
++     * "samples" at most one per sample-gap-us of guest time (a poll that reads several buttons,
++     * or a BUSY-wait loop, is one sample per gap, not hundreds). */
++    uint64_t in_reads;
++    uint32_t sample_gap_us;                     /* property "sample-gap-us" */
++    uint64_t sample_watch;                      /* pins whose samples are still being counted */
++    uint32_t samples[ESP32S3_GPIO_PINS];        /* samples of the current level */
++    int64_t last_sample_ns[ESP32S3_GPIO_PINS];
++    uint64_t level_changes[ESP32S3_GPIO_PINS];
+ };
+ 
++#define ESP32S3_GPIO_SAMPLES_CAP 1000
++
++/* Samples of `pin`'s current level since it last changed (see above). */
++uint32_t esp32s3_gpio_full_samples(ESP32S3GpioFullState *s, int pin);
++
+ /* Board helpers */
+ void esp32s3_gpio_full_set_idle(ESP32S3GpioFullState *s, int pin, int level);
+ int  esp32s3_gpio_full_get_level(ESP32S3GpioFullState *s, int pin);
+-- 
+2.54.0 (Apple Git-157)
+

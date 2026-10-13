@@ -61,15 +61,14 @@ def wait_for(fn, timeout, what):
     raise AssertionError(f'timeout waiting for {what}')
 
 
-def tap_repaints(name, x, y, tries=3, timeout=20):
+def tap_repaints(name, x, y, tries=1, timeout=20):
     """Tap (x, y) once the panel is idle and wait for the repaint it triggers; returns (state before,
-    state after). The stock drops a tap now and then (docs/log.md 2026-09-06, session 4 and 5: under a
-    loaded host the suite lost one menu tap in 40 tests while the same test passed alone), so a tap that
-    drew nothing within `timeout` is repeated once."""
+    state after). The tap is delivered once: the stock's "dropped" taps under a loaded host (docs/log.md
+    sessions 4-8) were releases the GT911 model overwrote unread, fixed in the model and in `x4emu`'s
+    input delivery (tests/test_input_delivery.py). `tries` stays for callers that pass it."""
     for attempt in range(tries):
         before = state(name)
         x4emu(name, 'tap', str(x), str(y), '--quiet', '1')
-        after = None
         try:
             after = wait_for(lambda: (s := state(name))['refresh_count'] > before['refresh_count'] and s,
                              timeout, f'repaint after the tap at ({x}, {y})')
@@ -302,16 +301,13 @@ def test_stock_idle_dims_frontlight_and_keeps_ticking(stock):
     assert lit['ledc']['fades'] >= 2, lit['ledc']
 
 
-def tap(name, x, y, quiet=1, wait=20, tries=3):
-    """Tap (x, y) once the panel is idle and require the refresh it triggers (`--wait`); a tap the stock
-    dropped (docs/log.md 2026-09-06 session 4, sessions 5-6: one lost tap per full-suite run under a loaded
-    host, never when the test runs alone) is repeated once."""
-    for attempt in range(tries):
-        r = x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait), check=False)
-        if r.returncode == 0:
-            return r
-        if attempt == tries - 1:
-            raise AssertionError(f'tap ({x},{y}) drew nothing in {tries} tries:\n{r.stdout}\n{r.stderr}')
+def tap(name, x, y, quiet=1, wait=20):
+    """Tap (x, y) once the panel is idle and require the refresh it triggers (`--wait`). Delivered once:
+    see `tap_repaints`."""
+    r = x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait), check=False)
+    if r.returncode:
+        raise AssertionError(f'tap ({x},{y}) drew nothing:\n{r.stdout}\n{r.stderr}')
+    return r
 
 
 def settle(name, seconds=1.5, timeout=60):
@@ -325,9 +321,7 @@ def test_stock_screens_walk(stock):
     icon (88, 38), the nav menu entries at x 160/245/330/415/500 (Read, All Files, USB Mode, Cloud
     Sync, Settings), the first file row (250, 320), the page centre (400, 240), the reading menu's
     back arrow (80, 445). The Home pad is Back in the stock (`test_stock_home_pad_acts_as_back`). Every
-    tap that has a golden goes through `step()`: the stock reads a tap now and then and does nothing, or
-    repaints the same screen (a book-row tap that left All Files on screen, session 7), so a screen that
-    is not the expected one is retried once."""
+    tap that has a golden goes through `step()`, which checks the screen it led to."""
     name, tmp = stock
     boot_to_home(name)
     settle(name, 2, 30)
@@ -369,18 +363,17 @@ def light_duty(name, timeout=20):
     return wait_for(settled, timeout, 'the LEDC fade to finish')
 
 
-def light_step(name, x, y, want, tries=3, timeout=8):
-    """Tap a -/+ button of a slider until the frontlight reads `want`. A tap the firmware dropped is
-    repeated; one it took is never repeated (the value is already there), so no step is doubled."""
-    for _ in range(tries):
-        tap(name, x, y)
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            got = light_duty(name)
-            if got == want:
-                return got
-            time.sleep(0.3)
-    raise AssertionError(f'tap ({x},{y}) never brought the frontlight to {want}; last {light_duty(name)}')
+def light_step(name, x, y, want, timeout=8):
+    """Tap a -/+ button of a slider once and wait until the frontlight reads `want` (the step is a
+    hardware fade, so the value lands over guest time)."""
+    tap(name, x, y)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        got = light_duty(name)
+        if got == want:
+            return got
+        time.sleep(0.3)
+    raise AssertionError(f'tap ({x},{y}) did not bring the frontlight to {want}; last {light_duty(name)}')
 
 
 def nvs_u8(flash, key, ns='user_config'):
@@ -463,35 +456,32 @@ def test_stock_light_controls_follow_the_sliders(stock):
     assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']
 
 
-def step(name, x, y, golden=None, cols=(STATUS_BAR_COLS, PANEL_W), wait=20, quiet=1.5, tries=2, shot=None):
-    """Tap (x, y), let the panel settle and check the screen against tests/golden/GOLDEN (status bar
-    masked); a tap the stock dropped (it can drop one right after a registered one, docs/log.md
-    2026-09-06 session 4) is repeated once. Returns the screenshot path when `shot` is given."""
-    for attempt in range(tries):
-        x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait), check=False)
-        settle(name, quiet, 120)
-        if golden is None:
-            return None
-        if shot is None:
-            shot = os.path.join(ROOT, '.x4emu', name, 'step.png')
-        x4emu(name, 'screenshot', str(shot))
-        n = masked_diff(shot, os.path.join(ROOT, 'tests', 'golden', golden), cols)
-        if n == 0:
-            return shot
-    raise AssertionError(f'tap ({x},{y}) did not reach tests/golden/{golden} in {tries} tries ({n} pixels differ)')
+def step(name, x, y, golden=None, cols=(STATUS_BAR_COLS, PANEL_W), wait=20, quiet=1.5, shot=None):
+    """Tap (x, y) once, let the panel settle and check the screen against tests/golden/GOLDEN (status bar
+    masked). The stock "dropping a tap right after a registered one" (docs/log.md session 4) was the
+    previous tap's release lost in the GT911 model, which left the stock with a stuck contact; no retry
+    since the model latches frames (tests/test_input_delivery.py). Returns the screenshot path when
+    `shot` is given."""
+    r = x4emu(name, 'tap', str(x), str(y), '--quiet', str(quiet), '--wait', str(wait), check=False)
+    settle(name, quiet, 120)
+    if golden is None:
+        return None
+    if shot is None:
+        shot = os.path.join(ROOT, '.x4emu', name, 'step.png')
+    x4emu(name, 'screenshot', str(shot))
+    n = masked_diff(shot, os.path.join(ROOT, 'tests', 'golden', golden), cols)
+    assert n == 0, f'tap ({x},{y}) did not reach tests/golden/{golden} ({n} pixels differ): {r.stdout.strip()} {r.stderr.strip()}'
+    return shot
 
 
-def home_pad(name, tries=2, wait=20):
-    """Press the Home pad and return (state before, state after) once a refresh followed; a press the
-    stock dropped is repeated once."""
-    for _ in range(tries):
-        before = state(name)
-        r = x4emu(name, 'home', '--wait', str(wait), check=False)
-        settle(name, 2, 120)
-        after = state(name)
-        if after['refresh_count'] > before['refresh_count']:
-            return before, after
-    raise AssertionError(f'no repaint after the Home pad in {tries} tries: {r.stdout.strip()}')
+def home_pad(name, wait=20):
+    """Press the Home pad once and return (state before, state after) once a refresh followed."""
+    before = state(name)
+    r = x4emu(name, 'home', '--wait', str(wait), check=False)
+    settle(name, 2, 120)
+    after = state(name)
+    assert after['refresh_count'] > before['refresh_count'], f'no repaint after the Home pad: {r.stdout.strip()} {r.stderr.strip()}'
+    return before, after
 
 
 def test_stock_home_pad_acts_as_back(stock):

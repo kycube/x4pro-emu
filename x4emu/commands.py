@@ -177,15 +177,17 @@ def cmd_run(a):
 
 
 def boot_hold(q, ms):
-    """Hold the power button (GPIO3, active-low) from reset for `ms` milliseconds.
+    """Hold the power button (GPIO3, active-low) from reset for `ms` milliseconds of guest time.
 
     The VM was started with `-S`, so the button is asserted before the first instruction runs;
     `cont` then releases the CPUs and the guest finds the button already down when it samples it.
     The stock firmware's boot-preflight wants that (`x4emu press power` after its deep sleep is the
-    other way in). Returns the query-status reply after the release."""
+    other way in). The preflight measures the hold on the guest clock, so the hold is measured there
+    too (under `-icount` on a loaded host guest time runs slower than the host's); a guest clock that
+    stands still for 2 host seconds ends it. Returns the query-status reply after the release."""
     q.qom_set(INPUT, 'btn-power', True)
     q.cmd('cont')
-    time.sleep(ms / 1000.0)
+    hold_until(q, ms, lambda st: True, 0)
     q.qom_set(INPUT, 'btn-power', False)
     return q.cmd('query-status')
 
@@ -443,6 +445,34 @@ def cmd_wait_quiet(a):
 
 
 # ---------------------------------------------------------------- input
+# How an input reaches the firmware (docs/x4emu.md, "Input delivery"). Both firmwares sample their
+# inputs between pieces of work that can take seconds, and guest time follows the host clock, so on a
+# loaded host the guest executes less per guest millisecond and polls less often: an input held for
+# a fixed number of *host* milliseconds can fall between two polls, or into a single one. So every
+# input is held the way a finger holds it, in guest terms:
+#   - at least --ms of *guest* time (state.uptime_us), and
+#   - until the firmware has seen it: for the GT911 (touch, the Home pad) until it has consumed a
+#     frame that carries it (`state.gt911.read_seq` reaching the input's `input_seq`; with an older
+#     QEMU, until `clears` moves); for a button until the firmware has sampled the pressed level
+#     BUTTON_SAMPLES times, sample-gap-us of guest time apart (`state.gpio_in.samples`: CrossPoint
+#     commits a button change only when two polls more than 5 ms apart agree);
+#   - and then released, and held released until the firmware has seen the release as well (the
+#     next input cannot merge with this one, and `--wait` starts from an input the firmware has
+#     completed).
+# Every wait is bounded in host time, so a firmware that never reads an input costs seconds, not a
+# hang; the output says what was and was not seen.
+SEEN_MAX_S = 5.0          # host seconds an input stays asserted waiting for the firmware to read it
+RELEASE_MAX_S = 5.0       # host seconds `x4emu` waits for the firmware to see the release
+BUTTON_SAMPLES = 2        # samples of the pressed (and then the released) level a button waits for
+BUTTON_SEEN_MAX_S = 2.0   # a button is not held past this (host s) for want of samples: a long hold
+                          # changes its meaning (power >= 400 ms sleeps CrossPoint)
+
+
+def board(q):
+    s = q.qom_get(BOARD, 'state')
+    return json.loads(s) if isinstance(s, str) else s
+
+
 def after_input(q, n0, a):
     """With --wait: report the refresh the input triggered (and fail if none came)."""
     out.set(refresh=None, refresh_after_s=None)
@@ -459,14 +489,111 @@ def after_input(q, n0, a):
         sys.exit(f'no refresh within {a.wait}s after the input (count still {n0})')
 
 
+def hold_until(q, ms, seen, max_s):
+    """Keep an input as it is for at least `ms` of guest time and until `seen(state)` holds.
+
+    `max_s` (host seconds) bounds the wait for `seen`; the guest-time part is bounded too: it gives
+    up once the guest clock has stood still for 2 host seconds (a paused VM: deep sleep, a `stop`)
+    or after 20x its length in host time. Returns (host seconds until `seen` first held, or None;
+    guest ms the input was held; the last state)."""
+    t0 = time.time()
+    st = board(q)
+    g0 = g_last = st['uptime_us']
+    t_moved = t0
+    seen_at = None
+    while True:
+        now = time.time()
+        if seen_at is None and seen(st):
+            seen_at = now - t0
+        held_ms = (st['uptime_us'] - g0) / 1000.0
+        if st['uptime_us'] != g_last:
+            g_last, t_moved = st['uptime_us'], now
+        stalled = now - t_moved >= 2.0
+        held = held_ms >= ms or stalled or now - t0 >= 20 * ms / 1000.0 + max_s
+        if held and (seen_at is not None or now - t0 >= max_s or stalled):
+            return seen_at, held_ms, st
+        time.sleep(0.01)
+        st = board(q)
+
+
+def _gt911_seen(q, clears0):
+    """A predicate "the firmware has consumed the frame carrying the input just set". With the GT911
+    model's frame sequence numbers (input_seq / read_seq) that is exact; an older QEMU only offers
+    `clears`, i.e. "some frame was consumed since"."""
+    g = board(q)['gt911']
+    if 'input_seq' in g:
+        seq = g['input_seq']
+        return lambda st: st['gt911']['read_seq'] >= seq
+    return lambda st: st['gt911']['clears'] > clears0
+
+
+def gt911_input(q, prop, down, up, ms, max_s=SEEN_MAX_S):
+    """Assert a GT911 input (`touch` points or the `home` key), hold it (see above), release it and
+    wait for the release to be consumed. Returns (read_at, held_ms, release_read_at)."""
+    c0 = board(q)['gt911']['clears']
+    q.qom_set(INPUT, prop, down)
+    read_at, held_ms, st = hold_until(q, ms, _gt911_seen(q, c0), max_s)
+    c1 = st['gt911']['clears']
+    q.qom_set(INPUT, prop, up)
+    released = _gt911_seen(q, c1)
+    rel_at, _, _ = hold_until(q, 0, released, RELEASE_MAX_S)
+    return read_at, held_ms, rel_at
+
+
+def _read_note(read_at, rel_at=None, what='the firmware'):
+    s = (f', read by {what} after {read_at:.2f}s' if read_at is not None
+         else f', not read by {what} within {SEEN_MAX_S:.0f} s')
+    if read_at is not None and rel_at is None:
+        s += ', release not read'
+    return s
+
+
+def gt911_clears(q):
+    return board(q)['gt911']['clears']
+
+
+def button_input(q, buttons, ms):
+    """Press `buttons` together, hold them (see above), release them, and wait until the firmware
+    has sampled the release. Returns (read_at, held_ms, release_read_at, samples while pressed)."""
+    sampled = 'gpio_in' in board(q)
+    for b in buttons:
+        q.qom_set(INPUT, f'btn-{b}', True)
+    if sampled:
+        def seen(st):
+            return all(st['gpio_in']['samples'][b] >= BUTTON_SAMPLES for b in buttons)
+    else:
+        def seen(st):                                     # an older QEMU: guest time alone
+            return False
+    read_at, held_ms, st = hold_until(q, ms, seen, BUTTON_SEEN_MAX_S if sampled else 0)
+    pressed_samples = {b: st['gpio_in']['samples'][b] for b in buttons} if sampled else None
+    for b in buttons:
+        q.qom_set(INPUT, f'btn-{b}', False)
+    rel_at = None
+    if sampled:
+        def released(st):
+            # a press that put the firmware to sleep is not going to be sampled again
+            return st.get('sleep', {}).get('sleeping') or seen(st)
+        rel_at, _, _ = hold_until(q, 0, released, BUTTON_SEEN_MAX_S)
+    return read_at, held_ms, rel_at, pressed_samples
+
+
+def _button_note(read_at, rel_at, sampled):
+    if not sampled:
+        return ''
+    if read_at is None:
+        return f', not sampled {BUTTON_SAMPLES}x by the firmware within {BUTTON_SEEN_MAX_S:.0f} s'
+    return f', sampled by the firmware after {read_at:.2f}s' + ('' if rel_at is not None else ', release not sampled')
+
+
 @records('button ms wait quiet', also=('hold',))
 def cmd_press(a):
     q = connect(a.name)
     if a.button == 'power' and a.ms < 1500:
         # A wake from deep sleep must still be held when CrossPoint verifies it (~1.3 s after
-        # the reset), otherwise the firmware goes straight back to sleep. Hold long enough.
+        # the reset), otherwise the firmware goes straight back to sleep. Hold long enough (guest
+        # time: the paused VM's clock starts again with the wake).
         try:
-            if json.loads(q.qom_get(BOARD, 'state')).get('sleep', {}).get('sleeping'):
+            if board(q).get('sleep', {}).get('sleeping'):
                 out.line('device is in deep sleep: holding power for 1500 ms to wake it')
                 out.set(woke_from_deep_sleep=True)
                 a.ms = 1500
@@ -475,11 +602,11 @@ def cmd_press(a):
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
-    q.qom_set(INPUT, f'btn-{a.button}', True)
-    time.sleep(a.ms / 1000.0)
-    q.qom_set(INPUT, f'btn-{a.button}', False)
-    out.line(f'pressed {a.button} for {a.ms} ms')
-    out.set(button=a.button, ms=a.ms, read_after_s=None)
+    sampled = 'gpio_in' in board(q)
+    read_at, held_ms, rel_at, _ = button_input(q, [a.button], a.ms)
+    out.line(f'pressed {a.button} for {a.ms} ms' + _button_note(read_at, rel_at, sampled))
+    out.set(button=a.button, ms=a.ms, held_ms=round(held_ms), read_after_s=None if read_at is None else round(read_at, 2),
+            release_read=None if not sampled else rel_at is not None)
     after_input(q, n0, a)
 
 
@@ -495,40 +622,13 @@ def cmd_chord(a):
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
-    for b in a.buttons:
-        q.qom_set(INPUT, f'btn-{b}', True)
-    time.sleep(a.ms / 1000.0)
-    for b in a.buttons:
-        q.qom_set(INPUT, f'btn-{b}', False)
-    out.line(f'chord {"+".join(a.buttons)} for {a.ms} ms')
-    out.set(buttons=list(a.buttons), ms=a.ms, read_after_s=None)
+    sampled = 'gpio_in' in board(q)
+    read_at, held_ms, rel_at, _ = button_input(q, list(a.buttons), a.ms)
+    out.line(f'chord {"+".join(a.buttons)} for {a.ms} ms' + _button_note(read_at, rel_at, sampled))
+    out.set(buttons=list(a.buttons), ms=a.ms, held_ms=round(held_ms),
+            read_after_s=None if read_at is None else round(read_at, 2),
+            release_read=None if not sampled else rel_at is not None)
     after_input(q, n0, a)
-
-
-def gt911_clears(q):
-    return json.loads(q.qom_get(BOARD, 'state'))['gt911']['clears']
-
-
-def hold_until_read(q, ms, clears0, max_s=5.0):
-    """Keep a touch/Home-pad input asserted for at least `ms`, and until the firmware has consumed
-    the GT911 frame (its write of 0 to 0x814E, `state.gt911.clears`). Firmware that polls the
-    touch controller between rendering passes of several seconds (CrossPoint) would otherwise miss
-    a short tap; it still sees a short touch, since it measures from its own first read. Returns
-    the seconds until the frame was read, or None if it never was within max_s."""
-    t0 = time.time()
-    read_at = None
-    while True:
-        now = time.time() - t0
-        if read_at is None and gt911_clears(q) > clears0:
-            read_at = now
-        if now >= ms / 1000.0 and (read_at is not None or now >= max_s):
-            return read_at
-        time.sleep(0.02)
-
-
-def _read_note(read_at):
-    return (f', read by the firmware after {read_at:.2f}s' if read_at is not None
-            else ', not read by the firmware within 5 s')
 
 
 @records('x y ms wait quiet')
@@ -537,24 +637,21 @@ def cmd_tap(a):
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
-    c0 = gt911_clears(q)
     rx, ry = to_gt911(a.x, a.y)
-    q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
-    read_at = hold_until_read(q, a.ms, c0)
-    q.qom_set(INPUT, 'touch', '[]')
-    out.line(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})' + _read_note(read_at))
-    out.set(x=a.x, y=a.y, gt911=[rx, ry], ms=a.ms,
-            read_after_s=None if read_at is None else round(read_at, 2))
+    read_at, held_ms, rel_at = gt911_input(q, 'touch', json.dumps([{'x': rx, 'y': ry}]), '[]', a.ms)
+    out.line(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})' + _read_note(read_at, rel_at))
+    out.set(x=a.x, y=a.y, gt911=[rx, ry], ms=a.ms, held_ms=round(held_ms),
+            read_after_s=None if read_at is None else round(read_at, 2), release_read=rel_at is not None)
     after_input(q, n0, a)
 
 
 @records('x1 y1 x2 y2 ms wait quiet')
 def cmd_swipe(a):
-    """A drag from (x1,y1) to (x2,y2) in landscape pixels: one GT911 point every ~20 ms over --ms,
-    each held until the firmware has consumed its frame (up to 0.5 s; the model keeps only the latest
-    point, so a point the firmware never read would be lost and the gesture misread), the last one
-    released only once read as well. Firmware sees a complete, evenly sampled gesture whatever its
-    polling cadence."""
+    """A drag from (x1,y1) to (x2,y2) in landscape pixels: one GT911 point every ~20 ms of guest time
+    over --ms, each held until the firmware has consumed a frame carrying it (up to 0.5 s; the model
+    reports only the latest point, so a point the firmware never read would be lost and the gesture
+    misread), the release held until consumed as well. Firmware sees a complete, evenly sampled
+    gesture whatever its polling cadence."""
     q = connect(a.name)
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
@@ -568,12 +665,17 @@ def cmd_swipe(a):
         rx, ry = to_gt911(x, y)
         c0 = gt911_clears(q)
         q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
-        if hold_until_read(q, per_ms, c0, max_s=0.5) is None:
+        if hold_until(q, per_ms, _gt911_seen(q, c0), 0.5)[0] is None:
             unread += 1
+    c1 = gt911_clears(q)
     q.qom_set(INPUT, 'touch', '[]')
-    out.line(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2}) in {steps + 1} points' + (f', {unread} not read by the firmware' if unread else ', every point read by the firmware'))
-    out.set(x1=a.x1, y1=a.y1, x2=a.x2, y2=a.y2, points=steps + 1, unread=unread)
+    rel_at = hold_until(q, 0, _gt911_seen(q, c1), RELEASE_MAX_S)[0]
+    out.line(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2}) in {steps + 1} points'
+             + (f', {unread} not read by the firmware' if unread else ', every point read by the firmware')
+             + ('' if rel_at is not None else ', release not read'))
+    out.set(x1=a.x1, y1=a.y1, x2=a.x2, y2=a.y2, points=steps + 1, unread=unread, release_read=rel_at is not None)
     after_input(q, n0, a)
+
 
 @records('ms wait quiet')
 def cmd_home(a):
@@ -582,12 +684,10 @@ def cmd_home(a):
     if getattr(a, 'quiet', 0):
         wait_quiet(q, a.quiet, 30)
     n0 = refresh_count(q)
-    c0 = gt911_clears(q)
-    q.qom_set(INPUT, 'home', True)
-    read_at = hold_until_read(q, a.ms, c0)
-    q.qom_set(INPUT, 'home', False)
-    out.line(f'home for {a.ms} ms' + _read_note(read_at))
-    out.set(ms=a.ms, read_after_s=None if read_at is None else round(read_at, 2))
+    read_at, held_ms, rel_at = gt911_input(q, 'home', True, False, a.ms)
+    out.line(f'home for {a.ms} ms' + _read_note(read_at, rel_at))
+    out.set(ms=a.ms, held_ms=round(held_ms), read_after_s=None if read_at is None else round(read_at, 2),
+            release_read=rel_at is not None)
     after_input(q, n0, a)
 
 

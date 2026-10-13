@@ -16,7 +16,7 @@ pixels), so nothing has to be masked out of the comparison.
 import json
 import os
 import pytest
-from conftest import x4emu
+from conftest import x4emu, instance_name
 
 BROWSE_FILES = (345, 350)      # the Home menu entry, in landscape panel pixels (test_touch_reader)
 BOOT_S = 300                   # host seconds for a boot / a replay subprocess (a loaded host is slow)
@@ -50,8 +50,9 @@ def diff_pixels(a, b):
 
 @pytest.fixture
 def replay_emus():
-    """Two more instances for the replays (the `emu` fixture records on a third)."""
-    names = ['rpa', 'rpb']
+    """Two more instances for the replays (the `emu` fixture records on a third), under the run's
+    X4EMU_TEST_PREFIX like every other test instance."""
+    names = [instance_name('rpa'), instance_name('rpb')]
     for n in names:
         x4emu(n, 'stop', check=False)
     yield names
@@ -99,31 +100,20 @@ def test_record_replay_same_screen(images, emu, replay_emus, tmp_path):
     js = json.loads(x4emu(emu, '--json', 'wait-guest-ms', 200, '--timeout', 60).stdout)
     assert js['ok'] and js['advanced_ms'] >= 200 and js['guest_ms'] >= js['target_ms'], js
 
-    # 4. replay the journal onto two fresh instances, human mode and --json mode.
-    #    A replayed input the firmware reads while it paints draws nothing and `replay` stops with
-    #    "no refresh within Ns" -- the loaded-host flake (CLAUDE.md "Lessons"; `--deterministic`
-    #    stretches every paint against the host clock, and the desk Mac runs the owner's own
-    #    applications). The repair is to replay the *whole* journal again from a fresh boot: the
-    #    journal is untouched, so step 5's acceptance -- three runs, one screen -- is unweakened.
+    # 4. replay the journal onto two fresh instances, human mode and --json mode. Each replayed step
+    #    is delivered once: `x4emu` holds an input in guest time until the firmware has consumed it
+    #    and its release (docs/x4emu.md "Input delivery"), so the replay no longer re-runs the journal
+    #    when the host is loaded.
     for i, name in enumerate(replay_emus):
-        for attempt in range(2):
-            x4emu(name, 'stop', check=False)
-            boot(name, images)
-            try:
-                if i:
-                    js = json.loads(x4emu(name, '--json', 'replay', flow, timeout=BOOT_S).stdout)
-                    assert js['steps'] == 2 and js['guest_ms_end'] >= ts[-1], js
-                    assert [s['cmd'] for s in js['replayed']] == ['tap', 'home'], js
-                else:
-                    r = x4emu(name, 'replay', flow, timeout=BOOT_S)
-                    assert f't={ts[0]} ms tap {BROWSE_FILES[0]} {BROWSE_FILES[1]}' in r.stdout, r.stdout
-                    assert 'replayed 2 steps' in r.stdout, r.stdout
-            except AssertionError as e:
-                if attempt or 'no refresh within' not in str(e):
-                    raise
-                print(f'{name}: the replay lost an input; replaying the journal again from a fresh boot')
-                continue
-            break
+        boot(name, images)
+        if i:
+            js = json.loads(x4emu(name, '--json', 'replay', flow, timeout=BOOT_S).stdout)
+            assert js['steps'] == 2 and js['guest_ms_end'] >= ts[-1], js
+            assert [s['cmd'] for s in js['replayed']] == ['tap', 'home'], js
+        else:
+            r = x4emu(name, 'replay', flow, timeout=BOOT_S)
+            assert f't={ts[0]} ms tap {BROWSE_FILES[0]} {BROWSE_FILES[1]}' in r.stdout, r.stdout
+            assert 'replayed 2 steps' in r.stdout, r.stdout
         # the firmware took the same path: FileBrowser and back to Home
         x4emu(name, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
         x4emu(name, 'wait-quiet', '--seconds', 2, '--timeout', 60)

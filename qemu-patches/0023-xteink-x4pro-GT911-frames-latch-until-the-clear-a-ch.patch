@@ -1,0 +1,194 @@
+From 728d1660ea13f07bf05c3c50ef6849086abc3899 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 18:56:35 -0500
+Subject: [PATCH 23/24] xteink-x4pro: GT911 frames latch until the clear; a
+ change meanwhile is the next frame
+
+The model made every input change a new frame at once, overwriting the
+output registers while the firmware might be between its read of status
+0x814E and its write of 0 to it. A release that landed in that window was
+then wiped by the clear without ever being read: the firmware (CrossPoint
+and the stock alike) kept the finger or the Home pad down, the tap never
+completed or the pad became a long press, and the next input continued the
+stuck contact. On a loaded host the vCPU thread is preempted between those
+I2C transactions while QMP is answered, which made this about one lost
+input per full test run (found with --trace-i2c: status 0x90 read, the
+clear, and no 0x80 release frame ever after).
+
+Like the chip, which does not update its buffer while the status flag is
+set, the model now latches a frame (points, count, key) when it produces
+it and serves reads from that latch. A change that arrives while a frame
+is pending is reported as the next frame, at the next scan 10 ms after the
+clear. The point records and the key byte come from the same latch, so a
+read never mixes a frame's count with another input's points.
+
+state.gt911 gains input_seq (bumped by every input change), read_seq (the
+input_seq of the last frame the firmware cleared), pending and deferred, so
+tooling can tell exactly when the firmware has consumed an input.
+---
+ hw/misc/x4pro_i2c_devs.c         | 59 ++++++++++++++++++++++++--------
+ hw/xtensa/xteink_x4pro.c         |  6 ++--
+ include/hw/misc/x4pro_i2c_devs.h | 11 ++++++
+ 3 files changed, 59 insertions(+), 17 deletions(-)
+
+diff --git a/hw/misc/x4pro_i2c_devs.c b/hw/misc/x4pro_i2c_devs.c
+index 9553d87..8f91786 100644
+--- a/hw/misc/x4pro_i2c_devs.c
++++ b/hw/misc/x4pro_i2c_devs.c
+@@ -8,7 +8,13 @@
+  * after the last record (0x814F + 8 * count, bit 0 = the Home pad), product ID
+  * "911" at 0x8140, config area 0x8047.. accepted. INT is driven LOW while a frame is pending and released
+  * when the firmware writes 0 to 0x814E; a held finger produces a new frame
+- * 10 ms after each clear, a release produces one count-0 frame. The chip only
++ * 10 ms after each clear, a release produces one count-0 frame. A frame is
++ * latched when it is produced (the registers keep it until the clear, as the
++ * chip's buffer does while its status flag is set): an input change that
++ * arrives while a frame is pending -- e.g. the release landing between the
++ * firmware's status read and its clear -- is reported as the next frame, 10 ms
++ * after the clear, instead of overwriting the frame being read and then being
++ * cleared unseen (the lost release behind docs/NEXT_PHASE.md 0.h). The chip only
+  * answers while its rail is on (GPIO2 LOW) unless require-power is off.
+  *
+  * PCF8563: 16 BCD registers; time = seed (host wall clock at start, or the
+@@ -41,25 +47,44 @@ static void gt911_update_int(X4ProGt911State *s)
+     qemu_set_irq(s->irq_out, s->frame_ready ? 0 : 1);
+ }
+ 
++/* Latch the live input into the output registers as a new frame. */
++static void gt911_produce_frame(X4ProGt911State *s)
++{
++    memcpy(s->frame_pts, s->pts, sizeof(s->frame_pts));
++    s->frame_count = s->count;
++    s->frame_home = s->home;
++    s->frame_seq = s->input_seq;
++    s->pending = false;
++    s->frame_ready = true;
++    s->frames++;
++    gt911_update_int(s);
++}
++
+ static void gt911_frame_timer(void *opaque)
+ {
+     X4ProGt911State *s = X4PRO_GT911(opaque);
+-    if (s->count > 0 || s->home) {
+-        s->frame_ready = true;
+-        s->frames++;
+-        gt911_update_int(s);
++    if (!s->frame_ready && (s->pending || s->count > 0 || s->home)) {
++        gt911_produce_frame(s);
+     }
+ }
+ 
+ void x4pro_gt911_set_touch(X4ProGt911State *s, const Gt911Point *pts, int count, bool home)
+ {
+     if (count > GT911_MAX_POINTS) count = GT911_MAX_POINTS;
++    memset(s->pts, 0, sizeof(s->pts));
+     memcpy(s->pts, pts, count * sizeof(*pts));
+     s->count = count;
+     s->home = home;
+-    s->frame_ready = true;      /* every change is a new frame, including the release */
+-    s->frames++;
+-    gt911_update_int(s);
++    s->input_seq++;
++    if (s->frame_ready) {
++        /* the firmware has not cleared the frame it was given yet (it may be reading it right
++         * now): keep that frame intact and report this change as the next one */
++        s->pending = true;
++        s->deferred++;
++        return;
++    }
++    timer_del(s->frame_timer);
++    gt911_produce_frame(s);     /* every change is a new frame, including the release */
+ }
+ 
+ static int gt911_event(I2CSlave *i2c, enum i2c_event event)
+@@ -95,9 +120,13 @@ static int gt911_send(I2CSlave *i2c, uint8_t data)
+         uint16_t r = s->ptr++;
+         if (r == 0x814E) {
+             s->clears++;
++            if (s->frame_ready) {
++                s->read_seq = s->frame_seq;     /* the firmware has consumed this frame */
++            }
+             s->frame_ready = false;
+             gt911_update_int(s);
+-            if (s->count > 0 || s->home) {
++            if (s->pending || s->count > 0 || s->home) {
++                /* the next scan: a held finger or key, or the change that waited for this clear */
+                 timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 10 * 1000000);
+             }
+         } else if (r >= GT911_CONFIG_BASE && r < GT911_CONFIG_BASE + GT911_CONFIG_LEN) {
+@@ -114,7 +143,7 @@ static uint8_t gt911_recv(I2CSlave *i2c)
+     uint16_t r = s->ptr++;
+     s->reads++;
+     if (r == 0x814E) {
+-        return (s->frame_ready ? 0x80 : 0) | (s->home ? 0x10 : 0) | (s->count & 0x0F);
++        return (s->frame_ready ? 0x80 : 0) | (s->frame_home ? 0x10 : 0) | (s->frame_count & 0x0F);
+     }
+     if (r >= 0x814F && r <= 0x814F + 8 * GT911_MAX_POINTS) {
+         /* point records of 8 bytes from 0x814F (track id, X lo/hi, Y lo/hi, size lo/hi, reserved);
+@@ -122,12 +151,12 @@ static uint8_t gt911_recv(I2CSlave *i2c)
+          * pad). The stock xteink_app reads status 0x814E, then that one byte when the count is 0
+          * (docs/log.md 2026-09-06, S1); Linux's goodix driver reads it the same way. */
+         int o = r - 0x814F, i = o / 8, k = o % 8;
+-        if (o == 8 * s->count) {
+-            if (s->home) s->key_reads++;
+-            return s->home ? 0x01 : 0x00;
++        if (o == 8 * s->frame_count) {
++            if (s->frame_home) s->key_reads++;
++            return s->frame_home ? 0x01 : 0x00;
+         }
+-        if (i >= s->count) return 0;
+-        const Gt911Point *p = &s->pts[i];
++        if (i >= s->frame_count) return 0;
++        const Gt911Point *p = &s->frame_pts[i];
+         switch (k) {
+         case 0: return p->id;
+         case 1: return p->x & 0xFF;
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 587ee6b..e88c497 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -440,8 +440,10 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+         g_string_append(j, "]},");
+     }
+     if (b->gt911) {
+-        g_string_append_printf(j, "\"gt911\":{\"frame_ready\":%s,\"frames\":%" PRIu64 ",\"clears\":%" PRIu64 ",\"start_nacks\":%" PRIu64 ",\"key_reads\":%" PRIu64 "},",
+-            b->gt911->frame_ready ? "true" : "false", b->gt911->frames, b->gt911->clears, b->gt911->start_nacks, b->gt911->key_reads);
++        g_string_append_printf(j, "\"gt911\":{\"frame_ready\":%s,\"frames\":%" PRIu64 ",\"clears\":%" PRIu64 ",\"start_nacks\":%" PRIu64 ",\"key_reads\":%" PRIu64 ","
++            "\"input_seq\":%" PRIu64 ",\"read_seq\":%" PRIu64 ",\"pending\":%s,\"deferred\":%" PRIu64 "},",
++            b->gt911->frame_ready ? "true" : "false", b->gt911->frames, b->gt911->clears, b->gt911->start_nacks, b->gt911->key_reads,
++            b->gt911->input_seq, b->gt911->read_seq, b->gt911->pending ? "true" : "false", b->gt911->deferred);
+     }
+     if (b->i2c0) {
+         g_string_append_printf(j, "\"i2c0\":{\"transactions\":%" PRIu64 ",\"nacks\":%" PRIu64 ",\"last_addr\":\"0x%02x\"},",
+diff --git a/include/hw/misc/x4pro_i2c_devs.h b/include/hw/misc/x4pro_i2c_devs.h
+index c77ca4f..7072fa2 100644
+--- a/include/hw/misc/x4pro_i2c_devs.h
++++ b/include/hw/misc/x4pro_i2c_devs.h
+@@ -25,12 +25,23 @@ struct X4ProGt911State {
+     uint16_t ptr;
+     int byte_index;
+     uint8_t config[GT911_CONFIG_LEN];
++    /* the live input, as the tooling set it last */
+     Gt911Point pts[GT911_MAX_POINTS];
+     int count;
+     bool home;
++    /* the frame in the output registers: latched when produced, so a read sees one coherent
++     * controller frame whatever the tooling does meanwhile */
++    Gt911Point frame_pts[GT911_MAX_POINTS];
++    int frame_count;
++    bool frame_home;
+     bool frame_ready;
++    bool pending;                   /* the input changed while a frame was waiting: report it next */
+     uint64_t frames, reads, clears, start_nacks;
+     uint64_t key_reads;             /* key-value byte read while the Home pad is down */
++    uint64_t input_seq;             /* bumped by every x4pro_gt911_set_touch */
++    uint64_t frame_seq;             /* input_seq the current frame was taken from */
++    uint64_t read_seq;              /* input_seq of the last frame the firmware cleared */
++    uint64_t deferred;              /* input changes that arrived while a frame was pending */
+     bool require_power;
+     int (*powered)(void *opaque);   /* board callback: is the touch rail on? */
+     void *powered_opaque;
+-- 
+2.54.0 (Apple Git-157)
+

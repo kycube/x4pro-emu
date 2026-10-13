@@ -118,10 +118,10 @@ def ink_in(shot, bands):
     return [sum(1 for v in _px(im.crop((c0, 0, c1, im.height))) if v == 0) for c0, c1 in bands]
 
 
-def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), bands=(), tries=3, quiet=2):
-    """Tap, settle, screenshot and compare against tests/golden/GOLDEN (created from the shot when
-    missing). A tap the stock dropped, or one that left the previous screen up, is repeated once --
-    the same known flake `test_lua_apps.tap_to` and `test_stock.step` guard against."""
+def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), bands=(), tries=1, quiet=2):
+    """Tap once, settle, screenshot and compare against tests/golden/GOLDEN (created from the shot when
+    missing). No retry: the stock's dropped taps were releases the GT911 model overwrote unread
+    (tests/test_input_delivery.py); `tries` stays for a caller that has its own reason."""
     g = os.path.join(ROOT, 'tests', 'golden', golden)
     n = None
     for attempt in range(tries):
@@ -140,16 +140,16 @@ def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), bands=(), tr
                          f'({n} pixels differ outside {list(bands)}); the shot is {shot}')
 
 
-def back_to_list(name, tmp, tries=3):
+def back_to_list(name, tmp, tries=1):
     """Out of a running app and back to the Lua Apps page. The Back pad does not leave the app on
     its own: it raises the stock's `Exit app "<app_id>"?` dialog (Continue | Exit), so the exit is
-    two inputs, and the whole pair is retried against the list golden.
+    two inputs, checked together against the list golden.
 
-    Neither input asks `--wait` for a repaint. The stock ignores input while it paints, and on a
-    loaded host (the desk Mac runs the owner's own applications) that made `home --wait` fail, while
-    *retrying the pad alone* is the wrong repair: if the first press did raise the dialog, a second
-    one dismisses it and the Exit tap then lands on the app. Only the outcome is worth asserting, so
-    press, settle, tap Exit, settle, and compare -- a whole attempt at a time."""
+    Neither input asks `--wait` for a repaint and the pair is no longer retried: the lost Back
+    presses on a loaded host were the GT911 model wiping an unread release (the stock then saw the
+    pad held, a long press), fixed in the model and `x4emu` (tests/test_input_delivery.py). Retrying
+    the pad *alone* stays wrong -- a second press dismisses the dialog the first one raised -- so a
+    caller that wants a retry passes `tries` and gets the whole pair again."""
     g = os.path.join(ROOT, 'tests', 'golden', 'stock-lua-status-list.png')
     shot = tmp / 'back.png'
     n = None

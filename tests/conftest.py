@@ -40,29 +40,17 @@ def instance_name(node_name, node_id=None):
     return name
 
 
-def x4emu_input(name, *args, tries=3, **kw):
-    """An input command carrying `--wait`, repeated once when nothing repainted.
+def x4emu_input(name, *args, **kw):
+    """An input command (`tap`, `home`, `press`, ... usually with `--wait`), delivered once.
 
-    Both firmwares poll touch and the buttons only between rendering passes that take seconds, so an
-    input delivered into such a pass is read and then ignored: `--wait` reports "no refresh within Ns"
-    while the firmware did take the frame (CLAUDE.md "Lessons"; the session-4 flake in three tests, and
-    one input in ~40 lost on a loaded host). `tests/test_stock.py`'s `tap_repaints` and
-    `tests/test_device_screenshot.py` already retry for this; this is the same guard for every other
-    test. The retry is safe precisely because no refresh happened -- the firmware acted on nothing, so
-    nothing advanced. Any other failure is raised at once, unretried.
-
-    Three attempts, not two: the desk Mac runs the owner's own applications (a load average around 7
-    of 14 cores while this was written), every paint takes longer under that, and two attempts were
-    measurably not enough -- a full run lost the menu tap twice in a row on 2026-09-07."""
-    for attempt in range(tries):
-        last = attempt == tries - 1
-        r = x4emu(name, *args, check=last, **kw)
-        if r.returncode == 0:
-            return r
-        if 'no refresh within' not in (r.stdout + r.stderr):
-            raise AssertionError(f'x4emu {args} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
-        print(f'{name}: {args[0]} drew nothing, repeating it once')
-    return r
+    This used to repeat an input that drew nothing ("no refresh within Ns" although the firmware had
+    read the GT911 frame): every full run lost about one input, in a different test each time. The
+    cause was the GT911 model overwriting an unread frame -- a release landing between the firmware's
+    status read and its clear was wiped unseen -- and button holds measured in host milliseconds; the
+    model now latches frames and `x4emu` holds every input until the firmware has seen it and its
+    release (docs/x4emu.md "Input delivery", tests/test_input_delivery.py). A test that still needs a
+    retry must say why next to it."""
+    return x4emu(name, *args, **kw)
 
 
 @pytest.fixture(scope='session')

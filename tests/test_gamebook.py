@@ -172,9 +172,11 @@ def choose(name, tmp, label, k):
     settle(name, 2, 60)
 
 
-def open_app(name, tmp, tries=4):
-    """Tap the app's card on the Mini Apps list until the gamebook is on screen. The list sometimes
-    answers the first tap with a repaint of itself (the card's selection) instead of opening it."""
+def open_app(name, tmp, tries=1):
+    """Tap the app's card on the Mini Apps list once; the gamebook must be on screen. The list used to
+    answer a tap now and then with a repaint of itself (the card's selection, i.e. the press) and no
+    opening: the release had been wiped unread by the GT911 model, fixed with the model's latched
+    frames (tests/test_input_delivery.py)."""
     for attempt in range(tries):
         tap(name, *APP_CARD)
         settle(name, 3, 60)

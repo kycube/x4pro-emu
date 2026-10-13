@@ -189,18 +189,49 @@ Two limits, both deliberate:
 CrossPoint ignores input while it is painting: use `--quiet 2` (or `wait-quiet`) before an input in
 scripts, and `--wait S` to have the command report the refresh the input triggered — the refresh is
 `null` when `--wait` is not given, and a `--wait` that sees no refresh is an error (exit 1).
-`tap` and `home` hold the touch for at least `--ms` **and** until the firmware has read the GT911
-frame (up to 5 s), so a tap into a multi-second rendering pass is not lost; `read_after_s` is when
-that read happened, or `null` if it never did. For buttons `read_after_s` is always `null`.
+
+#### Input delivery: held until the firmware has seen it
+
+Both firmwares sample input between pieces of work that can take seconds, and guest time follows the
+host clock (no `-icount` by default), so on a loaded host the guest executes less per guest
+millisecond and polls less often. Every input is therefore held the way a finger holds it, in
+**guest** terms:
+
+1. at least `--ms` of **guest** time (`state.uptime_us`; it used to be host milliseconds), and
+2. until the firmware has seen it — for `tap`, `swipe` and `home` until it has *consumed* a GT911 frame
+   carrying the input (`state.gt911.read_seq` reaching the `input_seq` the input got); for `press`,
+   `hold` and `chord` until it has sampled the pressed level twice, at least `sample-gap-us`
+   (8 ms) of guest time apart (`state.gpio_in.samples`: CrossPoint commits a button change only when
+   two polls more than 5 ms apart agree; the stock samples GPIO IN ~1700 times a second);
+3. then released, and the command returns once the firmware has seen the **release** too
+   (`release_read`), so the next input never merges with this one.
+
+Every wait is bounded in host time (5 s for a touch to be read, 2 s for a button's samples — a
+longer hold would change a button's meaning — and 5 s for a release), and the output says what was
+not seen (`not read by the firmware within 5 s`, `release not read`). A firmware that reads an input
+acts on it: neither firmware needs more than one press frame and one release frame for a tap or the
+Home pad (measured with `--ms 0`).
+
+The GT911 model latches each frame until the firmware clears 0x814E: a change that arrives while a
+frame is unread (`state.gt911.pending`, counted in `deferred`) becomes the next frame, 10 ms after the
+clear. Before that, a release landing between the firmware's status read and its clear was wiped
+unseen — the firmware then believed the finger or the pad was still down, the tap never completed and
+the *next* input continued the stuck contact; that was the "read by the firmware after 0.03 s, no
+refresh within 30 s" loss of about one input per full test run (`tests/test_input_delivery.py`).
+With a QEMU that predates these counters (`state.gt911.input_seq`, `state.gpio_in`), `tap`/`home`
+fall back to `clears` and buttons to the guest-time hold alone.
 
 | Command | Arguments | `--json` object |
 |---|---|---|
-| `press` | `left\|right\|power`, `--ms 120`, `--wait S`, `--quiet S` | `{"button", "ms", "read_after_s": null, "refresh", "refresh_after_s"}`; a power press while the sleep model is asleep is extended to 1500 ms and adds `"woke_from_deep_sleep": true` |
+| `press` | `left\|right\|power`, `--ms 120`, `--wait S`, `--quiet S` | `{"button", "ms", "held_ms", "read_after_s", "release_read", "refresh", "refresh_after_s"}` (`read_after_s`: host seconds until the second sample, `null` if the firmware did not sample it twice); a power press while the sleep model is asleep is extended to 1500 ms (guest; the clock restarts with the wake) and adds `"woke_from_deep_sleep": true` |
 | `hold` | same, `--ms 3000` | as `press` |
-| `chord` | `BTN [BTN …]`, `--ms 300`, `--wait S`, `--quiet S` | `{"buttons": [...], "ms", "read_after_s": null, "refresh", "refresh_after_s"}` (power + right is CrossPoint's screenshot chord) |
-| `tap` | `X Y`, `--ms 120`, `--wait S`, `--quiet S` | `{"x", "y", "gt911": [rx, ry], "ms", "read_after_s", "refresh", "refresh_after_s"}` |
-| `home` | `--ms 250`, `--wait S`, `--quiet S` | `{"ms", "read_after_s", "refresh", "refresh_after_s"}` — the capacitive Home pad (the stock app ignores it) |
-| `swipe` | `X1 Y1 X2 Y2`, `--ms 250` | `{"x1", "y1", "x2", "y2", "ms", "steps"}` |
+| `chord` | `BTN [BTN …]`, `--ms 300`, `--wait S`, `--quiet S` | `{"buttons": [...], "ms", "held_ms", "read_after_s", "release_read", "refresh", "refresh_after_s"}` (power + right is CrossPoint's screenshot chord) |
+| `tap` | `X Y`, `--ms 120`, `--wait S`, `--quiet S` | `{"x", "y", "gt911": [rx, ry], "ms", "held_ms", "read_after_s", "release_read", "refresh", "refresh_after_s"}` |
+| `home` | `--ms 250`, `--wait S`, `--quiet S` | `{"ms", "held_ms", "read_after_s", "release_read", "refresh", "refresh_after_s"}` — the capacitive Home pad (Back in the stock) |
+| `swipe` | `X1 Y1 X2 Y2`, `--ms 250`, `--wait S`, `--quiet S` | `{"x1", "y1", "x2", "y2", "points", "unread", "release_read", "refresh", "refresh_after_s"}` |
+
+`held_ms` is the guest time the input was held; `release_read` is `null` for a button on a QEMU
+without `state.gpio_in`.
 
 ### Guest time, record and replay
 

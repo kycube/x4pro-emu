@@ -159,14 +159,16 @@ def emu_flash_app(name: str = 'dev0', app: str | None = None, build_dir: str | N
 # ---------------------------------------------------------------- input
 @server.tool()
 def emu_press(name: str = 'dev0', button: str = 'right', ms: int = 120, wait: float = 10, quiet: float = 1) -> str:
-    """Press a button: left (GPIO0, up/prev), right (GPIO7, down/next), power (GPIO3). quiet waits for
-    an idle panel first; wait reports the refresh that follows. A power press while the model is in
-    deep sleep is extended to 1.5 s (CrossPoint verifies the hold after the wake)."""
+    """Press a button: left (GPIO0, up/prev), right (GPIO7, down/next), power (GPIO3). Held for `ms` of
+    guest time and until the firmware has sampled it twice, then released and held until the release
+    is sampled too (docs/x4emu.md "Input delivery"). quiet waits for an idle panel first; wait reports
+    the refresh that follows. A power press while the model is in deep sleep is extended to 1.5 s
+    (CrossPoint verifies the hold after the wake)."""
     return api.run_text(_sargs('press', button, '--ms', ms, '--wait', wait, '--quiet', quiet), name=name)
 
 @server.tool()
 def emu_hold(name: str = 'dev0', button: str = 'power', ms: int = 700, wait: float = 10) -> str:
-    """Hold a button for `ms` milliseconds (power >= 400 ms sleeps CrossPoint)."""
+    """Hold a button for `ms` milliseconds of guest time (power >= 400 ms sleeps CrossPoint)."""
     return api.run_text(_sargs('hold', button, '--ms', ms, '--wait', wait), name=name)
 
 @server.tool()
@@ -176,17 +178,19 @@ def emu_chord(name: str = 'dev0', buttons: list[str] = ['power', 'right'], ms: i
 
 @server.tool()
 def emu_tap(name: str = 'dev0', x: int = 400, y: int = 240, ms: int = 120, wait: float = 10, quiet: float = 1) -> str:
-    """Tap at landscape panel pixel (x, y); converted to the GT911's portrait frame."""
+    """Tap at landscape panel pixel (x, y); converted to the GT911's portrait frame. Held for `ms` of
+    guest time and until the firmware has consumed the touch frame, then released until it has
+    consumed the release frame (docs/x4emu.md "Input delivery")."""
     return api.run_text(_sargs('tap', x, y, '--ms', ms, '--wait', wait, '--quiet', quiet), name=name)
 
 @server.tool()
 def emu_swipe(name: str = 'dev0', x1: int = 600, y1: int = 240, x2: int = 200, y2: int = 240, ms: int = 250) -> str:
-    """Swipe from (x1,y1) to (x2,y2) over `ms` milliseconds."""
+    """Swipe from (x1,y1) to (x2,y2) over `ms` milliseconds of guest time, every point held until read."""
     return api.run_text(_sargs('swipe', x1, y1, x2, y2, '--ms', ms), name=name)
 
 @server.tool()
 def emu_home(name: str = 'dev0', ms: int = 120, wait: float = 10) -> str:
-    """Press the capacitive Home pad (GT911 key)."""
+    """Press the capacitive Home pad (GT911 key; Back in the stock), held like a tap."""
     return api.run_text(_sargs('home', '--ms', ms, '--wait', wait), name=name)
 
 @server.tool()
@@ -243,8 +247,15 @@ def emu_wait_guest_ms(name: str = 'dev0', ms: int = 1000, timeout: float = 60) -
 # ---------------------------------------------------------------- build
 @server.tool()
 def build_firmware(env: str = 'x4pro', timeout: float = 1800) -> str:
-    """`pio run -e <env>` in firmware/ (CrossPoint). Returns the tail of the build log."""
-    r = subprocess.run(['pio', 'run', '-e', env], cwd=os.path.join(ROOT, 'firmware'), capture_output=True, text=True, timeout=timeout)
+    """`pio run -e <env>` in firmware/ (CrossPoint) with the Makefile's PlatformIO (.venv-pio: pioarduino's
+    core on a Python 3.10-3.14, created on first use; Homebrew's platformio runs on 3.15, which the pinned
+    platform refuses). Returns the tail of the build log."""
+    pio = os.path.join(ROOT, '.venv-pio', 'bin', 'pio')
+    if not os.path.exists(pio):
+        r = subprocess.run(['make', '.venv-pio/bin/pio'], cwd=ROOT, capture_output=True, text=True, timeout=600)
+        if r.returncode:
+            return (r.stdout + r.stderr)[-2000:] + f'\n(exit {r.returncode}: could not create .venv-pio)'
+    r = subprocess.run([pio, 'run', '-e', env], cwd=os.path.join(ROOT, 'firmware'), capture_output=True, text=True, timeout=timeout)
     lines = (r.stdout + r.stderr).splitlines()
     keep = [l for l in lines if any(k in l for k in ('error', 'Error', 'SUCCESS', 'FAILED', 'RAM:', 'Flash:'))]
     return '\n'.join(keep[-20:] or lines[-20:]) + f'\n(exit {r.returncode})'

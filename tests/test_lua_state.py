@@ -97,11 +97,16 @@ def start(name, flash, sd):
     settle(name, 2, 30)
 
 
-def open_app(name):
-    tap(name, *HAMBURGER)
-    settle(name, 2, 30)
-    tap(name, *MINI_APPS)
-    settle(name, 2, 30)
+def open_app(name, from_list=False):
+    """Home -> menu -> Mini Apps -> the app; `from_list`: the Extensions list is already on screen
+    (where `leave_app` lands), so only the card is tapped. The re-entry used to tap the hamburger and
+    the Mini Apps row on that list too: neither draws anything there, and the taps only "passed"
+    because `test_stock.tap`'s retries waited long enough to catch the status bar's minute repaint."""
+    if not from_list:
+        tap(name, *HAMBURGER)
+        settle(name, 2, 30)
+        tap(name, *MINI_APPS)
+        settle(name, 2, 30)
     tap(name, *APP_CARD)
     settle(name, 2, 60)
 
@@ -140,7 +145,7 @@ def test_lua_state_survives_exit_and_reboot_on_stock_768(state_stock):
     open_app(name)
     assert drawn(name, tmp, 'first') == (0, False), 'a fresh card should hand back an empty ctx.state'
     leave_app(name)                                 # saves {visits=1, ...}: the AES/GDMA path
-    open_app(name)
+    open_app(name, from_list=True)
     assert drawn(name, tmp, 'reentered') == (1, True), 'ctx.state did not come back after Exit'
     leave_app(name)                                 # saves {visits=2, ...}
 
