@@ -1,0 +1,74 @@
+From d8529031090d993015e64b24edb0ee8e79c5fb7e Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 19:04:25 -0500
+Subject: [PATCH 21/24] target/xtensa: TCG memory order TSO, so two cores see
+ stores in program order
+
+TCG_GUEST_DEFAULT_MO was 0 ("Xtensa processors have a weak memory model"),
+so under MTTCG on a weakly ordered host no barrier separates two guest
+stores and the other vCPU may see them in either order. The ESP32-S3's
+LX7 cores are in-order and ESP-IDF relies on its stores becoming visible
+in program order: spinlock_release() frees a lock with a plain store, and
+esp_cpu_compare_and_set() for an address in external RAM takes a software
+lock with S32C1I, compares and stores the lock word, then releases the
+software lock with a plain store right after it.
+
+On an arm64 host the stock xteink firmware (ESP-IDF 6.0.1) aborted in about
+half of its boots with six emulators running:
+
+  assert failed: 0x40384078 <cached disabled>:141 (<cached disabled>)
+
+spinlock.h:141 is assert(lock->owner == core_owner_id) after a successful
+compare-and-set. Stopped there (gdbstub breakpoint): CPU0 had taken a
+queue's spinlock at 0x3C6F97E8 (PSRAM) and read the owner back as 0xABAB,
+CPU1's id. CPU1's release of the software lock had become visible before
+its store of the lock word, so CPU0 compared against the stale FREE value.
+
+A message-passing litmus on the two emulated cores (data store, flag
+store, no MEMW between them; the other core waits for the flag, MEMW,
+reads the data) saw the new flag with the old data 78..342 times per
+million round trips with MO 0 or TCG_MO_LD_LD, and never with
+TCG_MO_ST_ST or TSO. Stock boots, 6 instances x 8: 26/48 asserted with
+MO 0, 22/48 with LD_LD, 0/48 with ST_ST, 0/48 with TSO.
+
+TSO (every order but store->load) is what an in-order core with a FIFO
+store buffer provides. It emits nothing on x86 hosts, which is why the
+assert never showed on Linux CI; on arm64 it costs a DMB per guest load
+and store (a memory-bound loop ran about 13% slower, a stock boot used
+about 8% more host CPU).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ target/xtensa/cpu-param.h | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/target/xtensa/cpu-param.h b/target/xtensa/cpu-param.h
+index 0000725..8ecb738 100644
+--- a/target/xtensa/cpu-param.h
++++ b/target/xtensa/cpu-param.h
+@@ -17,7 +17,20 @@
+ #define TARGET_VIRT_ADDR_SPACE_BITS 32
+ #endif
+ 
+-/* Xtensa processors have a weak memory model */
+-#define TCG_GUEST_DEFAULT_MO      (0)
++/*
++ * The ISA leaves the order of ordinary loads and stores to different
++ * addresses open, but the SMP parts QEMU runs real firmware for (the
++ * ESP32-S3's two in-order LX7 cores) make them visible in program order,
++ * except that a load may pass an earlier store, and ESP-IDF depends on it:
++ * spinlock_release() frees a lock with a plain store, and the
++ * compare-and-set it uses for locks in external RAM releases its software
++ * lock with a plain store right after the store it protects. With MTTCG on
++ * a weakly ordered host (arm64) the second store could become visible
++ * first, the other core then read a stale lock word, and both cores owned
++ * the same PSRAM spinlock (ESP-IDF's spinlock.h:141 assert,
++ * "lock->owner == core_owner_id"). TSO here costs nothing on x86 hosts and
++ * a DMB per guest load and store on arm64.
++ */
++#define TCG_GUEST_DEFAULT_MO      (TCG_MO_ALL & ~TCG_MO_ST_LD)
+ 
+ #endif
+-- 
+2.54.0 (Apple Git-157)
+

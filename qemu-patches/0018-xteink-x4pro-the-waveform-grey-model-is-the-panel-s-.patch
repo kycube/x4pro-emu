@@ -1,7 +1,7 @@
 From 20b3bd583650aea0017f1ffd46d300825fabcfa3 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 7 Sep 2026 12:11:18 -0500
-Subject: [PATCH 18/20] xteink-x4pro: the waveform grey model is the panel's
+Subject: [PATCH 18/24] xteink-x4pro: the waveform grey model is the panel's
  default (waveform-gray=on)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

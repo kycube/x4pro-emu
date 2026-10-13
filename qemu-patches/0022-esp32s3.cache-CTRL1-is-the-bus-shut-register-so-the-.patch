@@ -1,0 +1,89 @@
+From 61336a88eccefc0998a812e25d72fe0c69d07127 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 19:24:42 -0500
+Subject: [PATCH 22/24] esp32s3.cache: CTRL1 is the bus-shut register, so the
+ caches read as enabled
+
+The model took bit 0 of EXTMEM_DCACHE_CTRL1 / EXTMEM_ICACHE_CTRL1 for the
+cache's enable bit, on reads and on writes. On the chip those registers
+hold SHUT_CORE0_BUS (bit 0) and SHUT_CORE1_BUS (bit 1); the enable bit is
+bit 0 of DCACHE_CTRL / ICACHE_CTRL alone. The ROM's Cache_Resume_DCache()
+(0x4004f480) sets DCACHE_CTRL.ENABLE and then clears both bus-shut bits in
+CTRL1, so the enable read back as 0 from the first resume on, and
+Cache_Resume_ICache() did the same to the ICache. A stock firmware at its
+home screen read 0 from both CTRL registers.
+
+ESP-IDF's spi_flash_cache_enabled() reads exactly those bits, and
+__assert_func() replaces every string in flash with "<cached disabled>"
+when it returns false, so every assert in the emulator printed
+
+  assert failed: 0x40384078 <cached disabled>:141 (<cached disabled>)
+
+instead of
+
+  assert failed: spinlock_acquire spinlock.h:141 (lock->owner == core_owner_id)
+
+CTRL1 now stores its two bits, and a reset clears both enable bits along
+with the other registers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/esp32s3_cache.c | 20 ++++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/hw/misc/esp32s3_cache.c b/hw/misc/esp32s3_cache.c
+index ef75966..a2f5c8b 100644
+--- a/hw/misc/esp32s3_cache.c
++++ b/hw/misc/esp32s3_cache.c
+@@ -133,14 +133,13 @@ static uint64_t esp32s3_cache_read(void *opaque, hwaddr addr, unsigned int size)
+         case A_EXTMEM_DCACHE_CTRL:
+             r = s->dcache_enable;
+             break;
+-        case A_EXTMEM_DCACHE_CTRL1:
+-            r = s->dcache_enable;
+-            break;
+         case A_EXTMEM_ICACHE_CTRL:
+             r = s->icache_enable;
+             break;
++        /* CTRL1 holds the two "shut the core's bus" bits, not the enable bit */
++        case A_EXTMEM_DCACHE_CTRL1:
+         case A_EXTMEM_ICACHE_CTRL1:
+-            r = s->icache_enable;
++            r = s->regs[index];
+             break;
+         /* For the following registers, mark the bit as done only if the feature was enabled */
+         case A_EXTMEM_DCACHE_SYNC_CTRL:
+@@ -222,14 +221,17 @@ static void esp32s3_cache_write(void *opaque, hwaddr addr, uint64_t value,
+             case A_EXTMEM_DCACHE_CTRL:
+                 s->dcache_enable = value & 1;
+                 break;
+-            case A_EXTMEM_DCACHE_CTRL1:
+-                s->dcache_enable = value & 1;
+-                break;
+             case A_EXTMEM_ICACHE_CTRL:
+                 s->icache_enable = value & 1;
+                 break;
++            /*
++             * Bits 0 and 1 of CTRL1 shut the cache's bus to core 0 and core 1. The ROM's
++             * Cache_Resume_xCache() sets CTRL.ENABLE and then clears both bits, so taking
++             * bit 0 of CTRL1 for the enable bit left every cache reading as disabled.
++             */
++            case A_EXTMEM_DCACHE_CTRL1:
+             case A_EXTMEM_ICACHE_CTRL1:
+-                s->icache_enable = value & 1;
++                s->regs[index] = value & 0x3;
+                 break;
+             case A_EXTMEM_ICACHE_FREEZE:
+                 if (value & R_EXTMEM_ICACHE_FREEZE_ICACHE_FREEZE_ENA_MASK) {
+@@ -273,6 +275,8 @@ static void esp32s3_cache_reset_hold(Object *obj, ResetType type)
+ {
+     ESP32S3CacheState *s = ESP32S3_CACHE(obj);
+     memset(s->regs, 0, ESP32S3_CACHE_REG_COUNT * sizeof(*s->regs));
++    s->icache_enable = false;
++    s->dcache_enable = false;
+ 
+     /* Initialize the MMU with invalid entries */
+     for (int i = 0; i < ESP32S3_MMU_TABLE_ENTRY_COUNT; i++) {
+-- 
+2.54.0 (Apple Git-157)
+
