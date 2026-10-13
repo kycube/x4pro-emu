@@ -65,7 +65,7 @@ qemu/          Espressif QEMU clone (esp-develop @ febae182), branch x4pro (giti
 qemu-patches/  our QEMU changes as a patch series applied by `make setup` (the source of truth)
 models/        pure-C panel cores (SSD1677/UC8179/UC8279) + host tests + device fixtures
 x4emu/         the CLI as a package (pipx install . → `x4emu`; docs/x4emu.md); tools/x4emu is its in-repo shim
-tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, xic2png.py, stockver.py (+ stockver.d/: the per-version offsets the three stock tools read), stockdev.py, stockpatch.py, stockstrings.py, xtfont.py, xtapp.py, gamebook.py (+ gamebook_engine.lua, pixart.py), readme_images.py, ghidra_stock.py (+ ghidra/), device.py, epdtrace.py, appdis.py, tcbwalk.py
+tools/         x4emu shim, x4emu_mcp.py, mkflash.py, mksd.py, mkefuse.py, nvsedit.py, xic2png.py, stockver.py (+ stockver.d/: the per-version offsets the three stock tools read), stockdev.py, stockpatch.py, stockstrings.py, xtfont.py, xtapp.py, gamebook.py (+ gamebook_engine.lua, pixart.py), readme_images.py, upstream_check.py, ghidra_stock.py (+ ghidra/), device.py, epdtrace.py, appdis.py, tcbwalk.py
 tests/         pytest end-to-end (boot, home, touch, reader, battery, sleep, panel variants, stock, record/replay, Lua state); fast: nvsedit, xic, AES (qtest)
 apps/          Lua apps for the stock (gull-rock: a gamebook, built; status-typographic, status-panels, probe, probe-io); docs/lua-apps.md
 stories/       gamebook sources (story.txt + scenes.py pixel art) that tools/gamebook.py builds into apps/; docs/gamebook.md
@@ -91,6 +91,12 @@ CI: `.github/workflows/ci.yml` runs exactly `make setup && make build && make te
 (cached QEMU tree and PlatformIO packages; screenshots and `.x4emu/*/` logs uploaded as artifacts).
 The stock tests skip there (the device dump never leaves `images/`); `make test PYTEST_ARGS=…` passes
 extra pytest flags.
+Upstream watch: `.github/workflows/upstream.yml` (Mondays 06:17 UTC; `gh workflow run upstream.yml [-f force=true]`)
+builds the newest CrossPoint release, applies qemu-patches/ to a moved `esp-develop`, and does a clean macOS
+Homebrew build; `tools/upstream_check.py [--json|--markdown]` is the same report locally (no builds, ~10 s; it
+also flags a qemu/build configured against removed Homebrew kegs). `pytest --golden-drift FILE` (off by default)
+turns device-golden mismatches on a healthy emulator into xfail. The stock firmware stays manual: its updates
+arrive only through the device (`docs/upstream.md`).
 Everything Python runs from `.venv/bin/python` (`-m esptool`, `-m espefuse`, `-m pytest`).
 QEMU: `cd qemu/build && ../configure --target-list=xtensa-softmmu --enable-gcrypt --enable-slirp
 --enable-png --disable-user --disable-capstone --disable-vnc --disable-gtk --disable-sdl

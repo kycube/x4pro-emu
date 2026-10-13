@@ -29,6 +29,7 @@ the [project README](../README.md) is the overview.
 |---|---|
 | [log.md](log.md) | the engineering log, newest at the bottom: what was done, what failed, and why |
 | [NEXT_PHASE.md](NEXT_PHASE.md) | the handoff for the next working session: where things stand, the plan, how work is split |
+| [upstream.md](upstream.md) | the weekly upstream watch (`.github/workflows/upstream.yml`): what it checks and how to act on each finding |
 
 ## Folders
 
