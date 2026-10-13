@@ -82,9 +82,9 @@ The models are checked against the desk unit, not just against datasheets:
   ([docs/smp.md](docs/smp.md), [docs/x4emu.md](docs/x4emu.md)).
 - `tools/parity.py` runs the same steps on the emulator and, from a printed runbook, on the reader, and
   compares the stock's own Screen Captures pixel by pixel, every difference masked or explained
-  ([docs/parity.md](docs/parity.md)); on the emulator side the captures equal the panel on 7 of 8 screens
-  (the light panel closes before a capture is taken, so it has none of its own), and the first device
-  session is still to come.
+  ([docs/parity.md](docs/parity.md)). The first session on the reader (stock 7.6.8, 2026-10-13) passed:
+  seven screens, from Home to a Lua gamebook, with 0 unexplained pixels (only the clock, the battery,
+  the date and a saved game differ). The eighth, the light panel, closes before a capture is taken.
 - Touch, buttons, the capacitive Home pad, the front light (LEDC with hardware fades), the battery
   gauge, the RTC, the SD card, deep sleep and the radio blocks a WiFi start touches are modelled to
   the point where both firmwares run unpatched ([docs/hardware.md](docs/hardware.md)).

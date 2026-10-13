@@ -1404,3 +1404,23 @@ are bit-identical (71/71 and 61/61 harness sections, ASan/UBSan clean); host tes
 `tests/test_panels.py::test_uc8179_reader_greys_match_uc8279`. `make test` 232 passed. Uncertain: the
 CDI field layout and the UD reading rest on the driver's design and the datasheet as remembered; `gray-k`
 was measured on UC8279 glass; there is no UC8179 oracle.
+
+## 2026-10-13 — The first device-parity session: 7 screens, 0 unexplained pixels
+
+The owner at the reader, the coordinator at the Mac, `docs/parity.md` "A device session" steps 1–9.
+A tagged backup first (`flash-2026-10-13-pre-parity-{a,b}`, SHA-256 equal), then the developer-patched
+7.6.8 (one byte, sha a185f527…) into app0 through `flash-crosspoint --firmware … --slot app0`, the parity
+book onto the card in USB mode, the runbook walked (the three owner questions folded into its first
+steps, at the owner's request: English, Unbound, reading settings unchanged, all yes), the captures
+collected and compared. **PASS**: home 680 px, menu 680, settings 651, all-files 651, reader 271,
+mini-apps 676, gull-rock 3,507, every pixel inside a mask (clock, battery, WiFi glyph, the menu's date,
+the reader footer) or the gamebook's saved-game region (the owner had played it, so `gamebook-state`
+was not met). The light panel was looked at, not captured. Then `restore-stock --slot app0 --yes`: the
+plan named the pre-parity backup and "the image is pristine xteink_app 7.6.8 (sha256 f68533a8…)",
+6,250,640 bytes written, hash verified, read-back equal. The device is back where it was.
+
+Found: the stock draws no "Screenshot saved" toast over a Lua app, but saves the capture; the owner took
+the gamebook twice (as the runbook then said to), and content pairing skipped the extra one. The emulator
+does the same (a scratch walk: 1,483 toast pixels over Home 1–3 s after the tap, none over the Gull Rock
+cover from 0.5 s to 6 s); the runbook now says so. And after every esptool command the reader kept its
+picture and ignored input until it was unplugged and the power button held (CLAUDE.md, device rule 3).

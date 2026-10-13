@@ -123,20 +123,23 @@ a mass-storage personality ("XTEink X4 Pro", 0x303A:0x4002) in USB mode.
 
 1. Nothing is written to the device without a verified double backup on disk
    (`tools/device.py backup`: two 16 MB reads, SHA-256 equal). Current backups:
-   `images/device/flash-2026-10-12-{a,b}.bin` (stock 7.6.8 in app0, booting; 7.5.4 in app1),
+   `images/device/flash-2026-10-13-pre-parity-{a,b}.bin` (the newest: pristine 7.6.8 in app0, booting, taken
+   before the parity session; what `restore-stock` writes), `flash-2026-10-12-{a,b}.bin` (the same slots),
    `flash-2026-09-07-{a,b}.bin` (stock 7.5.4 in app1, booting) and `flash-2026-09-06-{a,b}.bin`
    (7.2.4 era), `docs/device/flash-backup-sha256.txt`.
 2. Never `erase-flash`, never `espefuse burn-*`, never write 0x0..0x10000 (bootloader, partition
    table, otadata) except to restore the verified backup byte for byte. Writing an OTA app slot
-   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-10-12, after the
-   owner's second OTA update): **app0 = stock 7.6.8**, app1 = stock 7.5.4, otadata entry 0 seq 3 → **app0 boots**
-   (`tools/device.py slots`); the efuses read as in `docs/device/efuse-dump.txt` (no flash encryption, secure boot
-   or anti-rollback). `flash-crosspoint` / `restore-stock` read otadata and refuse to write a slot the bootloader
+   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-10-13, after the
+   parity session's patch was reverted): **app0 = pristine stock 7.6.8** (sha256 f68533a8…), app1 = stock 7.5.4,
+   otadata entry 0 seq 3 → **app0 boots** (`tools/device.py slots`); the efuses read as in
+   `docs/device/efuse-dump.txt` (no flash encryption, secure boot or anti-rollback). `flash-crosspoint` / `restore-stock` read otadata and refuse to write a slot the bootloader
    does not start (a patched stock app goes to the booting slot with `flash-crosspoint --firmware APP.bin --slot
    app0`, `docs/parity.md`). Their **default slot (app0) is now the booting one**, so `--yes` alone would
    overwrite 7.6.8 (and `--preserve-stock` would overwrite 7.5.4 in app1). No tool here writes otadata.
 3. Do not touch the device during a transfer; the magnetic pogo adapter detaches easily. If a
-   transfer breaks, check the device state before retrying.
+   transfer breaks, check the device state before retrying. After any esptool command (every
+   `tools/device.py` read or write resets the chip) the reader keeps its last picture and ignores input
+   until the owner unplugs it and holds the power button (the stock's boot-preflight); say so when handing back.
 4. GPIO19/20 are USB D-/D+: never run any pin or bus probe over them.
 5. If the device stops responding, stop, write down what was done, and follow
    `firmware/docs/fix-bricked-xteink.md` and the CrossPoint web tools.

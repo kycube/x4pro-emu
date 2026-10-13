@@ -83,9 +83,12 @@ Things found while building it (7.6.8, emulator):
 
 - **The toast.** "Screenshot saved" stays alive about 3.5 s of guest time after the capture and is
   composited onto any screen drawn meanwhile (a menu opened 3.4 s after a capture carried it, 4.4 s
-  after did not); it does not disappear by itself on an idle panel. The walk waits 5 s of guest time
-  after each capture, and the runbook tells the owner to count to five. `compare` names a difference
-  that sits inside the toast's box as a leftover toast.
+  after did not; over an idle Home it is on the panel from about 1 s to 3 s after the tap and gone by
+  6 s). The walk waits 5 s of guest time after each capture, and the runbook tells the owner to count
+  to five. `compare` names a difference that sits inside the toast's box as a leftover toast.
+- **No toast over a Lua app**, on the device and the emulator alike (the first device session found it;
+  the emulator then showed no toast pixel over the Gull Rock cover from 0.5 s to 6 s, while Home in the
+  same run showed 1,483). The capture is saved all the same, so the owner should not repeat it.
 - The capture is the screen *as redrawn after the panel closes*: on the menu, the status-bar clock is
   not redrawn over the scrim, so the menu's capture has no clock while the panel screenshot taken
   before the pull does (inside the mask).
@@ -163,7 +166,7 @@ which resets it into the ROM loader and back):
 ```
 reading the partition table and otadata from /dev/cu.usbmodem… (which slot boots decides everything below)...
   the bootloader starts app0: otadata entry 0 has the highest valid sequence number (3, state VALID), and (3 - 1) % 2 = 0
-verified backup: …/images/device/flash-2026-10-12-pre-parity-a.bin
+verified backup: …/images/device/flash-2026-10-13-pre-parity-a.bin
 plan: port /dev/cu.usbmodem…
   0. app0 is the slot the bootloader starts (otadata entry 0 has the highest valid sequence number (3, state VALID), and (3 - 1) % 2 = 0)
   2. write SCRATCH/app0-7.6.8-dev.bin (6250640 bytes) into app0 @0x10000
@@ -211,7 +214,7 @@ newest verified backup, which after step 2 is the pre-patch state:
 
 ```
 tools/device.py restore-stock --slot app0
-# plan: write 6250640 bytes of xteink_app 7.6.8 from …/flash-2026-10-12-pre-parity-a.bin into app0 @0x10000 on /dev/cu.usbmodem…
+# plan: write 6250640 bytes of xteink_app 7.6.8 from …/flash-2026-10-13-pre-parity-a.bin into app0 @0x10000 on /dev/cu.usbmodem…
 # pass --yes to proceed
 tools/device.py restore-stock --slot app0 --yes
 ```
@@ -225,6 +228,28 @@ rewrites the reference copy `images/device/stock-app0-7.6.8.bin` (fixed 2026-10-
 first 64 KB equal the backup's, so the sanity check passes). The card keeps `/Parity` and the
 captures until the owner deletes them; the bookshelf then still lists the parity book (its reading
 state is in `/XTData/reading/`), so a second session would find `bookshelf` not met.
+
+### The first session (2026-10-13): PASS
+
+Stock 7.6.8, the owner at the reader, steps 1–9 as above (backup `flash-2026-10-13-pre-parity-{a,b}`,
+the patched app sha a185f527…, reverted to the pristine f68533a8… afterwards). All three questions
+answered yes. Seven captured screens, **0 unexplained pixels** on every one:
+
+| Screen | Differing px | All explained by |
+|---|---|---|
+| home | 680 | status bar (clock, battery, WiFi glyph: on on the device, off in the redacted copy) |
+| menu | 680 | status bar 480, the menu's date line 200 |
+| settings | 651 | status bar |
+| all-files | 651 | status bar |
+| reader | 271 | footer clock 171, footer battery 100 |
+| mini-apps | 676 | status bar |
+| gull-rock | 3,507 | the cover's saved-game region (`gamebook-state` not met: the owner had played it) |
+
+The light panel was looked at, not captured. The card held eight new captures: two of the gamebook
+cover, five seconds apart (no toast appeared there, see above); content pairing matched the first to
+the gull-rock screen and skipped the second (`report.json` notes). Seen at the desk: after every esptool command (each `tools/device.py` call resets the chip)
+the reader kept its picture and ignored input until it was unplugged and the power button held
+(CLAUDE.md, device rule 3).
 
 ## Reading the report
 

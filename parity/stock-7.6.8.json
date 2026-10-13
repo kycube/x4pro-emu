@@ -25,7 +25,7 @@
       "Put one finger on the very top edge of the screen, on the line with the clock and the battery, and slide it slowly straight down, about a third of the screen.",
       "The light panel opens: Brightness, Color Temp, four round buttons (Boost, Full Refresh, Sleep Lock, Light) and, at the bottom of the screen, three boxed buttons: \"Memory Developer\", \"Screen Ca\" and \"BGIO Developer\".",
       "Tap the middle boxed button, \"Screen Ca\" (Screen Capture). The panel closes at once.",
-      "A small \"Screenshot saved\" label appears near the top. Then count slowly to five before the next tap: for about four seconds the label is still alive and would be drawn onto the next screen (it stays visible afterwards until something is redrawn; that is expected). If no label appears, take the capture again (an extra capture does no harm)."
+      "A small \"Screenshot saved\" label appears near the top. Then count slowly to five before the next tap: for about four seconds the label is still alive and would be drawn onto the next screen (it stays visible afterwards until something is redrawn; that is expected). If no label appears, take the capture again (an extra capture does no harm), except over the gamebook: over a Lua app the label never appears and the capture is saved all the same."
     ]
   },
   "masks": {

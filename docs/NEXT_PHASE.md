@@ -12,11 +12,11 @@ Read `CLAUDE.md` first (build, device rules, where things are), then this file, 
 7.5.4 and 7.6.8; the device runs **7.6.8 in app0**. `make test` is 219 tests in about two minutes on eight
 workers, with no input retries anywhere (log, "World-class pass, wave 2"). Lua apps reach the device as a
 card copy (7.5.4 and later show Mini Apps by themselves), keep `ctx.state` in the emulator as on the reader,
-and the gamebook was played on the device. Three things wait for the owner:
+and the gamebook was played on the device. The owner's items:
 
-1. **The first device-parity session** (`docs/parity.md`, "A device session"): the harness is built and the
-   emulator side passes on 7 of 8 screens (the light panel cannot be captured); the owner walks the runbook
-   on the reader. It needs the developer-patched 7.6.8 in app0 and a fresh tagged backup first.
+1. ~~The first device-parity session~~ — **passed (2026-10-13)**: 7 captured screens, 0 unexplained
+   pixels, the device back on pristine 7.6.8 (`docs/parity.md`, "The first session"). It also showed that
+   the stock draws no capture toast over a Lua app, on the device as in the emulator.
 2. ~~Sign-off for the Espressif upstream series~~ — **the owner declined, for now (2026-10-13)**. The branches
    `upstream-s3` and `x4pro-on-upstream` stay local (and in `images/upstream-qemu-2026-10-13.bundle`); do not
    propose submitting again unless the owner raises it (`docs/upstream-qemu.md`).
@@ -26,8 +26,10 @@ and the gamebook was played on the device. Three things wait for the owner:
 
 **Next, in order:**
 
-a. **The device-parity session** above, run by the coordinator with the owner present. Its results also
-   answer the old ignored-tap question (does the device, too, drop a tap that lands right after Home?).
+a. ~~The device-parity session~~ — done (2026-10-13, above). The old ignored-tap question is closed as
+   well: the emulator's dropped taps were its own GT911 model losing an unread release (fixed; no test
+   retries an input any more), and on the reader every tap of the walk reached its screen, including the
+   first one after Home.
 b. **The keyboard (the owner's second wish), against 7.6.8.** Map the stock's on-screen keyboard with
    `tools/ghidra_stock.py --image images/device/stock-app0-7.6.8.bin --version 7.6.8`: the
    `KeyboardLayer{View,Presenter}` pair (the class list in `docs/stock-firmware.md` §2), where it is invoked
@@ -182,8 +184,8 @@ panel; `docs/xic.md`).
 
 Open:
 
-- **A stock screen against a device oracle**: the parity harness is built (`docs/parity.md`); the device
-  session is item 0.a. Compare a boot log too (`tools/device.py console --reset --seconds 40`; device
+- ~~A stock screen against a device oracle~~: done (2026-10-13, `docs/parity.md`, 7 screens, 0 unexplained
+  pixels). Still open: compare a boot log too (`tools/device.py console --reset --seconds 40`; device
   `wifi:mode : sta` at 13.6 s, emulator 13.3 s cold).
 - **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps` = 0); keep the plan
   to advance the virtual clock by the timer wake if it ever does.
@@ -313,8 +315,8 @@ Open:
 - [x] Stock firmware: WiFi start fails fast (analog-master I2C block, SENS, radio stub; `tests/test_stock.py`).
 - [x] Stock firmware: the screens reachable by touch have goldens and a walk test (session 4).
 - [x] Stock firmware: screens matched to the device — by the owner's eye (Home, menu, light panel, Settings, All
-  Files, reader; session 5). A pixel-exact `.xic` device capture stays optional (needs the developer-patched
-  stock on the device; the parity session, §0.a); the emulator side of that is proven (`tests/test_stock_capture.py`).
+  Files, reader; session 5), and pixel for pixel through the stock's own `.xic` captures (Home, menu, Settings,
+  All Files, reader, Mini Apps, a Lua app; 0 unexplained pixels, the parity session of 2026-10-13, `docs/parity.md`).
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle — Home ✓ (session 3) and
   the reader's pages 1–2 ✓ (session 7: the device's own screenshots of the test book match the emulator's
   base frame in 0 pixels outside the footer clock, `tests/test_device_screenshot.py`); FileBrowser, sleep
@@ -455,7 +457,7 @@ edit CLAUDE.md or docs/*.md except [own page]. Time box: [N] minutes. Final repo
 |---|---|---|
 | ~~**S1 stock-close**~~ | **done** (sessions 4–5): `--boot-hold-power`, `nvsedit` set-str/erase/redact, RTC IO overlay, the DC-offset comparator + PLL lock flag, the GT911 key byte (Home pad = Back) | met: `make test` green, no `rtcio` in `iolog_hot`, no `pll_cal` line, a redacted image boots to Home |
 | ~~**S2 oracle**~~ (emulator half) | **done** (session 5): `.xic` decoded and verified, `tools/xic2png.py`, `tools/stockdev.py`, `tests/test_stock_capture.py`, `docs/xic.md` | met in the emulator: a capture equals the panel in 0 px |
-| **S2-device** | ~~the harness~~ built (2026-10-13, `tools/parity.py`, `docs/parity.md`); **open**: the device session with the owner (§0.a): the developer-patched 7.6.8 into app0 through `tools/device.py`, the runbook walked, the captures compared. The owner already judged the screens 1:1 by eye (session 5) | one stock screen diffed against a device capture with every difference explained |
+| ~~**S2-device**~~ | **done** (2026-10-13): the harness (`tools/parity.py`, `docs/parity.md`) and the first device session, 7 screens, 0 unexplained pixels, the device reverted to pristine 7.6.8 | one stock screen diffed against a device capture with every difference explained |
 | ~~**S3 ci-green**~~ | **done** (session 5): first Linux run green without iteration | met; keep an eye on cache hits and run time |
 | ~~**S4 determinism**~~ | **done** (sessions 5–6): `--deterministic`, `record/replay`, `watch`, `shell`, the MCP server in-process | met (`tests/test_replay.py`, `tests/test_cli_polish.py`) |
 | **S5 fidelity** | ~~waveform grey core · window tests · `dwc_sdmmc` trace patch~~ done (session 6); ~~the grey validation against the glass, the default flip + `gray-k`~~ done (session 7); the BUSY timing table was skipped (the device logs hold only what the defaults already are); ~~the `esp32s3.gpspi +0x38` noise~~ done (2026-10-13 review); **open**: an IO_MUX stored-value overlay (525 + 525 logger lines per stock boot) | `qemu.log` free of `dwc_sdmmc_` lines ✓; grayscale validated against the device ✓ |
