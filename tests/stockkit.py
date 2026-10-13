@@ -21,6 +21,7 @@ from conftest import (x4emu, ROOT, PY, TOOLS, count_pixels, copy_image, emu_stat
 
 DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')        # stock 7.2.4
 DUMP_768 = os.path.join(ROOT, 'images', 'device', 'flash-2026-10-12-a.bin')    # stock 7.6.8
+DUMP_LICORICE = os.path.join(ROOT, 'images', 'device', 'flash-2026-10-13-v261013-a.bin')   # XTOS Licorice 261013
 SD_FILES = os.path.join(ROOT, 'images', 'device', 'sd-files')
 GOLDEN_DIR = os.path.join(ROOT, 'tests', 'golden')
 GOLDEN = os.path.join(GOLDEN_DIR, 'stock-home.png')     # 7.2.4's Home, the empty bookshelf

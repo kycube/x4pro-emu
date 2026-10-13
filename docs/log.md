@@ -1424,3 +1424,36 @@ the gamebook twice (as the runbook then said to), and content pairing skipped th
 does the same (a scratch walk: 1,483 toast pixels over Home 1–3 s after the tap, none over the Gull Rock
 cover from 0.5 s to 6 s); the runbook now says so. And after every esptool command the reader kept its
 picture and ignored input until it was unplugged and the power button held (CLAUDE.md, device rule 3).
+
+## 2026-10-13 — The device moves to XTOS Licorice 261013: a new stock generation
+
+The owner took the OTA offered as "v261013" (released the evening before; nothing about it online yet).
+Read-only first: `device.py slots` shows **app1 boots** (otadata entry 1 seq 4) a build named
+`dragon_example e77bdf08-dirty` (Oct 13 2026 11:18:34, ESP-IDF v6.1-dirty, 5,821,312 bytes); app0 keeps the
+pristine 7.6.8, the 7.5.4 in app1 is gone from the device. The efuses read identical to the committed dump
+(no flash encryption, no secure boot, `SECURE_VERSION` 0). Backup `flash-2026-10-13-v261013-{a,b}`, SHA-256
+5027bfc0… both; bootloader, partition table and coredump unchanged against the morning's backup, NVS two
+sectors, the app extracted as `images/device/stock-app1-v261013.bin` (image-info valid).
+
+**It is a rewrite**: "XTOS Licorice 261013" in its strings, the default IROM layout, three RTC segments,
+no `Presenter`/`KeyboardLayer` classes, no XTTM packs, no developer menu or Screen Capture strings, an app
+store with per-device key wrapping, BLE, and Lua apps installed from a `.xtapp` package ("Install a .xtapp
+from All Files"); a folder copy in `/XTApps` is not listed. `docs/stock-licorice.md`.
+
+Three fixes on the way, all tested:
+
+- **`device.py` picked the "newest" backup by file name**, so a same-day backup sorted by its tag: today's
+  post-update pair would have sorted before `pre-parity`, and `restore-stock --slot app1` would have planned
+  the old 7.5.4. Now: the date in the name, then the read's mtime (`0dc29b1`, taken before the backup).
+- **`nvsedit redact` left the WiFi password in a Licorice dump**: Licorice reformatted the `spiffs`
+  partition as LittleFS with `/radio/wifi_known.bin` and `bt_bonds.bin`, outside NVS (every older dump has
+  a SPIFFS with only `/README.md`). `redact` now blanks a spiffs/littlefs partition holding them, through
+  `device.parse_partition_table`; Licorice formats it again at boot (checked on the scratch copy).
+- **Licorice came out upside down and 120 rows short**: it sends the UC8279 PSR `3B 48` (UD 1, SHL 0) where
+  CrossPoint and 7.x send `37 4D`, and the core honoured UD/SHL only on the UC8179. Now on both UC parts;
+  CrossPoint and 7.x are unchanged (`make test` 234 passed, 2 skipped), `test_uc8279_scan` 4 checks.
+
+Then Licorice in the emulator: Home in refresh 1, `epd_unknown_cmds` 0, no new hot register, touch opens the
+side drawer, the Desktop widget page and the regrouped Settings render. The console stays silent after the
+ROM banner. `tests/test_licorice.py` (Home + drawer goldens, the PSR, 4 s). The roadmap's 7.6.8 items
+(keyboard, native-patch deployment, lock screen) now wait for the owner's call (NEXT_PHASE §0).

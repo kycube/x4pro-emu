@@ -130,6 +130,41 @@ def test_redact_erases_the_credentials_and_turns_wifi_off(scratch):
     assert items(scratch)['net_en'][2][24] == 0
 
 
+def test_redact_blanks_a_littlefs_radio_store_and_nothing_else():
+    """XTOS Licorice keeps /radio/wifi_known.bin and bt_bonds.bin in a LittleFS on the spiffs partition:
+    `redact` blanks such a partition and leaves an old-style SPIFFS (only /README.md) and the rest alone."""
+    def entry(kind, sub, off, size, label):
+        return struct.pack('<HBBII16sI', 0x50AA, kind, sub, off, size, label.encode(), 0)
+    img = bytearray(b'\xff' * 0x20000)
+    img[0x8000:0x8000 + 96] = (entry(1, 0x02, 0x9000, 0x5000, 'nvs') + entry(1, 0x82, 0xE000, 0x4000, 'spiffs')
+                               + entry(1, 0x82, 0x12000, 0x4000, 'old'))
+    img[0xE000:0xE000 + 34] = b'\x01\x00\x00\x00littlefs/radio  wifi_known.bin'
+    img[0x12000:0x12000 + 17] = b'spiffs /README.md'
+    keep = bytes(img[0x12000:0x16000])
+    assert nvsedit.blank_radio_store(img) == ['spiffs']
+    assert img[0xE000:0x12000] == b'\xff' * 0x4000 and img[0x12000:0x16000] == keep
+    assert nvsedit.blank_radio_store(img) == []                       # idempotent
+    assert nvsedit.blank_radio_store(bytearray(0x5000)) == []          # a bare NVS: no partition table
+
+
+LICORICE = os.path.join(ROOT, 'images/device/flash-2026-10-13-v261013-a.bin')
+
+
+@pytest.mark.skipif(not os.path.exists(LICORICE), reason='the XTOS Licorice dump is not on this machine')
+def test_redact_leaves_no_wifi_secret_in_a_licorice_dump(tmp_path):
+    """On the device's Licorice dump: after `redact` neither the NVS keys nor the /radio files are left."""
+    flash = tmp_path / 'licorice.bin'
+    copy_image(LICORICE, flash)
+    try:
+        out = run(flash, 'redact')
+        assert 'spiffs: blanked' in out, out
+        data = flash.read_bytes()
+        assert data[0xFD0000:0xFE4000] == b'\xff' * 0x14000, 'the spiffs partition (the /radio store) is not blank'
+        assert not [k for k in CREDS if k in items(flash)], 'a credential key is still in NVS'
+    finally:
+        flash.unlink(missing_ok=True)
+
+
 def test_set_str_writes_a_valid_entry_and_replaces_the_old_one(scratch):
     """`set-str` writes a str item (type 0x21) with its data in the span entries and both CRCs right;
     a second write of the same key retires the first. Values of hidden keys stay hidden in `list`."""

@@ -6,3 +6,5 @@
 01779adcf1dde51d62825c478104f71da14cf15b5d711c35c5d6a9636d6d0f9a  images/device/flash-2026-10-12-b.bin
 88edadb7fb99955fd3985cb10f8646d02b6493b48ccee9f6e9c26b8080da2e9e  images/device/flash-2026-10-13-pre-parity-a.bin
 88edadb7fb99955fd3985cb10f8646d02b6493b48ccee9f6e9c26b8080da2e9e  images/device/flash-2026-10-13-pre-parity-b.bin
+5027bfc07921d39ddab202bff2339eb2f1ea8ed7cf147be27f3e1999bd9daa2c  images/device/flash-2026-10-13-v261013-a.bin
+5027bfc07921d39ddab202bff2339eb2f1ea8ed7cf147be27f3e1999bd9daa2c  images/device/flash-2026-10-13-v261013-b.bin

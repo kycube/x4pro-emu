@@ -8,8 +8,15 @@ Read `CLAUDE.md` first (build, device rules, where things are), then this file, 
 
 ## 0. Resume here (2026-10-13, after the world-class pass)
 
+**First: the device now runs XTOS Licorice 261013** (the owner's OTA of 2026-10-13; app1 boots, 7.6.8 stays
+in app0). Licorice is the stock's rewrite, not a 7.x (`docs/stock-licorice.md`): it boots to its Bookshelf in
+the emulator and takes touch, but it has no developer menu (so no Screen Capture and no parity captures), no
+XTTM string packs, a rewritten UI layer, and installs Lua apps from packages. Items b–d below were planned
+against 7.6.8, which the device no longer runs; **whether they move to Licorice or stay on 7.6.8 is the
+owner's call** — ask before starting them.
+
 **Where things stand.** Both firmwares run unpatched: CrossPoint 1.6.0 and the stock `xteink_app` 7.2.4,
-7.5.4 and 7.6.8; the device runs **7.6.8 in app0**. `make test` is 219 tests in about two minutes on eight
+7.5.4 and 7.6.8, and Licorice to its Bookshelf; the device runs **Licorice in app1** (7.6.8 in app0). `make test` is 219 tests in about two minutes on eight
 workers, with no input retries anywhere (log, "World-class pass, wave 2"). Lua apps reach the device as a
 card copy (7.5.4 and later show Mini Apps by themselves), keep `ctx.state` in the emulator as on the reader,
 and the gamebook was played on the device. The owner's items:

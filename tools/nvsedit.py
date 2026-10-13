@@ -5,7 +5,8 @@
   nvsedit.py IMAGE set-u8 NAMESPACE KEY VALUE    write KEY=VALUE (u8) into the active page, retire the old entry
   nvsedit.py IMAGE set-str NAMESPACE KEY VALUE   the same for a string (header + data entries, both CRCs)
   nvsedit.py IMAGE erase NAMESPACE KEY           mark every copy of KEY erased, on every page (span included)
-  nvsedit.py IMAGE redact                        erase user_config/{sta_ssid,sta_pwd,wifi_creds}, net_en = 0
+  nvsedit.py IMAGE redact                        erase user_config/{sta_ssid,sta_pwd,wifi_creds}, net_en = 0, and
+                                                 blank a LittleFS radio store (XTOS Licorice, below)
 
 Every writing command edits the image in place unless `-o/--out FILE` is given, and is idempotent.
 
@@ -37,6 +38,12 @@ image: the stock reaches Home exactly as with net_en = 0 (which also skips its 1
 `tests/test_nvsedit.py` diffs that boot against tests/golden/stock-home.png. Still in the image, and
 still the owner's: the app, the phy calibration blobs, `otaPromptDay`, the serial in eFuse BLOCK3 and
 the MAC (docs/device/partitions.md).
+
+XTOS Licorice (stock 261013, 2026-10-13) keeps known WiFi networks and Bluetooth bonds outside NVS too:
+`/radio/wifi_known.bin` and `bt_bonds.bin` in a LittleFS on the `spiffs` data partition (every earlier
+dump has a SPIFFS there holding only `/README.md`). `redact` reads the partition table at 0x8000 and
+blanks (0xff) every spiffs/littlefs partition that holds either file; without that, a "redacted"
+Licorice image would still carry the WiFi password.
 """
 import argparse, binascii, struct, sys
 
@@ -47,6 +54,7 @@ TYPES = {0x01: 'u8', 0x02: 'u16', 0x04: 'u32', 0x08: 'u64', 0x11: 'i8', 0x12: 'i
 HIDE = ('ssid', 'pwd', 'creds', 'psk', 'pass')
 ENTRIES = 126                       # data entries per page (4096 - 64 header/bitmap bytes) / 32
 REDACT = ('sta_ssid', 'sta_pwd', 'wifi_creds')      # user_config keys holding the owner's WiFi credentials
+RADIO_FILES = (b'wifi_known.bin', b'bt_bonds.bin')  # XTOS Licorice's /radio store (LittleFS, spiffs partition)
 
 def crc32_le(data, init=0xFFFFFFFF):
     """ESP-IDF's esp_crc32_le(init, data): zlib's CRC-32 continued from `init`."""
@@ -190,18 +198,41 @@ class Nvs:
         return old
 
     def redact(self):
-        """Make the image shareable: drop the WiFi credentials of user_config and turn WiFi off."""
+        """Make the image shareable: drop the WiFi credentials of user_config, turn WiFi off, and blank
+        a LittleFS radio store."""
         total = 0
         for key in REDACT:
             total += self.erase('user_config', key)
         self.set_u8('user_config', 'net_en', 0)
-        print(f'redacted: {total} credential entr{"y" if total == 1 else "ies"} erased, user_config/net_en = 0')
+        self.img = bytearray(self.img)
+        blanked = blank_radio_store(self.img)
+        for label in blanked:
+            print(f'{label}: blanked (it held the /radio store: known WiFi networks, Bluetooth bonds)')
+        print(f'redacted: {total} credential entr{"y" if total == 1 else "ies"} erased, user_config/net_en = 0'
+              + (f', {len(blanked)} radio store{"" if len(blanked) == 1 else "s"} blanked' if blanked else ''))
 
     def save(self, path):
         out = bytearray(self.img)
         for n, pg in enumerate(self.pages):
             out[self.offset + n * PAGE:self.offset + (n + 1) * PAGE] = pg
         open(path, 'wb').write(out)
+
+def blank_radio_store(img):
+    """Blank (0xff), in the bytearray `img`, every spiffs/littlefs data partition holding one of
+    RADIO_FILES; returns their labels. An image without a partition table (a bare NVS) has none."""
+    from device import parse_partition_table, PART_TABLE_OFF, PART_TABLE_SIZE
+    try:
+        parts = parse_partition_table(bytes(img[PART_TABLE_OFF:PART_TABLE_OFF + PART_TABLE_SIZE]))
+    except ValueError:
+        return []
+    blanked = []
+    for p in parts:
+        lo, hi = p['offset'], p['offset'] + p['size']
+        if p['kind'] in ('data/spiffs', 'data/littlefs') and hi <= len(img) \
+                and any(f in img[lo:hi] for f in RADIO_FILES):
+            img[lo:hi] = b'\xff' * p['size']
+            blanked.append(p['label'])
+    return blanked
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -219,7 +250,7 @@ def main():
     p = writer('set-str', 'write KEY = VALUE (str)'); p.add_argument('namespace'); p.add_argument('key')
     p.add_argument('value')
     p = writer('erase', 'mark every copy of KEY erased'); p.add_argument('namespace'); p.add_argument('key')
-    writer('redact', 'erase the WiFi credentials of user_config and set net_en = 0')
+    writer('redact', 'erase the WiFi credentials of user_config, set net_en = 0, blank a LittleFS radio store')
     a = ap.parse_args()
     nvs = Nvs(open(a.image, 'rb').read(), a.offset, a.size)
     if a.cmd == 'list':

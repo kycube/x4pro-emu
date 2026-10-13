@@ -22,6 +22,7 @@ the [project README](../README.md) is the overview.
 |---|---|
 | [stock-firmware.md](stock-firmware.md) | the UI layer mapped for modification (a 7.2.4 survey: its addresses are 7.2.4's) |
 | [stock-7.5.4.md](stock-7.5.4.md) · [stock-7.6.8.md](stock-7.6.8.md) | what moved in each update, and the re-located patch sites |
+| [stock-licorice.md](stock-licorice.md) | XTOS Licorice 261013, the stock's rewrite (the device's since 2026-10-13): what changed, what runs, what the tools refuse |
 | [lua-apps.md](lua-apps.md) | the Lua app host: the container, the API as confirmed at runtime, its measured limits |
 | [gamebook.md](gamebook.md) | gamebooks on the Lua host: writing a story, drawing plates, how the engine works |
 | [xic.md](xic.md) | the `.xic` screen-capture format and the developer menu that writes it |

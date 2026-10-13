@@ -4,7 +4,7 @@
 
 An emulator for the **Xteink X4 Pro** e-reader (ESP32-S3, 800 × 480 e-paper, GT911 touch, front light),
 built on Espressif's QEMU. It runs **unmodified firmware images** — the stock `xteink_app` (7.2.4
-through 7.6.8) and the open-source [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
+through 7.6.8), the stock's new XTOS Licorice generation (boot and touch so far) and the open-source [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
 — and you drive it from a shell, a test, or an AI agent: press the buttons, tap and swipe the
 screen, read the console, screenshot the panel, query the whole device as JSON.
 
@@ -16,8 +16,9 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
 
 - **Run the real firmware.** The stock app boots to Home, opens and pages books, runs its menu,
   light panel and settings, fades its front light, and its WiFi start comes up and stops itself
-  cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. A raw 16 MB flash dump runs as it comes off
-  the device; so does a fresh build.
+  cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. The stock's rewrite, XTOS Licorice 261013,
+  boots to its Bookshelf and opens its menu by touch ([docs/stock-licorice.md](docs/stock-licorice.md)).
+  A raw 16 MB flash dump runs as it comes off the device; so does a fresh build.
 - **Drive it like a device.** `x4emu tap`, `swipe`, `press`, `hold`, `chord`, `home`, `battery`,
   `light`, `screenshot --diff`, `wait-text`, `wait-refresh`, `state` — every command can print JSON.
   Inputs are journaled and replayable against guest time (`record` / `replay`, deterministic mode),
@@ -94,7 +95,8 @@ The models are checked against the desk unit, not just against datasheets:
 
 ## Lua apps and a gamebook
 
-The stock firmware (7.5.4 and later) shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app. An app is
+The stock firmware (7.5.4 to 7.6.8) shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app
+(XTOS Licorice installs apps from a package instead; not mapped yet). An app is
 a folder with a manifest and an `index.lua`; `tools/xtapp.py` packs and installs one. What the host
 offers, and its hard limits (no file reads, a 1024-command frame cap, layers that have none), are in
 [docs/lua-apps.md](docs/lua-apps.md).
@@ -122,7 +124,7 @@ with what a firmware sees, are in [docs/hardware.md](docs/hardware.md#what-is-no
 | [docs/x4emu.md](docs/x4emu.md) | the `x4emu` CLI and its JSON shapes; installing it with pipx |
 | [docs/hardware.md](docs/hardware.md) | the X4 Pro as the emulator models it, with sources; what is not emulated |
 | [docs/lua-apps.md](docs/lua-apps.md) · [docs/gamebook.md](docs/gamebook.md) | writing apps for the stock firmware |
-| [docs/stock-firmware.md](docs/stock-firmware.md) · [7.5.4](docs/stock-7.5.4.md) · [7.6.8](docs/stock-7.6.8.md) | the stock app's internals, version by version |
+| [docs/stock-firmware.md](docs/stock-firmware.md) · [7.5.4](docs/stock-7.5.4.md) · [7.6.8](docs/stock-7.6.8.md) · [Licorice](docs/stock-licorice.md) | the stock app's internals, version by version, and its new generation |
 | [docs/README.md](docs/README.md) | every other document, with a line each |
 | [docs/smp.md](docs/smp.md) · [docs/heap.md](docs/heap.md) | two emulator-vs-firmware investigations: the two cores' memory order (an emulator bug, fixed) and a 7.2.4 heap corruption (the firmware's own race) |
 | [docs/parity.md](docs/parity.md) | device parity: the same steps on the emulator and the reader, the stock's own Screen Captures compared pixel by pixel |

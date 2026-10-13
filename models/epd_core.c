@@ -731,10 +731,12 @@ static void build_gray_map(EpdCore *c)
  * the stock send) has the gates reversed against the RAM rows, so RAM row 479 is
  * the top of the glass; 0x01 TB reverses that. A UC part shows gates 120..599 of
  * its 600-gate scan (Uc8279X4Driver gateOffset), i.e. the last 480 TRES rows, in the
- * scan order of PSR UD = 0 and SHL = 1, which is all the UC8279 is ever sent. The
- * UC8179 honours both bits (UC81xx PSR bit 3 UD gate scan, bit 2 SHL source shift):
- * Uc8179Driver sends UD = 1 with the rows reversed and its 120 padding rows last, so
- * RAM rows 479..0 land on the visible gates; SHL = 0 mirrors the sources. */
+ * scan order of PSR UD = 0 and SHL = 1 (CrossPoint and stock 7.x: PSR 37 4D). Both
+ * UC parts honour the two bits (UC81xx PSR bit 3 UD gate scan, bit 2 SHL source
+ * shift): UD = 1 reverses the scan, so with the 120 padding rows last RAM rows
+ * 479..0 land on the visible gates, and SHL = 0 mirrors the sources. Uc8179Driver
+ * sends UD = 1, SHL = 0, and so does the stock's XTOS Licorice on the UC8279 (PSR
+ * 3B 48, 2026-10-13). */
 static const uint8_t lv_ssd_mono[4] = {0, 0, 255, 255};
 static const uint8_t lv_ssd_approx[4] = {0, 85, 170, 255};
 static const uint8_t lv_uc_mono[4] = {0, 255, 0, 255};
@@ -763,13 +765,11 @@ static void compose(EpdCore *c)
         int gates = c->tres_h < EPD_UC_GATES ? c->tres_h : EPD_UC_GATES;
         row0 = gates > EPD_H ? gates - EPD_H : 0;   /* 120 for 600 gates */
         row_step = 1;
-        if (c->variant == EPD_UC8179) {
-            if (c->psr[0] & 0x08) {
-                row0 = EPD_H - 1;                   /* UD = 1: the scan reversed */
-                row_step = -1;
-            }
-            mirror_x = !(c->psr[0] & 0x04);         /* SHL = 0 */
+        if (c->psr[0] & 0x08) {
+            row0 = EPD_H - 1;                       /* UD = 1: the scan reversed */
+            row_step = -1;
         }
+        mirror_x = !(c->psr[0] & 0x04);             /* SHL = 0 */
     }
     for (int r = 0; r < EPD_H; r++) {
         int row = row0 + r * row_step;

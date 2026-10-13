@@ -715,6 +715,34 @@ static void test_uc8179_cdi_and_scan(void)
     free(c);
 }
 
+/* The UC8279 honours UD/SHL the same way: CrossPoint and stock 7.x send PSR 37 (UD 0 SHL 1),
+ * the stock's XTOS Licorice 3B (UD 1 SHL 0) and streams its frame for that scan. */
+static void test_uc8279_scan(void)
+{
+    EpdCore *c = malloc(sizeof(*c));
+    static const struct { uint8_t psr; int ram_row; int disp_row; int disp_x; } cases[] = {
+        {0x37, 120, 0, 5},     /* CrossPoint, stock 7.x: padding rows first, then the frame */
+        {0x37, 599, 479, 5},
+        {0x3B, 479, 0, 794},   /* XTOS Licorice: the scan reversed, the sources mirrored */
+        {0x3B, 0, 479, 794},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        epd_core_init(c, EPD_UC8279);
+        cmd(c, 0x61); dat(c, 0x03); dat(c, 0x20); dat(c, 0x02); dat(c, 0x58);
+        static uint8_t pl[EPD_UC_PLANE_BYTES];
+        memset(pl, 0xFF, sizeof(pl));
+        pl[cases[i].ram_row * EPD_WB] = 0xFB;   /* x 5 black */
+        cmd(c, 0x13); datn(c, pl, sizeof(pl));
+        cmd(c, 0x00); dat(c, cases[i].psr); dat(c, 0x48);
+        cmd(c, 0x12); epd_core_busy_done(c);
+        int at = cases[i].disp_row * EPD_W + cases[i].disp_x, dark = 0;
+        for (int p = 0; p < EPD_W * EPD_H; p++) dark += c->image[p] != 255;
+        CHECK(c->image[at] == 0 && dark == 1, "uc8279 psr %02x: ram row %d x 5 -> (%d, %d): %u, %d inked",
+              cases[i].psr, cases[i].ram_row, cases[i].disp_row, cases[i].disp_x, c->image[at], dark);
+    }
+    free(c);
+}
+
 int main(void)
 {
     test_ssd1677_basic();
@@ -730,6 +758,7 @@ int main(void)
     test_lut_parse_uc8179();
     test_uc8179_reader_page();
     test_uc8179_cdi_and_scan();
+    test_uc8279_scan();
     if (fails) { printf("%d failure(s) in %d checks\n", fails, checks); return 1; }
     printf("epd core tests: OK (%d checks)\n", checks);
     return 0;
