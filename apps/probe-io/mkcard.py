@@ -19,7 +19,6 @@ mtools addresses the FAT32 partition at 1 MiB (tools/mksd.py's layout):
 `mcopy -i CARD@@1048576 FILE ::/XTApps/probe-io/`.
 """
 import os
-import subprocess
 import sys
 import tempfile
 
@@ -41,7 +40,7 @@ def text_of(size):
 
 
 def mcopy(img, src, dst):
-    subprocess.run(['mcopy', '-o', '-i', f'{img}@@{xtapp.PART_OFFSET}', src, dst], check=True)
+    xtapp.mtools(img, 'mcopy', '-o', src, dst)
 
 
 def main(argv):

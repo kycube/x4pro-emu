@@ -23,6 +23,8 @@ screens in walking order. Everything is in the portrait frame the UI is drawn in
 tall, origin top left; x4emu's landscape panel pixel is (py, 479 - px). Top level:
 
   format        "x4pro-parity/1"
+  name          the session's name: images/parity/<name>/, the report titles
+  description   free text for the reader of the script (nothing reads it)
   firmware      {"stock_version", "dump" (repo-relative 16 MB device dump), "patches": [...]}
   card          {"mirror" (a copy of the device card's files), "size", "apps": [app dirs installed
                  with tools/xtapp.py], "files": [{"path" on the card, "make": "book", "title"}]}
@@ -82,19 +84,18 @@ import argparse, datetime, hashlib, html, json, os, re, shutil, subprocess, sys,
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.join(ROOT, 'tools')
 PY = sys.executable
-X4EMU = os.path.join(TOOLS, 'x4emu')
-FAT_OFFSET = 1048576            # tools/mksd.py puts the FAT32 partition at 1 MiB
+sys.path[:0] = [TOOLS, ROOT]    # the sibling tools, and the x4emu package (driven in-process)
+import xic2png, xtapp           # noqa: E402  (both stdlib-only at import; PIL loads where a frame is decoded)
+
 W, H = 480, 800                 # the portrait frame the UI is drawn in (and the .xic holds)
 PANEL = (800, 480)              # x4emu screenshot: the landscape panel
-DIFF_THRESHOLD = 64             # as `x4emu screenshot --diff` and tools/xic2png.py
-CAPTURE_BYTES = 48024           # a mono 480x800 .xic: 24-byte header + 48,000 bytes
+DIFF_THRESHOLD = xic2png.DIFF_THRESHOLD          # 64, as `x4emu screenshot --diff`
+CAPTURE_BYTES = xic2png.HEADER + W // 8 * H      # a mono 480x800 .xic: 24 + 48,000 = 48,024 bytes
 CAPTURE_RE = re.compile(r'^screenshot_(\d{8}_\d{6})\.xic$')
 FORMAT = 'x4pro-parity/1'
 STEP_KINDS = {'tap': ('at',), 'swipe': ('from', 'to'), 'home': (), 'press': ('button',), 'note': ()}
 CHECK_KINDS = {'absent': ('path',), 'same-dirs': ('path', 'expect'), 'same-files': ('path', 'like', 'files'),
                'same-as-mirror': ('path',), 'owner': ()}
-
-sys.path.insert(0, TOOLS)
 
 
 class ParityError(Exception):
@@ -142,7 +143,8 @@ def _steps(steps, where):
 def load_script(path):
     """The step script at `path`, validated; raises ParityError naming the first problem."""
     try:
-        sc = json.load(open(path))
+        raw = open(path, 'rb').read()
+        sc = json.loads(raw)
     except (OSError, ValueError) as e:
         raise ParityError(f'{path}: {e}')
     if sc.get('format') != FORMAT:
@@ -186,7 +188,7 @@ def load_script(path):
     if not any(s['capture'] for s in sc['screens']):
         raise ParityError(f'{path}: no screen is captured')
     sc['_path'] = os.path.abspath(path)
-    sc['_sha256'] = hashlib.sha256(open(path, 'rb').read()).hexdigest()
+    sc['_sha256'] = hashlib.sha256(raw).hexdigest()
     return sc
 
 
@@ -227,7 +229,6 @@ def load_frame(path):
     """A .xic or a PNG, as the portrait frame (mode L)."""
     from PIL import Image
     if path.endswith('.xic'):
-        import xic2png
         try:
             im, _ = xic2png.decode_xic(open(path, 'rb').read())
         except xic2png.XicError as e:
@@ -271,13 +272,12 @@ def classify(a, b, masks=(), states=(), unmet=()):
     outside = rest.histogram()[255]
     if outside:
         cmap.paste(3, (0, 0), rest)
-    unexpl = cmap.point(lambda v: 255 if v == 3 else 0)
+    bbox = list(cmap.point(lambda v: 255 if v == 3 else 0).getbbox()) if outside + held else None
     return {'total': total, 'masked': masked, 'state': state, 'state_explained': explained,
-            'unexplained': outside + held, 'bbox': list(unexpl.getbbox()) if outside + held else None,
-            'map': cmap}
+            'unexplained': outside + held, 'bbox': bbox, 'map': cmap}
 
 
-def diff_picture(ref, other, result, masks=(), states=()):
+def diff_picture(ref, result, masks=(), states=()):
     """An RGB picture of a comparison: `ref` lightened, region outlines (masks grey, state regions
     amber), differing pixels coloured: masked blue, explained state amber, unexplained red."""
     from PIL import Image, ImageDraw
@@ -344,40 +344,44 @@ def make_book(path, title='Parity Book', chapters=3, paragraphs=40):
 
 
 def card_files(sc, tmp):
-    """[(card path, local file)] of the script's generated card files, written into `tmp`."""
+    """[(card path, local file, its SHA-256)] of the script's generated card files, written into `tmp`."""
     out = []
     for i, f in enumerate(sc['card'].get('files', [])):
         if f.get('make') != 'book':
             raise ParityError(f'card file {f.get("path")}: "make" must be "book"')
         local = os.path.join(tmp, f'file{i}-' + os.path.basename(f['path']))
-        make_book(local, f.get('title', 'Parity Book'))
-        out.append((f['path'].strip('/'), local))
+        out.append((f['path'].strip('/'), local, make_book(local, f.get('title', 'Parity Book'))))
     return out
 
 
 # ---------------------------------------------------------------- the emulator walk
 
-def run(cmd, what, **kw):
-    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+def run(cmd, what):
+    r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         raise ParityError(f'{what} failed ({r.returncode}): {" ".join(map(str, cmd))}\n{r.stdout}{r.stderr}')
     return r
 
 
-def x4(name, *args, check=True, timeout=180):
-    r = subprocess.run([PY, X4EMU, '--json', '--name', name, *map(str, args)], capture_output=True,
-                       text=True, timeout=timeout)
+def x4(name, *args, check=True):
+    """One x4emu command on instance `name`, run in-process by x4emu/api.py: its `--json` object, which
+    carries "error" when the command failed. No call is capped from here: every wait below passes its
+    own --timeout or --wait."""
+    os.environ.setdefault('X4EMU_ROOT', ROOT)            # as tools/x4emu does: drive this checkout
+    from x4emu import api
+    r = api.run([str(a) for a in args], name=name)
+    if check and 'error' in r:
+        raise ParityError(f'x4emu {" ".join(map(str, args))} failed: {r["error"]}')
+    return r
+
+
+def mt(img, tool, *args, check=True):
+    """One mtools command on the card image's FAT32 partition (`xtapp.mtools`); with `check`, a failure
+    raises ParityError carrying the tool's output."""
+    r = xtapp.mtools(img, tool, *args, check=False)
     if check and r.returncode:
-        raise ParityError(f'x4emu {" ".join(map(str, args))} failed ({r.returncode}): {r.stdout}{r.stderr}')
-    try:
-        return json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
-    except ValueError:
-        return {'raw': r.stdout}
-
-
-def mt(img, *args, check=True):
-    return run([args[0], '-i', f'{img}@@{FAT_OFFSET}', *args[1:]], args[0]) if check else \
-        subprocess.run([args[0], '-i', f'{img}@@{FAT_OFFSET}', *args[1:]], capture_output=True, text=True)
+        raise ParityError(f'{tool} failed ({r.returncode}): {" ".join(map(str, args))}\n{r.stdout}{r.stderr}')
+    return r
 
 
 def card_captures(img):
@@ -413,11 +417,10 @@ def build_images(sc, work, dump=None, log=print):
         raise ParityError(f'{mirror} not found: the device card mirror is not on this machine')
     run([PY, os.path.join(TOOLS, 'mksd.py'), sd, '--size', card.get('size', '256M'), '--src', mirror,
          '--force'], 'mksd')
-    import xtapp
     for app in card.get('apps', []):
         rep = xtapp.install(sd, os.path.join(ROOT, app))
         log(f'card: {rep["card_dir"]} <- {app}')
-    for path, local in card_files(sc, work):
+    for path, local, _ in card_files(sc, work):
         parts = path.split('/')
         for i in range(1, len(parts)):
             mt(sd, 'mmd', '::/' + '/'.join(parts[:i]), check=False)
@@ -428,11 +431,9 @@ def build_images(sc, work, dump=None, log=print):
 
 def emu_step(name, step, log):
     kind = step['do']
-    settle = step.get('settle', 2)
-    repaint = step.get('repaint', kind in ('tap', 'home', 'press'))
-    wait = ['--wait', '30'] if repaint else []
     if kind == 'note':
         return
+    wait = ['--wait', '30'] if step.get('repaint', kind in ('tap', 'home', 'press')) else []
     if kind == 'tap':
         lx, ly = landscape(*step['at'])
         x4(name, 'tap', lx, ly, '--ms', step.get('ms', 120), '--quiet', '1', *wait)
@@ -443,11 +444,11 @@ def emu_step(name, step, log):
         x4(name, 'home', '--quiet', '1', *wait)
     elif kind == 'press':
         x4(name, 'press', step['button'], '--quiet', '1', *wait)
-    x4(name, 'wait-quiet', '--seconds', settle, '--timeout', 120)
+    x4(name, 'wait-quiet', '--seconds', step.get('settle', 2), '--timeout', 120)
     log(f'    {kind} {step.get("at") or step.get("from") or step.get("button") or ""}: {step["say"]}')
 
 
-def emu_capture(name, sc, card, base, log):
+def emu_capture(name, sc, card, base):
     """Pull the light panel, screenshot it, tap Screen Capture, screenshot right after, and wait for the
     new .xic on the card. Returns its name on the card."""
     cap = sc['capture']
@@ -526,7 +527,7 @@ def cmd_emu(a, log=print):
     for f in os.listdir(out):                     # a fresh walk never mixes with an old one
         if re.match(r'^\d\d-.*\.(png|xic)$', f) or f == 'emu.json':
             os.remove(os.path.join(out, f))
-    work = tempfile.mkdtemp(prefix='parity-', dir=a.work) if a.work else tempfile.mkdtemp(prefix='parity-')
+    work = tempfile.mkdtemp(prefix='parity-', dir=a.work)
     name = a.name
     manifest = {'script': os.path.relpath(sc['_path'], ROOT), 'script_sha256': sc['_sha256'],
                 'stock_version': sc['firmware']['stock_version'], 'instance': name,
@@ -545,7 +546,7 @@ def cmd_emu(a, log=print):
                      'screen_png': os.path.basename(base) + '.png'}
             entry['reference'] = check_reference(sc, s, base + '.png', a.update_references, log)
             if s['capture']:
-                entry['card_name'] = emu_capture(name, sc, sd, base, log)
+                entry['card_name'] = emu_capture(name, sc, sd, base)
                 entry['panel_png'] = os.path.basename(base) + '-panel.png'
                 entry['post_png'] = os.path.basename(base) + '-post.png'
                 log(f'    captured {entry["card_name"]}')
@@ -562,9 +563,9 @@ def cmd_emu(a, log=print):
             mt(sd, 'mcopy', '-o', '::/screenshots/' + e['card_name'], dst)
             e['xic'] = os.path.basename(dst)
             size = os.path.getsize(dst)
-            res = classify(load_frame(dst), load_frame(os.path.join(out, e['screen_png'])),
-                           screen_masks(sc, s))
-            post = classify(load_frame(dst), load_frame(os.path.join(out, e['post_png'])))
+            frame = load_frame(dst)
+            res = classify(frame, load_frame(os.path.join(out, e['screen_png'])), screen_masks(sc, s))
+            post = classify(frame, load_frame(os.path.join(out, e['post_png'])))
             e['check'] = {'xic_bytes': size, 'vs_screen': {k: res[k] for k in ('total', 'masked', 'unexplained', 'bbox')},
                           'vs_post_total': post['total']}
             e['ok'] = size == CAPTURE_BYTES and res['unexplained'] == 0
@@ -598,8 +599,8 @@ def check_precondition(p, mount, sc):
         return None, 'asked in the runbook; pass `compare --not-met NAME` when the answer was no'
     path = os.path.join(mount, chk['path'])
     if kind == 'absent':
-        return (not os.path.exists(path)), (f'/{chk["path"]} is absent' if not os.path.exists(path)
-                                            else f'/{chk["path"]} exists')
+        there = os.path.exists(path)
+        return not there, f'/{chk["path"]} {"exists" if there else "is absent"}'
     if kind == 'same-dirs':
         have = sorted(d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))
                       and not d.startswith('.')) if os.path.isdir(path) else []
@@ -644,9 +645,8 @@ def cmd_prepare_card(a, log=print):
     tmp = tempfile.mkdtemp(prefix='parity-card-')
     plan, written = [], []
     try:
-        for path, local in card_files(sc, tmp):
+        for path, local, want in card_files(sc, tmp):
             dst = os.path.join(mount, path)
-            want = hashlib.sha256(open(local, 'rb').read()).hexdigest()
             have = hashlib.sha256(open(dst, 'rb').read()).hexdigest() if os.path.exists(dst) else None
             if have == want:
                 log(f'card: /{path} already there, identical (sha256 {want[:16]}...)')
@@ -706,7 +706,8 @@ def cmd_collect(a, log=print):
 # ---------------------------------------------------------------- compare
 
 def device_captures(d, existing=(), since=None):
-    names = sorted(n for n in os.listdir(d) if CAPTURE_RE.match(n) and n not in set(existing))
+    existing = set(existing)
+    names = sorted(n for n in os.listdir(d) if CAPTURE_RE.match(n) and n not in existing)
     if since:
         names = [n for n in names if CAPTURE_RE.match(n).group(1) >= since]
     return names
@@ -818,7 +819,6 @@ def cmd_compare(a, log=print):
         emu_frames.append(load_frame(os.path.join(emu_dir, e['xic'])))
     names = device_captures(dev_dir, (pre or {}).get('existing_captures', ()), a.since)
     dev_frames = [load_frame(os.path.join(dev_dir, n)) for n in names]
-    import xic2png
     grey = [n for n in names if xic2png.parse_header(open(os.path.join(dev_dir, n), 'rb').read())['planes'] != 1]
     if not names:
         raise ParityError(f'no device captures (screenshot_*.xic) in {dev_dir}'
@@ -857,7 +857,7 @@ def cmd_compare(a, log=print):
         df = dev_frames[j]
         res = classify(df, ef, masks, states, unmet)
         df.save(os.path.join(out, f'{i:02d}-{s["id"]}-device.png'))
-        diff_picture(df, ef, res, masks, states).save(os.path.join(out, f'{i:02d}-{s["id"]}-diff.png'))
+        diff_picture(df, res, masks, states).save(os.path.join(out, f'{i:02d}-{s["id"]}-diff.png'))
         row.update({'device_xic': names[j], 'device_png': f'{i:02d}-{s["id"]}-device.png',
                     'diff_png': f'{i:02d}-{s["id"]}-diff.png',
                     **{k2: res[k2] for k2 in ('total', 'masked', 'state', 'state_explained', 'unexplained', 'bbox')}})

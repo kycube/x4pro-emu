@@ -786,7 +786,7 @@ page('SPEED-PX', {
   end,
 })
 
--- CAP: 30 text lines, then 2000 numbered 40-px segments (segment i: row i//10 at y 200+2*row,
+-- CAP: 6 text lines, then 2000 numbered 40-px segments (segment i: row i//10 at y 200+2*row,
 -- column i%10 at x 20+44*col). The last segment that shows tells the frame's command limit and
 -- whether a text call counts as one command.
 page('CAP', {
@@ -838,7 +838,7 @@ page('CAP-LAYER', {
   end,
 })
 
------------------------------------------------------------------- 12 TEXTPAGE: a page of story text
+------------------------------------------------------------------ 14 TEXTPAGE: a page of story text
 local story_lines
 page('TEXTPAGE', {
   draw = function()
@@ -863,7 +863,7 @@ page('TEXTPAGE', {
   end,
 })
 
------------------------------------------------------------------- 13 LAYERS
+------------------------------------------------------------------ 15 LAYERS
 local LY = { tried = false, log = {}, blits = 0 }
 local function ly_log(s) add(LY.log, s) end
 local function layer_setup()
@@ -960,7 +960,7 @@ page('LAYERS', {
   buttons = { { x = 10, y = 640, w = 290, h = 70, label = '', fn = function() end } },
 })
 
------------------------------------------------------------------- 14 TICKS
+------------------------------------------------------------------ 16 TICKS
 local TK = { log = {}, count = 0, set_at = nil, set_count = 0, rate = 'default', ret = '-', extra = 0 }
 function on_tick(c, n, ...)
   local t = now()
@@ -1014,7 +1014,7 @@ page('TICKS', {
   end,
 })
 
------------------------------------------------------------------- 15 REFRESH
+------------------------------------------------------------------ 17 REFRESH
 local RF = { log = {} }
 -- request_refresh also reads argument #2: ctx:request_refresh('full' | 'partial'), default
 -- 'partial'; it only sets the mode of the next refresh (no refresh of its own).
@@ -1054,7 +1054,7 @@ page('REFRESH', {
   end,
 })
 
------------------------------------------------------------------- 16 INPUT
+------------------------------------------------------------------ 18 INPUT
 page('INPUT', {
   lines = function()
     local out = {}
@@ -1067,7 +1067,7 @@ page('INPUT', {
   end,
 })
 
------------------------------------------------------------------- 17 STATE: ctx.state + ctx.save
+------------------------------------------------------------------ 19 STATE: ctx.state + ctx.save
 local ST = { log = {}, at_load = {} }
 local function st_log(s) table.insert(ST.log, 1, s); if #ST.log > 8 then ST.log[#ST.log] = nil end end
 local function dump_tree(v, out, prefix, depth)
@@ -1156,7 +1156,7 @@ page('STATE', {
   end,
 })
 
------------------------------------------------------------------- 18 LONG callbacks
+------------------------------------------------------------------ 20 LONG callbacks
 local LG = { log = {}, pending = nil }
 local function lg_log(s) table.insert(LG.log, 1, s); if #LG.log > 12 then LG.log[#LG.log] = nil end end
 local function busy(n)
@@ -1224,7 +1224,7 @@ page('LONG', {
   end,
 })
 
------------------------------------------------------------------- 19 MEMORY
+------------------------------------------------------------------ 21 MEMORY
 local MEM = { lines = nil, pending = false }
 local function mem_run()
   local out = {}
@@ -1288,7 +1288,7 @@ page('MEMORY', {
   end,
 })
 
------------------------------------------------------------------- 20 LADDER: the size limit
+------------------------------------------------------------------ 22 LADDER: the size limit
 local LADDER = { { 'lad064k.txt', 65536 }, { 'lad128k.txt', 131072 }, { 'lad256k.txt', 262144 },
   { 'lad512k.txt', 524288 }, { 'lad1m.txt', 1048576 }, { 'lad2m.txt', 2097152 }, { 'lad4m.txt', 4194304 } }
 local LD = { lines = nil, pending = false }

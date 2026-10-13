@@ -12,16 +12,16 @@ owner's 7.6.8 dump (images/device/flash-2026-10-12-a.bin) and requires every sto
 equal its panel screenshot outside the masks, and every screen to equal its reference in
 parity/stock-7.6.8/. Skips without the dump, the card mirror or mtools.
 """
+import hashlib
 import json
 import os
 import shutil
 import subprocess
-import sys
+import zipfile
 
 import pytest
 from conftest import ROOT, PY, QEMU, instance_name
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import parity                                                                   # noqa: E402
 import xic2png                                                                  # noqa: E402
 
@@ -130,7 +130,7 @@ def test_classify_counts_every_pixel_once_in_the_first_region():
     # grey noise under the threshold is not a difference (as `x4emu screenshot --diff`)
     assert parity.classify(a, blank(255 - parity.DIFF_THRESHOLD))['total'] == 0
     assert parity.classify(a, blank(255 - parity.DIFF_THRESHOLD - 1))['total'] == parity.W * parity.H
-    pic = parity.diff_picture(a, b, unmet, masks, states)
+    pic = parity.diff_picture(a, unmet, masks, states)
     assert pic.getpixel((401, 701)) == (230, 20, 20)           # unexplained: red
     assert pic.getpixel((105, 305)) == (230, 160, 0)           # explained by the unmet bookshelf: amber
     assert pic.getpixel((10, 10)) == (40, 90, 230)             # masked: blue
@@ -191,11 +191,11 @@ def session(tmp_path, device_frames, precheck=None, names=None):
     script.write_text(json.dumps(MINI))
     emu, dev = tmp_path / 'emu', tmp_path / 'device'
     emu.mkdir(exist_ok=True); dev.mkdir(exist_ok=True)
-    entries, k = [], 0
+    entries, k, fr = [], 0, frames()
     for i, s in enumerate(MINI['screens'], 1):
         e = {'index': i, 'id': s['id'], 'title': s['title'], 'capture': s.get('capture', True),
              'screen_png': f'{i:02d}-{s["id"]}.png'}
-        im = frames()[k] if e['capture'] else blank(200)
+        im = fr[k] if e['capture'] else blank(200)
         im.save(emu / e['screen_png'])
         if e['capture']:
             e['xic'] = f'{i:02d}-{s["id"]}.xic'
@@ -331,7 +331,6 @@ def test_the_runbook_numbers_the_walk_and_says_how_to_capture():
 
 
 def test_the_parity_book_is_byte_for_byte_stable(tmp_path):
-    import zipfile
     a, b = tmp_path / 'a.epub', tmp_path / 'b.epub'
     assert parity.make_book(str(a)) == parity.make_book(str(b))
     assert a.read_bytes() == b.read_bytes()
@@ -373,7 +372,6 @@ def test_prepare_card_plans_writes_and_checks_preconditions(tmp_path):
     tool('prepare-card', SCRIPT, card, '--session', sess, '--yes', check=0)
     book = card / 'Parity' / 'Parity Book.epub'
     want = parity.make_book(str(tmp_path / 'ref.epub'))
-    import hashlib
     assert hashlib.sha256(book.read_bytes()).hexdigest() == want
     assert sorted(os.listdir(card / 'Parity')) == ['Parity Book.epub']         # no ._ file
     r = tool('prepare-card', SCRIPT, card, '--session', sess, check=0)        # idempotent

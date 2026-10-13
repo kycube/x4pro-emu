@@ -17,7 +17,6 @@
 
 local M      = 40                 -- page margin
 local RIGHT  = 480 - M
-local INK    = 0                  -- g:clear(0) = white page, everything drawn is black
 
 -- ---------------------------------------------------------------- primitives the host lacks
 
@@ -26,8 +25,11 @@ local function fill(x, y, w, h)
   for i = 0, h - 1 do g:line(x, y + i, x + w - 1, y + i) end
 end
 
--- A rough text width, for centring only: the system font is proportional, so this is an estimate
--- (caps and digits are wide, i/l/t/punctuation are narrow).
+-- A rough text width: an estimate from before the font was measured (caps 12, most else 10, a few
+-- narrow ones). It runs short -- by 6 to 20 px on the right-aligned values below, so they end past
+-- RIGHT -- which is the bug apps/status-panels fixed with the measured table (docs/lua-apps.md
+-- §4b, ADV_BY_WIDTH there). It stays here only because tests/golden/stock-lua-status-typographic.png
+-- pins this page as it is; switching to the measured table means re-making that golden.
 local NARROW = {i = 4, l = 4, j = 5, t = 6, f = 6, r = 7, [' '] = 5, ['.'] = 5, [','] = 5, [':'] = 5}
 local function textw(s)
   local w = 0
@@ -130,7 +132,7 @@ function on_draw()
   -- ctx.gc:count() is a method (colon): the sub-table functions all want the table as first arg
   local heap     = math.floor((get(function() return ctx.gc:count() end) or 0) / 1024)
 
-  g:clear(INK)                                             -- own the frame: white
+  g:clear(0)                                               -- own the frame: white
 
   -- 1. the weekday, alone at the top, with a hairline under it
   if t then g:text(M, 76, DAYS[(t.weekday % 7) + 1]) end
