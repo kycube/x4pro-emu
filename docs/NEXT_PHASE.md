@@ -17,8 +17,9 @@ and the gamebook was played on the device. Three things wait for the owner:
 1. **The first device-parity session** (`docs/parity.md`, "A device session"): the harness is built and the
    emulator side passes on 7 of 8 screens (the light panel cannot be captured); the owner walks the runbook
    on the reader. It needs the developer-patched 7.6.8 in app0 and a fresh tagged backup first.
-2. **Sign-off for the Espressif upstream series** (`docs/upstream-qemu.md` §8): branches `upstream-s3` and
-   `x4pro-on-upstream` are ready and checkpatch-clean; nothing is pushed.
+2. ~~Sign-off for the Espressif upstream series~~ — **the owner declined, for now (2026-10-13)**. The branches
+   `upstream-s3` and `x4pro-on-upstream` stay local (and in `images/upstream-qemu-2026-10-13.bundle`); do not
+   propose submitting again unless the owner raises it (`docs/upstream-qemu.md`).
 3. **The deployment decision for native patches** (item c below).
 
 **Work is organised as squads: read §10 before starting anything.**

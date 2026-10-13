@@ -1,6 +1,8 @@
 # Upstreaming the generic ESP32-S3 QEMU work
 
-Written 2026-10-12 (squad S7, prefix `uq`). **Nothing has been submitted, pushed, forked or posted.**
+Written 2026-10-12 (squad S7, prefix `uq`). **Nothing has been submitted, pushed, forked or posted, and on
+2026-10-13 the owner decided not to submit for now**: this page is kept as the plan for a later day; do not
+propose it again unless the owner raises it.
 Every step that leaves this machine is listed in section 8 and waits for the owner, whose name,
 e-mail and `Signed-off-by` the commits do not contain yet (`Signed-off-by: TODO <owner>`).
 
