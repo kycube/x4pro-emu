@@ -2,22 +2,24 @@
 """x4emu: drive the Xteink X4 Pro emulator from a shell.
 
   x4emu run --flash flash.bin [--sd sd.img] [--efuse efuse.bin] [--panel ssd1677|uc8179|uc8279]
-            [--fast-epd] [--gdb] [--trace-epd FILE] [--trace-i2c FILE] [--name dev0] [--no-usb-host]
-            [--boot-hold-power [MS]]
-  x4emu stop | reset | status | state | log [--follow] [--since N] | wait-text TEXT [--timeout S]
-  x4emu screenshot out.png [--diff other.png] | wait-refresh [--count N] [--timeout S]
-  x4emu press left|right|power [--ms 120] | hold power --ms 3000
-  x4emu tap X Y | swipe X1 Y1 X2 Y2 [--ms 250] | home [--ms 250] [--quiet S]
+            [--fast-epd] [--gdb] [--trace-epd FILE] [--trace-i2c FILE] [--no-usb-host]
+            [--icount N] [--deterministic] [--boot-hold-power [MS]] [--dry-run]
+  x4emu stop | reset | status | state | flash-app [--app APP.bin] [--build DIR]
+  x4emu log [--follow] [--since N] | wait-text TEXT [--timeout S] | console-send TEXT
+  x4emu screenshot out.png [--diff other.png] | wait-refresh [--count N] | wait-quiet [--seconds S]
+  x4emu press left|right|power [--ms 120] | hold power --ms 3000 | chord power right
+  x4emu tap X Y | swipe X1 Y1 X2 Y2 [--ms 250] | home [--ms 250]     (inputs: [--quiet S] [--wait S])
   x4emu record FILE | record --stop | replay FILE [--timeout S] [--no-wait]
   x4emu wait-guest-ms N [--timeout S] | wait-guest-until MS [--timeout S]
-  x4emu battery --soc 63 --mv 3910 [--charging on|off] | light
-  x4emu mem read ADDR LEN | gdb | qmp '{"execute":...}'
+  x4emu battery --soc 63 --mv 3910 [--charging on|off] | light [-v]
+  x4emu mem read ADDR LEN | gdb | qmp '{"execute":...}' | shell | watch [--port 8420]
 
 `--json` before the subcommand prints one JSON object per command instead of the human lines
 (errors become {"error": "..."} with the same exit code). See docs/x4emu.md.
 
 Every instance lives in .x4emu/<name>/ (qmp.sock, console.log, uart0.log, qemu.log, pid, run.json).
-Nothing here blocks without a timeout; nothing needs a terminal.
+Nothing here blocks without a timeout (`shell` and `watch` run until EOF / Ctrl-C or
+--seconds); nothing needs a terminal.
 """
 import argparse
 import sys
@@ -87,21 +89,28 @@ def build_parser():
     p = sp.add_parser('mem'); p.add_argument('op', choices=['read']); p.add_argument('addr'); p.add_argument('len', type=int); p.set_defaults(fn=c.cmd_mem)
     p = sp.add_parser('gdb'); p.add_argument('--elf'); p.set_defaults(fn=c.cmd_gdb)
     p = sp.add_parser('qmp'); p.add_argument('json'); p.set_defaults(fn=c.cmd_qmp)
-    # Lazy imports: `shell`/`watch` import `x4emu.api`, which imports this module back
-    # (`cli.build_parser`) to run commands in-process; importing them here at call time (not at
-    # this module's top level) keeps that from being a circular import at load time.
-    from . import shell, watch
-    p = sp.add_parser('shell'); p.set_defaults(fn=shell.cmd_shell)
+    p = sp.add_parser('shell'); p.set_defaults(fn=_cmd_shell)
     p = sp.add_parser('watch'); p.add_argument('--port', type=int, default=8420)
     p.add_argument('--seconds', type=float, default=None)
-    p.add_argument('--out'); p.set_defaults(fn=watch.cmd_watch)
+    p.add_argument('--out'); p.set_defaults(fn=_cmd_watch)
     return ap
 
 
-def _dispatch(a):
-    """Run a parsed command through `out` (human line or `--json` object, per `out.json_mode`),
-    the way `main()` does; also used by `x4emu shell` so each line behaves exactly like a fresh
-    `x4emu <line>` invocation."""
+# `shell` and `watch` are imported when they run, not with this module: `shell` imports `x4emu.api`,
+# which imports this module back, and `watch` pulls in http.server (~12 ms of every other command).
+def _cmd_shell(a):
+    from .shell import cmd_shell
+    return cmd_shell(a)
+
+
+def _cmd_watch(a):
+    from .watch import cmd_watch
+    return cmd_watch(a)
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
+    out.configure(a.json_out)
     try:
         rc = a.fn(a)
     except SystemExit as e:
@@ -117,13 +126,6 @@ def _dispatch(a):
             raise SystemExit(1) from None
         raise
     out.finish()
-    return rc
-
-
-def main(argv=None):
-    a = build_parser().parse_args(argv)
-    out.configure(a.json_out)
-    rc = _dispatch(a)
     sys.exit(rc or 0)
 
 

@@ -11,7 +11,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 
 import pytest
@@ -20,17 +19,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from x4emu import api  # noqa: E402
 
-from conftest import PY, X4EMU, x4emu
+from conftest import BROWSE_FILES, PY, X4EMU, boot_crosspoint, x4emu
 
 BOOT_S = 300
-BROWSE_FILES = (345, 350)
 
 
 def boot(name, images):
     """A CrossPoint instance at Home, idle."""
-    x4emu(name, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd', timeout=BOOT_S)
-    x4emu(name, 'wait-text', 'Entering activity: Home', '--timeout', 180, timeout=BOOT_S)
-    x4emu(name, 'wait-quiet', '--seconds', 2, '--timeout', 60)
+    boot_crosspoint(name, images, home_s=180, quiet_s=2, timeout=BOOT_S)
 
 
 def same_shape(a, b, path='$'):
@@ -56,7 +52,7 @@ def same_shape(a, b, path='$'):
 
 
 # ---------------------------------------------------------------- (a) x4emu/api.py
-def test_api_run_in_process(images, emu):
+def test_api_run_in_process(images, emu, tmp_path):
     boot(emu, images)
 
     d = api.run(['--name', emu, 'status'])
@@ -75,6 +71,16 @@ def test_api_run_in_process(images, emu):
         api.run_text(['tap', 'abc', 'def'], name=emu)
     # ... and the instance is unaffected by that failed call
     assert api.run(['--name', emu, 'status'])['running'] is True
+
+    # a result the CLI reports through its exit code alone (`screenshot --diff`: 1 when pixels
+    # differ) carries "rc" without "error"; exit 0 carries no "rc"
+    a, b = str(tmp_path / 'a.png'), str(tmp_path / 'b.png')
+    same = api.run(['--name', emu, 'screenshot', a])
+    assert same['path'] == a and 'rc' not in same and 'error' not in same, same
+    from PIL import Image
+    Image.new('L', (800, 480), 0).save(b)
+    differ = api.run(['--name', emu, 'screenshot', a, '--diff', b])
+    assert differ['diff_pixels'] > 0 and differ.get('rc') == 1 and 'error' not in differ, differ
 
 
 # ---------------------------------------------------------------- (b) x4emu shell

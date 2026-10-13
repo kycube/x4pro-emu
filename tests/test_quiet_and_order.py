@@ -11,13 +11,11 @@ import json
 import os
 import sys
 
-from conftest import ROOT, x4emu, instance_name, schedule_order, UNKNOWN_DURATION_S
+from conftest import (ROOT, BROWSE_FILES, boot_crosspoint, emu_log, emu_state, x4emu, instance_name,
+                      schedule_order, UNKNOWN_DURATION_S)
 
 sys.path.insert(0, ROOT)
 from x4emu import commands as c                                   # noqa: E402
-
-BROWSE_FILES_GT911 = (129, 345)   # CrossPoint's Home "Browse Files" in the GT911's portrait frame
-INPUT = '/machine/x4pro-input'
 
 
 class Item:
@@ -65,7 +63,6 @@ def test_an_input_mark_counts_only_for_its_own_process(tmp_path, request):
 def test_input_signature():
     st = {'gt911': {'input_seq': 7}, 'gpio_in': {'changes': {'left': 2, 'right': 4, 'power': 3}}}
     assert c.input_signature(st) == [7, 2, 4, 3]
-    assert c.input_signature({'gt911': {}}) is None           # a QEMU without the counters
 
 
 def quiet(name, seconds=2):
@@ -73,28 +70,27 @@ def quiet(name, seconds=2):
 
 
 def test_wait_quiet_returns_at_once_when_idle_and_waits_after_any_input(images, emu):
-    x4emu(emu, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd')
-    x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 90)
+    boot_crosspoint(emu, images)
     first = quiet(emu)
     assert first['ok'] and first['idle_s'] >= 2, first
     # 1. already idle: no second wait
     again = quiet(emu)
     assert again['ok'] and again['waited_s'] < 0.5 and again['idle_s'] >= 2, again
     # 2. an input x4emu delivered: the idle time restarts at its end (Right moves the selection)
-    n = json.loads(x4emu(emu, 'state').stdout)['refresh_count']
+    n = emu_state(emu)['refresh_count']
     x4emu(emu, 'press', 'right', '--wait', 20)
     after = quiet(emu)
     assert after['ok'] and after['waited_s'] >= 1.0, after
     # 3. an input that bypassed x4emu (raw QMP): seen through the GT911 input counter, so the wait
     #    counts from the call and the screen it leads to is drawn before wait-quiet returns
-    for value in (json.dumps([{'x': BROWSE_FILES_GT911[0], 'y': BROWSE_FILES_GT911[1]}]), '[]'):
+    rx, ry = c.to_gt911(*BROWSE_FILES)
+    for value in (json.dumps([{'x': rx, 'y': ry}]), '[]'):
         x4emu(emu, 'qmp', json.dumps({'execute': 'qom-set',
-                                      'arguments': {'path': INPUT, 'property': 'touch', 'value': value}}))
+                                      'arguments': {'path': c.INPUT, 'property': 'touch', 'value': value}}))
     raw = quiet(emu)
     assert raw['ok'] and raw['waited_s'] >= 1.0, raw
-    log = open(os.path.join(ROOT, '.x4emu', emu, 'console.log'), errors='replace').read()
-    assert 'Entering activity: FileBrowser' in log, 'the raw tap did not act'
-    assert json.loads(x4emu(emu, 'state').stdout)['refresh_count'] > n
+    assert 'Entering activity: FileBrowser' in emu_log(emu), 'the raw tap did not act'
+    assert emu_state(emu)['refresh_count'] > n
     # 4. a new boot never inherits the old boot's mark
     x4emu(emu, 'stop')
     assert not os.path.exists(c.last_input_file(emu))

@@ -16,12 +16,14 @@ process instead of one subprocess per call. `device_*` and `build_*` stay on `su
 the right tool for another program (pio, device.py) or for something that must survive this
 process (a stopped emulator instance keeps running; a device write should not).
 """
-import glob, json, os, subprocess, sys, time
+import glob, json, os, shutil, subprocess, sys, time
 from mcp.server.mcpserver import MCPServer, Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)              # import the package from this checkout, not site-packages
-from x4emu import api                 # noqa: E402
+sys.path.insert(0, ROOT)                      # import the package from this checkout, not site-packages
+os.environ.setdefault('X4EMU_ROOT', ROOT)     # ... and drive this checkout, as tools/x4emu does
+from x4emu import api                         # noqa: E402
+from x4emu.paths import idir as _idir         # noqa: E402
 
 PY = sys.executable
 DEVICE = os.path.join(ROOT, 'tools', 'device.py')
@@ -31,9 +33,6 @@ server = MCPServer('x4emu', instructions=(
     'emu_run -> emu_wait_text("Entering activity: Home") -> emu_wait_quiet -> emu_tap/emu_press -> '
     'emu_screenshot. Inputs are dropped while the firmware paints: use quiet>0 or emu_wait_quiet first. '
     'Panel coordinates are the 800x480 landscape screenshot; CrossPoint draws its portrait UI rotated on it.'))
-
-def _idir(name):
-    return os.path.join(ROOT, '.x4emu', name)
 
 def _sargs(*parts):
     """Command-line arguments for `api.run`/`api.run_text`: every element as a string (argparse
@@ -49,8 +48,9 @@ def emu_run(flash: str, name: str = 'dev0', sd: str | None = None, fast_epd: boo
     """Start an emulator instance from a 16 MB flash image (see build_flash_image). fast_epd makes
     panel refreshes take 2 ms instead of the device's 40/1326/483 ms. panel: ssd1677|uc8179|uc8279
     (default uc8279, the desk unit). Traces land in .x4emu/<name>/{epd,i2c}.jsonl. boot_hold_power
-    holds the power button from reset for MS ms (default 3000 with no value given): the way the
-    stock firmware's boot-preflight accepts a cold boot instead of deep-sleeping. deterministic
+    holds the power button from reset for that many ms of guest time, the way the stock firmware's
+    boot-preflight accepts a cold boot instead of deep-sleeping; -1 holds it until the preflight has
+    printed its decision (at most 3000 ms: the CLI's bare `--boot-hold-power`). deterministic
     makes guest time follow the instruction count and pins the RTC, so a `emu_record`ed script
     replays onto the same pixels."""
     args = ['run', '--flash', flash]
@@ -137,7 +137,8 @@ def emu_wait_refresh(name: str = 'dev0', count: int = 1, total: int | None = Non
 
 @server.tool()
 def emu_wait_quiet(name: str = 'dev0', seconds: float = 2, timeout: float = 60) -> str:
-    """Wait until the panel has been idle (no refresh, BUSY low) for `seconds`."""
+    """Wait until the panel has been idle for `seconds` of guest time: BUSY low and neither a refresh
+    nor an input since (returns at once when it already has been; a sleeping board is idle)."""
     return api.run_text(_sargs('wait-quiet', '--seconds', seconds, '--timeout', timeout), name=name)
 
 @server.tool()
@@ -324,9 +325,9 @@ def device_flash_crosspoint(firmware: str | None = None, preserve_stock: bool = 
 @server.tool()
 def device_restore_stock(confirm: bool = False) -> str:
     """Write the stock app image from the verified backup back into its app slot. Plan only unless
-    confirm=True. Since the owner's OTA update the bootloader starts app1, and `tools/device.py` reads
-    otadata: with no --slot both writers refuse and name the slot that would actually boot
-    (`device.py slots` reports it). Nothing here writes otadata."""
+    confirm=True. Which slot the bootloader starts is read from otadata, never assumed (`device.py
+    slots` reports it): with no --slot both writers refuse to write the booting slot and name it.
+    Nothing here writes otadata."""
     args = [PY, DEVICE, 'restore-stock'] + (['--yes'] if confirm else [])
     r = subprocess.run(args, capture_output=True, text=True, cwd=ROOT, timeout=900)
     return (r.stdout + r.stderr).strip()
@@ -342,7 +343,8 @@ def device_fetch_screenshots() -> list:
     dst = os.path.join(ROOT, 'docs', 'device', 'screenshots'); os.makedirs(dst, exist_ok=True)
     files = sorted(glob.glob(os.path.join(cards[0], 'screenshots', '*.bmp')), key=os.path.getmtime)
     for f in files:
-        subprocess.run(['cp', '-n', f, dst])
+        if not os.path.exists(os.path.join(dst, os.path.basename(f))):
+            shutil.copy(f, dst)
     if not files:
         return ['no screenshots on the card']
     im = PILImage.open(files[-1]).convert('L')

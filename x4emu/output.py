@@ -91,6 +91,19 @@ class Out:
 
 
 out = Out()
+_STATE = ('json_mode', 'collect', 'data', '_raw', '_done', '_text', '_collected')
+
+
+@contextlib.contextmanager
+def preserved():
+    """Put `out` back as it was when the block ends: a command run inside another one (`replay`'s
+    steps, `x4emu/api.py`) reconfigures it for itself and must not leave that behind."""
+    saved = [getattr(out, k) for k in _STATE]
+    try:
+        yield out
+    finally:
+        for k, v in zip(_STATE, saved):
+            setattr(out, k, v)
 
 
 @contextlib.contextmanager
@@ -101,9 +114,6 @@ def suspended():
     bury the one-line-per-step output and their `out.set` fields would end up in the replay's own
     JSON object. Inside this block the human lines are dropped (as in `--json` mode) and the fields
     go to a scratch payload, which is yielded so the caller can look at it."""
-    saved = (out.json_mode, out.collect, out.data, out._raw, out._done)
-    out.json_mode, out.collect, out.data, out._raw, out._done = True, False, {}, None, False
-    try:
+    with preserved():
+        out.configure(True)
         yield out.data
-    finally:
-        out.json_mode, out.collect, out.data, out._raw, out._done = saved

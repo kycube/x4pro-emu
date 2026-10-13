@@ -57,7 +57,7 @@ def cmd_shell(a):
         except Exception as e:         # belt and braces: api.run/run_text should not raise these
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
         sys.stdout.flush()
-    # Each line already printed its own output via api.run/api.run_text (which save and restore
-    # `out`'s state, including `_done`, around every call); mark the outer `out` as handled so
-    # `cli._dispatch`'s own trailing `out.finish()` does not print a stray extra object.
+    # Each line already printed its own output via api.run/api.run_text (which put `out` back as it
+    # was after every call); mark the outer `out` as handled so `cli.main`'s own trailing
+    # `out.finish()` does not print a stray extra object.
     out._done = True

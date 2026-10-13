@@ -8,7 +8,6 @@ when `refresh_count` changed.
 """
 import html
 import http.server
-import json
 import os
 import sys
 import time
@@ -72,14 +71,13 @@ def make_handler(name, out_file):
                 elif self.path.startswith('/state.json'):
                     q = connect(name)
                     try:
-                        s = q.qom_get(BOARD, 'state')
+                        body = q.qom_get(BOARD, 'state').encode()     # already JSON text
                     finally:
                         q.close()
-                    body = (s if isinstance(s, str) else json.dumps(s)).encode()
                     self._send(200, 'application/json', body)
                 elif self.path.startswith('/panel.png'):
-                    dest = screenshot_to(name, os.path.join(idir(name), 'watch.png'))
-                    body = open(dest, 'rb').read()
+                    with open(screenshot_to(name, os.path.join(idir(name), 'watch.png')), 'rb') as f:
+                        body = f.read()
                     if out_file:
                         with open(out_file, 'wb') as f:
                             f.write(body)

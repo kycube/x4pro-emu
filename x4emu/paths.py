@@ -8,10 +8,12 @@ ROOT is resolved lazily (so `--help` works anywhere) in this order:
 
 1. `$X4EMU_ROOT`;
 2. the first directory at or above the current one that looks like the checkout;
-3. the checkout containing this package (an editable install, or `tools/x4emu`);
+3. the checkout containing this package (an editable install);
 
 and otherwise the command fails with a message naming the ways to fix it.
-`$X4EMU_QEMU` overrides the emulator binary, `$X4EMU_NAME` the default instance name.
+The in-repo shim `tools/x4emu` and `tools/x4emu_mcp.py` set `$X4EMU_ROOT` to their own checkout
+unless it is already set. `$X4EMU_QEMU` overrides the emulator binary, `$X4EMU_NAME` the default
+instance name.
 """
 import os
 import sys
@@ -23,16 +25,8 @@ _root = None
 
 
 def is_repo(d):
-    """True if `d` looks like an x4pro-emu checkout."""
-    return (os.path.isfile(os.path.join(d, 'tools', 'x4emu'))
-            and os.path.isdir(os.path.join(d, 'qemu-patches')))
-
-
-def set_root(d):
-    """Pin ROOT (used by the in-repo `tools/x4emu` shim)."""
-    global _root
-    _root = os.path.abspath(d)
-    return _root
+    """True if `d` looks like an x4pro-emu checkout (has both MARKERS)."""
+    return os.path.isfile(os.path.join(d, MARKERS[0])) and os.path.isdir(os.path.join(d, MARKERS[1]))
 
 
 def find_root():

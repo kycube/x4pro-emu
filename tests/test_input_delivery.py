@@ -20,42 +20,25 @@ statistical form: the QEMU process runs 20 ms out of every 50 (SIGSTOP/SIGCONT; 
 the host clock, so the guest executes less per guest millisecond -- a loaded host made on purpose)
 and every input must act, with no retry anywhere.
 """
-import json, os, re, signal, subprocess, sys, threading, time
-import pytest
-from conftest import x4emu, ROOT
+import json, os, re, signal, threading, time
+from conftest import x4emu, ROOT, BROWSE_FILES, boot_crosspoint, emu_log, emu_state as state, instance_dir
 
-BROWSE_FILES = (345, 350)        # CrossPoint's Home menu entry, landscape panel pixels
 BROWSE_FILES_GT911 = (129, 345)  # the same point in the GT911's portrait frame (x4emu.to_gt911)
 INPUT = '/machine/x4pro-input'
 
 
-def console(name):
-    return open(os.path.join(ROOT, '.x4emu', name, 'console.log'), errors='replace').read()
-
-
 def activity(name):
     """The CrossPoint activity entered last (its "Entering activity: X" console line)."""
-    found = re.findall(r'Entering activity: (\w+)', console(name))
+    found = re.findall(r'Entering activity: (\w+)', emu_log(name))
     return found[-1] if found else None
-
-
-def state(name):
-    return json.loads(x4emu(name, 'state').stdout)
 
 
 def qmp(name, cmd, **args):
     return x4emu(name, 'qmp', json.dumps({'execute': cmd, **({'arguments': args} if args else {})}))
 
 
-def boot_crosspoint(name, images):
-    x4emu(name, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd')
-    x4emu(name, 'wait-text', 'Entering activity: Home', '--timeout', 120)
-    x4emu(name, 'wait-quiet', '--seconds', 2, '--timeout', 60)
-
-
-def need_latching_gt911(name):
-    if 'input_seq' not in state(name)['gt911']:
-        pytest.skip('this QEMU predates the latching GT911 model (no state.gt911.input_seq)')
+def boot(name, images):
+    boot_crosspoint(name, images, home_s=120, quiet_s=2)
 
 
 def paused_input(name, prop, down, up):
@@ -84,8 +67,7 @@ def test_a_release_before_the_firmware_reads_the_press_is_kept(images, emu):
     """CrossPoint, deterministic: a tap and a Home-pad press whose release lands before the firmware
     has read the press frame still act -- the press frame is kept until the clear and the release
     follows as the next frame."""
-    boot_crosspoint(emu, images)
-    need_latching_gt911(emu)
+    boot(emu, images)
     rx, ry = BROWSE_FILES_GT911
     g = paused_input(emu, 'touch', json.dumps([{'x': rx, 'y': ry}]), '[]')
     assert g['frame_ready'] and g['pending'] and g['deferred'] >= 1, g
@@ -102,8 +84,7 @@ def test_inputs_report_what_the_firmware_saw(images, emu):
     """`tap`, `home` and `press` hold until the firmware has seen the input and its release, and say
     so: a GT911 frame consumed (`read_after_s`, `release_read`), a button's level sampled twice
     (`state.gpio_in.samples`), and at least --ms of guest time (`held_ms`)."""
-    boot_crosspoint(emu, images)
-    need_latching_gt911(emu)
+    boot(emu, images)
     t = json.loads(x4emu(emu, '--json', 'tap', *BROWSE_FILES, '--quiet', 2, '--wait', 30).stdout)
     assert t['read_after_s'] is not None and t['release_read'] is True and t['held_ms'] >= 120, t
     assert wait_activity(emu, 'FileBrowser')
@@ -151,9 +132,8 @@ def test_inputs_land_on_a_squeezed_host(images, emu):
     """CrossPoint with its QEMU getting 40 % of the host (see the module docstring): Browse Files and
     back with the Home pad, four times, then the book and two page turns -- every input acts the
     first time."""
-    boot_crosspoint(emu, images)
-    need_latching_gt911(emu)
-    pid = int(open(os.path.join(ROOT, '.x4emu', emu, 'pid')).read())
+    boot(emu, images)
+    pid = int(open(os.path.join(instance_dir(emu), 'pid')).read())
     with Squeeze(pid):
         for i in range(4):
             x4emu(emu, 'tap', *BROWSE_FILES, '--quiet', 2, '--wait', 30, timeout=120)
@@ -172,9 +152,7 @@ def test_inputs_land_on_a_squeezed_host(images, emu):
 
 
 # --- the stock firmware (needs the device dump and card files; skips otherwise) -------------------
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_stock import (GOLDEN, PANEL_W, STATUS_BAR_COLS, boot_to_home, masked_diff,   # noqa: E402,F401
-                        settle, stock, stock_card)
+from test_stock import GOLDEN, MENU_COLS, boot_to_home, masked_diff, settle, stock, stock_card  # noqa: E402,F401
 
 
 def test_stock_paused_tap_and_home_pad_are_kept(stock):
@@ -183,14 +161,13 @@ def test_stock_paused_tap_and_home_pad_are_kept(stock):
     name, tmp = stock
     boot_to_home(name)
     settle(name, 2, 30)
-    need_latching_gt911(name)
     g = paused_input(name, 'touch', json.dumps([{'x': 441, 'y': 88}]), '[]')     # the menu icon (88, 38)
     assert g['pending'], g
     settle(name, 2, 60)
     shot = tmp / 'menu.png'
     x4emu(name, 'screenshot', str(shot))
     menu = os.path.join(ROOT, 'tests', 'golden', 'stock-menu.png')
-    assert masked_diff(shot, menu, (STATUS_BAR_COLS, PANEL_W - 60)) == 0, 'the paused tap did not open the menu'
+    assert masked_diff(shot, menu, MENU_COLS) == 0, 'the paused tap did not open the menu'
     paused_input(name, 'home', True, False)
     settle(name, 2, 60)
     x4emu(name, 'screenshot', str(shot))

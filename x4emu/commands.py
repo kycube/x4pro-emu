@@ -1,12 +1,14 @@
 """The commands themselves. Every one of them prints its human line through `out.line` and its
 machine fields through `out.set`/`out.obj`, so `--json` changes the presentation and nothing else.
-The human strings are contracts: tests/*.py and tools/x4emu_mcp.py parse some of them."""
+The human strings are contracts: tests/*.py parse some of them, and tools/x4emu_mcp.py hands them to
+agents as they are."""
 import argparse
 import functools
 import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -17,7 +19,7 @@ from .output import out, suspended
 from .paths import idir, qemu, root
 from .qmp import BOARD, INPUT, QMP, connect, pid_alive
 
-PANEL_W, PANEL_H = 800, 480
+PANEL_H = 480                             # the landscape panel is 800x480
 
 # `run --boot-hold-power` without a value holds the button until the stock's boot-preflight has
 # decided: it samples the power button from guest time ~530 ms through its "effective" window (600
@@ -32,17 +34,33 @@ BOOT_PREFLIGHT = re.compile(rb'boot-preflight: source=[^\n]*\n')
 
 # `run --deterministic` is `-icount 3` (guest time follows the instruction count) plus a fixed RTC
 # seed: `cmd_run` passes `-global driver=x4pro.pcf8563,property=base-epoch,value=N` so the BM8563
-# model starts from this epoch second instead of the host's wall clock (0 = host time). None disables
-# the seed (a QEMU without the property rejects the -global).
-DETERMINISTIC_RTC_EPOCH = 1767225600      # 2026-01-01T00:00:00Z (the property landed with QEMU patch 0014)
+# model starts from this epoch second instead of the host's wall clock.
+DETERMINISTIC_RTC_EPOCH = 1767225600      # 2026-01-01T00:00:00Z
+
+
+def board(q):
+    """The board's state object (`state` is a JSON string property of the board)."""
+    return json.loads(q.qom_get(BOARD, 'state'))
+
+
+def guest_ms(q):
+    """Guest virtual time in milliseconds (`state.uptime_us`, QEMU's virtual clock)."""
+    return board(q)['uptime_us'] // 1000
+
+
+def refresh_count(q):
+    return board(q)['refresh_count']
+
+
+def _remove(d, names):
+    for f in names:
+        try:
+            os.remove(os.path.join(d, f))
+        except FileNotFoundError:
+            pass
 
 
 # ------------------------------------------------- record / replay of input commands
-def guest_ms(q):
-    """Guest virtual time in milliseconds (`state.uptime_us`, QEMU's virtual clock)."""
-    return json.loads(q.qom_get(BOARD, 'state'))['uptime_us'] // 1000
-
-
 def record_marker(name):
     """`.x4emu/NAME/record.json` — its existence is what "this instance is recording" means."""
     return os.path.join(idir(name), 'record.json')
@@ -113,14 +131,13 @@ def reconnect(name, tries=10):
 # ---------------------------------------------------------------- lifecycle
 def cmd_run(a):
     d = idir(a.name)
-    if pid_alive(a.name):
-        sys.exit(f'instance "{a.name}" already running (pid {pid_alive(a.name)}); `x4emu stop` first')
+    pid = pid_alive(a.name)
+    if pid:
+        sys.exit(f'instance "{a.name}" already running (pid {pid}); `x4emu stop` first')
     os.makedirs(d, exist_ok=True)
-    # record.json goes too: a recording belongs to the instance that was booted, so a new boot
-    # never appends to the journal of the last one (`x4emu record` comes after `run`).
-    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'record.json'):
-        try: os.remove(os.path.join(d, f))
-        except FileNotFoundError: pass
+    # a recording belongs to the instance that was booted, so a new boot never appends to the
+    # journal of the last one (`x4emu record` comes after `run`); `launch` clears the logs
+    _remove(d, ('record.json',))
     flash = os.path.abspath(a.flash)
     if os.path.getsize(flash) != 16 * 1024 * 1024:
         sys.exit(f'{flash} is not a 16 MB image (use tools/mkflash.py)')
@@ -159,10 +176,10 @@ def cmd_run(a):
         if a.gdb:
             sys.exit('--boot-hold-power cannot be combined with --gdb (gdb owns the halted start)')
         cmd += ['-S']            # start halted, press power, then `cont`: see boot_hold()
-    icount = a.icount or ('3' if getattr(a, 'deterministic', False) else None)
+    icount = a.icount or ('3' if a.deterministic else None)
     if icount:
         cmd += ['-icount', icount]
-    if getattr(a, 'deterministic', False) and DETERMINISTIC_RTC_EPOCH is not None:
+    if a.deterministic:
         # pin the RTC (see DETERMINISTIC_RTC_EPOCH) so the guest's wall clock is the same on every
         # run instead of following the host's
         cmd += ['-global', f'driver=x4pro.pcf8563,property=base-epoch,value={DETERMINISTIC_RTC_EPOCH}']
@@ -173,10 +190,10 @@ def cmd_run(a):
     if a.trace_i2c:
         cmd += ['-global', f'driver=esp32s3.i2c,property=trace-i2c,value={os.path.abspath(a.trace_i2c)}']
     cmd += a.extra
-    json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd,
-               'boot_hold_power_ms': a.boot_hold_power,
-               'boot_hold_until_preflight': until_preflight and bool(a.boot_hold_power)},
-              open(os.path.join(d, 'run.json'), 'w'), indent=1)
+    with open(os.path.join(d, 'run.json'), 'w') as f:
+        json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd,
+                   'boot_hold_power_ms': a.boot_hold_power,
+                   'boot_hold_until_preflight': until_preflight}, f, indent=1)
     if a.dry_run:
         out.line(' '.join(shlex.quote(c) for c in cmd))
         out.set(name=a.name, dry_run=True, cmd=cmd, boot_hold_power_ms=a.boot_hold_power)
@@ -184,22 +201,28 @@ def cmd_run(a):
     launch(a.name, cmd, a.boot_hold_power, until_preflight)
 
 
-class _ConsoleTail:
-    """Incremental reader of an instance's console.log: `seen(pattern)` reads what is new and tells
-    whether the pattern has appeared (patterns that straddle two reads are found)."""
-    def __init__(self, path):
-        self.path, self.pos, self.buf = path, 0, b''
+class LogTail:
+    """Incremental reader of one of an instance's logs: `seen(pattern)` (a compiled bytes pattern)
+    reads what is new and tells whether the pattern has appeared since the log began. A match that
+    straddles two reads is found (the last `keep` bytes are searched again), and a log that was
+    replaced or truncated meanwhile (a new boot) is read again from its start."""
+    def __init__(self, path, keep=4096):
+        self.path, self.keep = path, keep
+        self.ino, self.pos, self.buf = None, 0, b''
 
     def seen(self, pattern):
         try:
             with open(self.path, 'rb') as f:
+                st = os.fstat(f.fileno())
+                if st.st_ino != self.ino or st.st_size < self.pos:
+                    self.ino, self.pos, self.buf = st.st_ino, 0, b''
                 f.seek(self.pos)
                 new = f.read()
         except OSError:
             return False
         self.pos += len(new)
-        self.buf = self.buf[-4096:] + new
-        return bool(pattern.search(self.buf))
+        self.buf = self.buf[-self.keep:] + new
+        return pattern.search(self.buf) is not None
 
 
 def boot_hold(q, ms, until_preflight=False):
@@ -210,33 +233,23 @@ def boot_hold(q, ms, until_preflight=False):
     `cont` then releases the CPUs and the guest finds the button already down when it samples it.
     The stock firmware's boot-preflight wants that (`x4emu press power` after its deep sleep is the
     other way in). The preflight measures the hold on the guest clock, so the hold is measured there
-    too (under `-icount` on a loaded host guest time runs slower than the host's); a guest clock that
-    stands still for 2 host seconds in a paused VM ends it (see `hold_until`). Returns (the
-    query-status reply after the release, the guest ms held, whether the preflight line was seen --
-    None without `until_preflight`)."""
+    too (under `-icount` on a loaded host guest time runs slower than the host's), bounded the way
+    `hold_until` bounds it. Returns (the query-status reply after the release, the guest ms held,
+    whether the preflight line was seen -- None without `until_preflight`)."""
     q.qom_set(INPUT, 'btn-power', True)
     q.cmd('cont')
     if until_preflight:
-        tail = _ConsoleTail(os.path.join(idir(q.name), 'console.log'))
-        decided = lambda st: tail.seen(BOOT_PREFLIGHT)          # noqa: E731
-        # hold_until holds for `ms` *and* until seen; here either ends the hold: check the line on
-        # every poll and stop at the first of the two
-        t0 = time.time()
-        st = board(q)
-        g0 = g_last = st['uptime_us']
-        t_moved = t0
-        seen = False
-        while True:
-            seen = decided(st)
-            now = time.time()
-            if st['uptime_us'] != g_last:
-                g_last, t_moved = st['uptime_us'], now
-            if seen or (st['uptime_us'] - g0) / 1000.0 >= ms or now - t0 >= 20 * ms / 1000.0 \
-                    or (now - t_moved >= 2.0 and vm_paused(q)):
-                break
-            time.sleep(0.01)
-            st = board(q)
-        held_ms = (st['uptime_us'] - g0) / 1000.0
+        tail = LogTail(os.path.join(idir(q.name), 'console.log'))
+        g0 = board(q)['uptime_us']
+        decided = []
+
+        def over(st):                     # the first of: the preflight's line, `ms` of guest time
+            if tail.seen(BOOT_PREFLIGHT):
+                decided.append(True)
+                return True
+            return st['uptime_us'] - g0 >= ms * 1000
+        _, held_ms, _ = hold_until(q, 0, over, 20 * ms / 1000.0)
+        seen = bool(decided)
     else:
         _, held_ms, _ = hold_until(q, ms, lambda st: True, 0)
         seen = None
@@ -246,16 +259,17 @@ def boot_hold(q, ms, until_preflight=False):
 
 def launch(name, cmd, boot_hold_power=None, until_preflight=False):
     d = idir(name)
-    for f in ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'console.sock', 'last_input.json'):
-        try: os.remove(os.path.join(d, f))
-        except FileNotFoundError: pass
-    err = open(os.path.join(d, 'stderr.log'), 'wb')
-    p = subprocess.Popen(cmd, stdout=err, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True, cwd=root())
-    open(os.path.join(d, 'pid'), 'w').write(str(p.pid))
+    _remove(d, ('console.log', 'uart0.log', 'qemu.log', 'stderr.log', 'console.sock', 'last_input.json'))
+    with open(os.path.join(d, 'stderr.log'), 'wb') as err:          # QEMU keeps its own copy
+        p = subprocess.Popen(cmd, stdout=err, stderr=err, stdin=subprocess.DEVNULL,
+                             start_new_session=True, cwd=root())
+    with open(os.path.join(d, 'pid'), 'w') as f:
+        f.write(str(p.pid))
     t0 = time.time()
     while time.time() - t0 < 15:
         if p.poll() is not None:
-            sys.exit(f'qemu exited with {p.returncode}:\n' + open(os.path.join(d, 'stderr.log')).read())
+            with open(os.path.join(d, 'stderr.log')) as f:
+                sys.exit(f'qemu exited with {p.returncode}:\n' + f.read())
         if os.path.exists(os.path.join(d, 'qmp.sock')):
             try:
                 q = QMP(os.path.join(d, 'qmp.sock'), name=name); st = q.cmd('query-status')
@@ -319,23 +333,17 @@ def cmd_status(a):
         return
     q = connect(a.name)
     st = q.cmd('query-status')
-    extra = ''
-    deep = False
     try:
-        sl = json.loads(q.qom_get(BOARD, 'state')).get('sleep', {})
-        if sl.get('sleeping'):
-            deep = True
-            extra = ' (deep sleep: press power to wake)'
-    except Exception:
-        pass
+        deep = bool(board(q).get('sleep', {}).get('sleeping'))
+    except RuntimeError:                  # a machine without the board object (`run --machine`)
+        deep = False
+    extra = ' (deep sleep: press power to wake)' if deep else ''
     out.line(f'{a.name}: pid {pid}, {st["status"]}, running={st["running"]}{extra}')
     out.set(name=a.name, pid=pid, status=st['status'], running=st['running'], deep_sleep=deep)
 
 
 def cmd_state(a):
-    q = connect(a.name)
-    s = q.qom_get(BOARD, 'state')
-    s = json.loads(s) if isinstance(s, str) else s
+    s = board(connect(a.name))
     out.line(json.dumps(s, indent=1))
     out.obj(s)
 
@@ -345,15 +353,12 @@ def cmd_log(a):
     p = os.path.join(idir(a.name), a.file)
     if not os.path.exists(p):
         sys.exit(f'no {p}')
-    collected = []
     with open(p, 'rb') as f:
-        data = f.read()
-        lines = data.decode('utf-8', 'replace').splitlines()
+        lines = f.read().decode('utf-8', 'replace').splitlines()
         if a.since:
             lines = lines[-a.since:]
         for l in lines:
             out.line(l)
-        collected += lines
         if a.follow:
             t0 = time.time()
             tail = ''
@@ -365,8 +370,8 @@ def cmd_log(a):
                     tail += text
                 else:
                     time.sleep(0.1)
-            collected += tail.splitlines()
-    out.set(lines=collected)
+            lines += tail.splitlines()
+    out.set(lines=lines)
 
 
 @records('text newline')
@@ -387,11 +392,11 @@ def cmd_console_send(a):
 def cmd_flash_app(a):
     """Replace the app (and optionally bootloader/partition table) inside the instance's flash
     image, keeping NVS/otadata/SD state, and relaunch with the same command line."""
-    d = idir(a.name)
-    rj = os.path.join(d, 'run.json')
+    rj = os.path.join(idir(a.name), 'run.json')
     if not os.path.exists(rj):
         sys.exit('no run.json for this instance; use `run` first')
-    info = json.load(open(rj))
+    with open(rj) as f:
+        info = json.load(f)
     flash = info['flash']
     parts = []
     if a.build:
@@ -406,7 +411,8 @@ def cmd_flash_app(a):
     written = []
     with open(flash, 'r+b') as f:
         for off, path in parts:
-            blob = open(path, 'rb').read()
+            with open(path, 'rb') as src:
+                blob = src.read()
             f.seek(off); f.write(blob)
             out.line(f'  {off:#09x} {len(blob):9d}  {path}')
             written.append({'offset': off, 'size': len(blob), 'path': path})
@@ -415,10 +421,12 @@ def cmd_flash_app(a):
 
 
 def cmd_wait_text(a):
-    p = os.path.join(idir(a.name), a.file)
+    needle = a.text.encode()
+    tail = LogTail(os.path.join(idir(a.name), a.file), keep=max(4096, len(needle)))
+    pattern = re.compile(re.escape(needle))
     t0 = time.time()
     while time.time() - t0 < a.timeout:
-        if os.path.exists(p) and a.text.encode() in open(p, 'rb').read():
+        if tail.seen(pattern):
             dt = time.time() - t0
             out.line(f'found {a.text!r} after {dt:.1f}s')
             out.set(found=True, seconds=round(dt, 2), text=a.text)
@@ -437,12 +445,14 @@ def screenshot_to(name, path):
     dest = os.path.abspath(path)
     q.cmd('screendump', filename=dest, format='png', device='epd')
     q.close()
-    shot = os.path.join(idir(name), 'last.png')
     try:
-        import shutil; shutil.copyfile(dest, shot)
+        shutil.copyfile(dest, os.path.join(idir(name), 'last.png'))
     except OSError:
         pass
     return dest
+
+
+DIFF_THRESHOLD = 64       # a grey difference above this is a differing pixel (as tools/xic2png.py)
 
 
 def cmd_screenshot(a):
@@ -458,16 +468,11 @@ def cmd_screenshot(a):
             im2 = im2.rotate(90, expand=True)
         if im2.size != im1.size:
             im2 = im2.resize(im1.size)
-        diff = ImageChops.difference(im1, im2).point(lambda v: 255 if v > 64 else 0)
-        n = sum(1 for v in list(diff.getdata()) if v)
+        n = sum(ImageChops.difference(im1, im2).histogram()[DIFF_THRESHOLD + 1:])
         pct = 100.0 * n / (im1.size[0] * im1.size[1])
         out.line(f'{pct:.3f}% of pixels differ ({n})')
         out.set(diff=os.path.abspath(a.diff), diff_percent=round(pct, 3), diff_pixels=n)
         return 1 if n else 0
-
-
-def refresh_count(q):
-    return json.loads(q.qom_get(BOARD, 'state'))['refresh_count']
 
 
 def cmd_wait_refresh(a):
@@ -500,24 +505,20 @@ def last_input_file(name):
 
 
 def input_signature(st):
-    """The board's input counters (GT911 input sequence, button level changes), or None (an older
-    QEMU without them)."""
-    g = st.get('gt911') or {}
-    ch = (st.get('gpio_in') or {}).get('changes')
-    if 'input_seq' not in g or not isinstance(ch, dict):
-        return None
-    return [g['input_seq'], ch.get('left', 0), ch.get('right', 0), ch.get('power', 0)]
+    """The board's input counters: the GT911 input sequence and each button's level changes."""
+    ch = st['gpio_in']['changes']
+    return [st['gt911']['input_seq'], ch['left'], ch['right'], ch['power']]
 
 
 def mark_input(q, st=None, uptime_us=None):
-    """Note that an input to `q`'s instance has just ended (at `uptime_us`, default now)."""
-    name = getattr(q, 'name', None)
-    pid = pid_alive(name) if name else None
+    """Note that an input to `q`'s instance has just ended (at `uptime_us`, default the guest time
+    of `st`, the board state right after it, which is read if not given)."""
+    pid = pid_alive(q.name) if q.name else None
     if not pid:
         return
     try:
         st = st or board(q)
-        path = last_input_file(name)
+        path = last_input_file(q.name)
         tmp = f'{path}.{os.getpid()}'
         with open(tmp, 'w') as f:
             json.dump({'pid': pid, 'uptime_us': st['uptime_us'] if uptime_us is None else uptime_us,
@@ -528,10 +529,7 @@ def mark_input(q, st=None, uptime_us=None):
 
 
 def forget_input(name):
-    try:
-        os.remove(last_input_file(name))
-    except FileNotFoundError:
-        pass
+    _remove(idir(name), ('last_input.json',))
 
 
 def read_input_mark(name, pid, now_us):
@@ -550,46 +548,38 @@ def read_input_mark(name, pid, now_us):
 def wait_quiet(q, quiet_s, timeout, info=None):
     """Return True once the panel has been idle for `quiet_s` seconds of *guest* time (False after
     `timeout` host seconds). Idle: BUSY low, and neither a refresh nor an input for `quiet_s`, counted
-    from the later of the last refresh (`state.last_refresh_us`, the guest time it started) and the end
-    of the last input (`mark_input`; an input that did not come through `x4emu` counts from when it was
-    seen, see above). A panel that has already been idle that long returns at once; this used to
-    restart the clock at the call and wait the full `quiet_s` again.
+    from the later of the last refresh (`state.last_refresh_us`, the guest time it started; the call,
+    before the first refresh) and the end of the last input (`mark_input`; an input that did not come
+    through `x4emu` counts from when it was seen, see above). A panel that has already been idle that
+    long returns at once.
 
-    Before the first refresh, and with a QEMU that lacks `last_refresh_us` or the input counters, the
-    idle time starts at the call (and at every refresh seen meanwhile), as it always did. A paused VM
-    -- the deep-sleep model pauses it, so does a QMP `stop` -- leaves nothing to wait for: `quiet_s`
-    host seconds without the clock moving in a paused VM count as quiet, and a sleeping board is
-    quiet. `info` (a dict) receives `idle_s` (guest seconds idle when it returned)
-    and `waited_s` (host seconds spent here)."""
-    name = getattr(q, 'name', None)
-    pid = pid_alive(name) if name else None
+    A paused VM -- the deep-sleep model pauses it, so does a QMP `stop` -- leaves nothing to wait
+    for: `quiet_s` host seconds without the clock moving in a paused VM count as quiet, and a sleeping
+    board is quiet. `info` (a dict) receives `idle_s` (guest seconds idle when it returned) and
+    `waited_s` (host seconds spent here)."""
+    pid = pid_alive(q.name) if q.name else None
     t0 = time.time()
     st = board(q)
     g_call = g_moved = st['uptime_us']
     t_moved = t0
-    count, g_count = st['refresh_count'], g_call     # the fallback: refreshes seen from here on
-    guest_idle = 'last_refresh_us' in st and input_signature(st) is not None
     first_seen = {}                                  # input counters -> guest time first seen here
     while True:
         now = time.time()
         g = st['uptime_us']
         if g != g_moved:
             g_moved, t_moved = g, now
-        if st['refresh_count'] != count:
-            count, g_count = st['refresh_count'], g
-        since = st['last_refresh_us'] if guest_idle and st['refresh_count'] else g_count
-        if guest_idle:
-            sig = input_signature(st)
-            seen = first_seen.setdefault(tuple(sig), g)
-            m = read_input_mark(name, pid, g)
-            if m is not None and m.get('sig') == sig:
-                since = max(since, int(m['uptime_us']))
-            else:
-                since = max(since, seen)
-                if seen == g_call and q.name:       # unmarked input before the call: remember it
-                    mark_input(q, st, g_call)
+        since = st['last_refresh_us'] if st['refresh_count'] else g_call
+        sig = input_signature(st)
+        seen = first_seen.setdefault(tuple(sig), g)
+        m = read_input_mark(q.name, pid, g)
+        if m is not None and m.get('sig') == sig:
+            since = max(since, int(m['uptime_us']))
+        else:
+            since = max(since, seen)
+            if seen == g_call and q.name:       # unmarked input before the call: remember it
+                mark_input(q, st, g_call)
         idle_s = (g - since) / 1e6
-        paused = now - max(t_moved, t0) >= quiet_s and vm_paused(q)
+        paused = now - t_moved >= quiet_s and vm_paused(q)
         done = (not st['busy'] and idle_s >= quiet_s) or paused or st.get('sleep', {}).get('sleeping')
         if done or now - t0 >= timeout:
             if info is not None:
@@ -617,10 +607,10 @@ def cmd_wait_quiet(a):
 # input is held the way a finger holds it, in guest terms:
 #   - at least --ms of *guest* time (state.uptime_us), and
 #   - until the firmware has seen it: for the GT911 (touch, the Home pad) until it has consumed a
-#     frame that carries it (`state.gt911.read_seq` reaching the input's `input_seq`; with an older
-#     QEMU, until `clears` moves); for a button until the firmware has sampled the pressed level
-#     BUTTON_SAMPLES times, sample-gap-us of guest time apart (`state.gpio_in.samples`: CrossPoint
-#     commits a button change only when two polls more than 5 ms apart agree);
+#     frame that carries it (`state.gt911.read_seq` reaching the input's `input_seq`); for a button
+#     until the firmware has sampled the pressed level BUTTON_SAMPLES times, sample-gap-us of guest
+#     time apart (`state.gpio_in.samples`: CrossPoint commits a button change only when two polls
+#     more than 5 ms apart agree);
 #   - and then released, and held released until the firmware has seen the release as well (the
 #     next input cannot merge with this one, and `--wait` starts from an input the firmware has
 #     completed).
@@ -631,27 +621,14 @@ RELEASE_MAX_S = 5.0       # host seconds `x4emu` waits for the firmware to see t
 BUTTON_SAMPLES = 2        # samples of the pressed (and then the released) level a button waits for
 BUTTON_SEEN_MAX_S = 2.0   # a button is not held past this (host s) for want of samples: a long hold
                           # changes its meaning (power >= 400 ms sleeps CrossPoint)
+SWIPE_POINT_MS = 20       # guest ms between two points of a swipe
+SWIPE_POINT_MAX_S = 0.5   # host seconds a swipe point waits to be read
+STALL_S = 2.0             # host seconds of a standing guest clock in a paused VM that end a hold
+INPUT_QUIET_MAX_S = 30    # host seconds an input's --quiet waits for an idle panel (then it goes ahead)
 
-
-def board(q):
-    s = q.qom_get(BOARD, 'state')
-    return json.loads(s) if isinstance(s, str) else s
-
-
-def after_input(q, n0, a):
-    """With --wait: report the refresh the input triggered (and fail if none came)."""
-    out.set(refresh=None, refresh_after_s=None)
-    if getattr(a, 'wait', 0):
-        t0 = time.time()
-        while time.time() - t0 < a.wait:
-            n = refresh_count(q)
-            if n > n0:
-                dt = time.time() - t0
-                out.line(f'refresh {n} started {dt:.2f}s after the input')
-                out.set(refresh=n, refresh_after_s=round(dt, 2))
-                return
-            time.sleep(0.02)
-        sys.exit(f'no refresh within {a.wait}s after the input (count still {n0})')
+# The tail of an input's human line: (what the firmware did with it, what it says when it did not)
+GT911_NOTE = ('read', f'not read by the firmware within {SEEN_MAX_S:.0f} s')
+BUTTON_NOTE = ('sampled', f'not sampled {BUTTON_SAMPLES}x by the firmware within {BUTTON_SEEN_MAX_S:.0f} s')
 
 
 def vm_paused(q):
@@ -666,11 +643,11 @@ def hold_until(q, ms, seen, max_s):
     """Keep an input as it is for at least `ms` of guest time and until `seen(state)` holds.
 
     `max_s` (host seconds) bounds the wait for `seen`; the guest-time part is bounded too: it gives
-    up once the guest clock has stood still for 2 host seconds in a paused VM (deep sleep, a `stop`)
-    or after 20x its length in host time. A clock that stands still in a *running* VM does not end
-    it: under `-icount` guest time only moves with executed instructions, and a vCPU blocked on the
-    host's disk or CPU for a moment would otherwise cut the hold short. Returns (host seconds until
-    `seen` first held, or None; guest ms the input was held; the last state)."""
+    up once the guest clock has stood still for STALL_S host seconds in a paused VM (deep sleep, a
+    `stop`) or after 20x its length in host time. A clock that stands still in a *running* VM does
+    not end it: under `-icount` guest time only moves with executed instructions, and a vCPU blocked
+    on the host's disk or CPU for a moment would otherwise cut the hold short. Returns (host seconds
+    until `seen` first held, or None; guest ms the input was held; the last state)."""
     t0 = time.time()
     st = board(q)
     g0 = g_last = st['uptime_us']
@@ -683,7 +660,7 @@ def hold_until(q, ms, seen, max_s):
         held_ms = (st['uptime_us'] - g0) / 1000.0
         if st['uptime_us'] != g_last:
             g_last, t_moved = st['uptime_us'], now
-        stalled = now - t_moved >= 2.0 and vm_paused(q)
+        stalled = now - t_moved >= STALL_S and vm_paused(q)
         held = held_ms >= ms or stalled or now - t0 >= 20 * ms / 1000.0 + max_s
         if held and (seen_at is not None or now - t0 >= max_s or stalled):
             return seen_at, held_ms, st
@@ -691,99 +668,96 @@ def hold_until(q, ms, seen, max_s):
         st = board(q)
 
 
-def _gt911_seen(q, clears0):
-    """A predicate "the firmware has consumed the frame carrying the input just set". With the GT911
-    model's frame sequence numbers (input_seq / read_seq) that is exact; an older QEMU only offers
-    `clears`, i.e. "some frame was consumed since"."""
-    g = board(q)['gt911']
-    if 'input_seq' in g:
-        seq = g['input_seq']
-        return lambda st: st['gt911']['read_seq'] >= seq
-    return lambda st: st['gt911']['clears'] > clears0
+def release(q, seen, max_s):
+    """Hold an input that was just released until `seen` (the firmware has seen the release, at most
+    `max_s` host seconds), and note its end for wait-quiet. Returns host seconds until seen, or None."""
+    rel_at, _, st = hold_until(q, 0, seen, max_s)
+    mark_input(q, st)
+    return rel_at
 
 
-def gt911_input(q, prop, down, up, ms, max_s=SEEN_MAX_S):
-    """Assert a GT911 input (`touch` points or the `home` key), hold it (see above), release it and
-    wait for the release to be consumed. Returns (read_at, held_ms, release_read_at)."""
-    c0 = board(q)['gt911']['clears']
-    q.qom_set(INPUT, prop, down)
-    read_at, held_ms, st = hold_until(q, ms, _gt911_seen(q, c0), max_s)
-    c1 = st['gt911']['clears']
-    q.qom_set(INPUT, prop, up)
-    released = _gt911_seen(q, c1)
-    rel_at, _, _ = hold_until(q, 0, released, RELEASE_MAX_S)
-    mark_input(q)
-    return read_at, held_ms, rel_at
+def gt911_set(q, prop, value):
+    """Set a GT911 input (`touch` points or the `home` key); returns the predicate "the firmware has
+    consumed a frame carrying it" (the model numbers every input change, `state.gt911.input_seq`,
+    and reports the number of the last frame the firmware cleared, `read_seq`)."""
+    q.qom_set(INPUT, prop, value)
+    seq = board(q)['gt911']['input_seq']
+    return lambda st: st['gt911']['read_seq'] >= seq
 
 
-def _read_note(read_at, rel_at=None, what='the firmware'):
-    s = (f', read by {what} after {read_at:.2f}s' if read_at is not None
-         else f', not read by {what} within {SEEN_MAX_S:.0f} s')
-    if read_at is not None and rel_at is None:
-        s += ', release not read'
-    return s
-
-
-def gt911_clears(q):
-    return board(q)['gt911']['clears']
+def gt911_input(q, prop, down, up, ms):
+    """Assert a GT911 input, hold it (see above), release it and wait for the release to be
+    consumed. Returns (read_at, held_ms, release_read_at)."""
+    read_at, held_ms, _ = hold_until(q, ms, gt911_set(q, prop, down), SEEN_MAX_S)
+    return read_at, held_ms, release(q, gt911_set(q, prop, up), RELEASE_MAX_S)
 
 
 def button_input(q, buttons, ms):
     """Press `buttons` together, hold them (see above), release them, and wait until the firmware
-    has sampled the release. Returns (read_at, held_ms, release_read_at, samples while pressed)."""
-    sampled = 'gpio_in' in board(q)
+    has sampled the release. Returns (read_at, held_ms, release_read_at)."""
     for b in buttons:
         q.qom_set(INPUT, f'btn-{b}', True)
-    if sampled:
-        def seen(st):
-            return all(st['gpio_in']['samples'][b] >= BUTTON_SAMPLES for b in buttons)
-    else:
-        def seen(st):                                     # an older QEMU: guest time alone
-            return False
-    read_at, held_ms, st = hold_until(q, ms, seen, BUTTON_SEEN_MAX_S if sampled else 0)
-    pressed_samples = {b: st['gpio_in']['samples'][b] for b in buttons} if sampled else None
+
+    def sampled(st):          # the model counts the samples of each pin's current level
+        return all(st['gpio_in']['samples'][b] >= BUTTON_SAMPLES for b in buttons)
+    read_at, held_ms, _ = hold_until(q, ms, sampled, BUTTON_SEEN_MAX_S)
     for b in buttons:
         q.qom_set(INPUT, f'btn-{b}', False)
-    rel_at = None
-    if sampled:
-        def released(st):
-            # a press that put the firmware to sleep is not going to be sampled again
-            return st.get('sleep', {}).get('sleeping') or seen(st)
-        rel_at, _, _ = hold_until(q, 0, released, BUTTON_SEEN_MAX_S)
-    mark_input(q)
-    return read_at, held_ms, rel_at, pressed_samples
+    # a press that put the firmware to sleep is not going to be sampled again
+    rel_at = release(q, lambda st: st.get('sleep', {}).get('sleeping') or sampled(st), BUTTON_SEEN_MAX_S)
+    return read_at, held_ms, rel_at
 
 
-def _button_note(read_at, rel_at, sampled):
-    if not sampled:
-        return ''
+def before_input(q, a):
+    """An input's --quiet (wait for an idle panel first); returns the refresh count --wait counts from."""
+    if a.quiet:
+        wait_quiet(q, a.quiet, INPUT_QUIET_MAX_S)
+    return refresh_count(q)
+
+
+def after_input(q, n0, a):
+    """With --wait: report the refresh the input triggered (and fail if none came)."""
+    out.set(refresh=None, refresh_after_s=None)
+    if a.wait:
+        t0 = time.time()
+        while time.time() - t0 < a.wait:
+            n = refresh_count(q)
+            if n > n0:
+                dt = time.time() - t0
+                out.line(f'refresh {n} started {dt:.2f}s after the input')
+                out.set(refresh=n, refresh_after_s=round(dt, 2))
+                return
+            time.sleep(0.02)
+        sys.exit(f'no refresh within {a.wait}s after the input (count still {n0})')
+
+
+def seen_note(read_at, rel_at, note):
+    verb, unseen = note
     if read_at is None:
-        return f', not sampled {BUTTON_SAMPLES}x by the firmware within {BUTTON_SEEN_MAX_S:.0f} s'
-    return f', sampled by the firmware after {read_at:.2f}s' + ('' if rel_at is not None else ', release not sampled')
+        return f', {unseen}'
+    return f', {verb} by the firmware after {read_at:.2f}s' + ('' if rel_at is not None else f', release not {verb}')
+
+
+def held_fields(ms, held_ms, read_at, rel_at):
+    """The `--json` fields of a held input (press, hold, chord, tap, home)."""
+    return dict(ms=ms, held_ms=round(held_ms), read_after_s=None if read_at is None else round(read_at, 2),
+                release_read=rel_at is not None)
 
 
 @records('button ms wait quiet', also=('hold',))
 def cmd_press(a):
     q = connect(a.name)
-    if a.button == 'power' and a.ms < 1500:
+    if a.button == 'power' and a.ms < 1500 and board(q).get('sleep', {}).get('sleeping'):
         # A wake from deep sleep must still be held when CrossPoint verifies it (~1.3 s after
         # the reset), otherwise the firmware goes straight back to sleep. Hold long enough (guest
         # time: the paused VM's clock starts again with the wake).
-        try:
-            if board(q).get('sleep', {}).get('sleeping'):
-                out.line('device is in deep sleep: holding power for 1500 ms to wake it')
-                out.set(woke_from_deep_sleep=True)
-                a.ms = 1500
-        except Exception:
-            pass
-    if getattr(a, 'quiet', 0):
-        wait_quiet(q, a.quiet, 30)
-    n0 = refresh_count(q)
-    sampled = 'gpio_in' in board(q)
-    read_at, held_ms, rel_at, _ = button_input(q, [a.button], a.ms)
-    out.line(f'pressed {a.button} for {a.ms} ms' + _button_note(read_at, rel_at, sampled))
-    out.set(button=a.button, ms=a.ms, held_ms=round(held_ms), read_after_s=None if read_at is None else round(read_at, 2),
-            release_read=None if not sampled else rel_at is not None)
+        out.line('device is in deep sleep: holding power for 1500 ms to wake it')
+        out.set(woke_from_deep_sleep=True)
+        a.ms = 1500
+    n0 = before_input(q, a)
+    read_at, held_ms, rel_at = button_input(q, [a.button], a.ms)
+    out.line(f'pressed {a.button} for {a.ms} ms' + seen_note(read_at, rel_at, BUTTON_NOTE))
+    out.set(button=a.button, **held_fields(a.ms, held_ms, read_at, rel_at))
     after_input(q, n0, a)
 
 
@@ -796,58 +770,42 @@ def to_gt911(x, y):
 def cmd_chord(a):
     """Press several buttons at once (e.g. power right = CrossPoint's screenshot chord)."""
     q = connect(a.name)
-    if getattr(a, 'quiet', 0):
-        wait_quiet(q, a.quiet, 30)
-    n0 = refresh_count(q)
-    sampled = 'gpio_in' in board(q)
-    read_at, held_ms, rel_at, _ = button_input(q, list(a.buttons), a.ms)
-    out.line(f'chord {"+".join(a.buttons)} for {a.ms} ms' + _button_note(read_at, rel_at, sampled))
-    out.set(buttons=list(a.buttons), ms=a.ms, held_ms=round(held_ms),
-            read_after_s=None if read_at is None else round(read_at, 2),
-            release_read=None if not sampled else rel_at is not None)
+    n0 = before_input(q, a)
+    read_at, held_ms, rel_at = button_input(q, list(a.buttons), a.ms)
+    out.line(f'chord {"+".join(a.buttons)} for {a.ms} ms' + seen_note(read_at, rel_at, BUTTON_NOTE))
+    out.set(buttons=list(a.buttons), **held_fields(a.ms, held_ms, read_at, rel_at))
     after_input(q, n0, a)
 
 
 @records('x y ms wait quiet')
 def cmd_tap(a):
     q = connect(a.name)
-    if getattr(a, 'quiet', 0):
-        wait_quiet(q, a.quiet, 30)
-    n0 = refresh_count(q)
+    n0 = before_input(q, a)
     rx, ry = to_gt911(a.x, a.y)
     read_at, held_ms, rel_at = gt911_input(q, 'touch', json.dumps([{'x': rx, 'y': ry}]), '[]', a.ms)
-    out.line(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})' + _read_note(read_at, rel_at))
-    out.set(x=a.x, y=a.y, gt911=[rx, ry], ms=a.ms, held_ms=round(held_ms),
-            read_after_s=None if read_at is None else round(read_at, 2), release_read=rel_at is not None)
+    out.line(f'tapped ({a.x},{a.y}) -> gt911 ({rx},{ry})' + seen_note(read_at, rel_at, GT911_NOTE))
+    out.set(x=a.x, y=a.y, gt911=[rx, ry], **held_fields(a.ms, held_ms, read_at, rel_at))
     after_input(q, n0, a)
 
 
 @records('x1 y1 x2 y2 ms wait quiet')
 def cmd_swipe(a):
-    """A drag from (x1,y1) to (x2,y2) in landscape pixels: one GT911 point every ~20 ms of guest time
-    over --ms, each held until the firmware has consumed a frame carrying it (up to 0.5 s; the model
-    reports only the latest point, so a point the firmware never read would be lost and the gesture
-    misread), the release held until consumed as well. Firmware sees a complete, evenly sampled
-    gesture whatever its polling cadence."""
+    """A drag from (x1,y1) to (x2,y2) in landscape pixels: one GT911 point every SWIPE_POINT_MS of
+    guest time over --ms, each held until the firmware has consumed a frame carrying it (up to
+    SWIPE_POINT_MAX_S; the model reports only the latest point, so a point the firmware never read
+    would be lost and the gesture misread), the release held until consumed as well. Firmware sees a
+    complete, evenly sampled gesture whatever its polling cadence."""
     q = connect(a.name)
-    if getattr(a, 'quiet', 0):
-        wait_quiet(q, a.quiet, 30)
-    n0 = refresh_count(q)
-    steps = max(2, a.ms // 20)
+    n0 = before_input(q, a)
+    steps = max(2, a.ms // SWIPE_POINT_MS)
     per_ms = a.ms / steps
     unread = 0
     for i in range(steps + 1):
-        x = a.x1 + (a.x2 - a.x1) * i // steps
-        y = a.y1 + (a.y2 - a.y1) * i // steps
-        rx, ry = to_gt911(x, y)
-        c0 = gt911_clears(q)
-        q.qom_set(INPUT, 'touch', json.dumps([{'x': rx, 'y': ry}]))
-        if hold_until(q, per_ms, _gt911_seen(q, c0), 0.5)[0] is None:
+        rx, ry = to_gt911(a.x1 + (a.x2 - a.x1) * i // steps, a.y1 + (a.y2 - a.y1) * i // steps)
+        if hold_until(q, per_ms, gt911_set(q, 'touch', json.dumps([{'x': rx, 'y': ry}])),
+                      SWIPE_POINT_MAX_S)[0] is None:
             unread += 1
-    c1 = gt911_clears(q)
-    q.qom_set(INPUT, 'touch', '[]')
-    rel_at = hold_until(q, 0, _gt911_seen(q, c1), RELEASE_MAX_S)[0]
-    mark_input(q)
+    rel_at = release(q, gt911_set(q, 'touch', '[]'), RELEASE_MAX_S)
     out.line(f'swiped ({a.x1},{a.y1})->({a.x2},{a.y2}) in {steps + 1} points'
              + (f', {unread} not read by the firmware' if unread else ', every point read by the firmware')
              + ('' if rel_at is not None else ', release not read'))
@@ -859,13 +817,10 @@ def cmd_swipe(a):
 def cmd_home(a):
     """The capacitive Home pad (GT911 key bit): held for at least --ms and until the firmware reads it."""
     q = connect(a.name)
-    if getattr(a, 'quiet', 0):
-        wait_quiet(q, a.quiet, 30)
-    n0 = refresh_count(q)
+    n0 = before_input(q, a)
     read_at, held_ms, rel_at = gt911_input(q, 'home', True, False, a.ms)
-    out.line(f'home for {a.ms} ms' + _read_note(read_at, rel_at))
-    out.set(ms=a.ms, held_ms=round(held_ms), read_after_s=None if read_at is None else round(read_at, 2),
-            release_read=rel_at is not None)
+    out.line(f'home for {a.ms} ms' + seen_note(read_at, rel_at, GT911_NOTE))
+    out.set(**held_fields(a.ms, held_ms, read_at, rel_at))
     after_input(q, n0, a)
 
 
@@ -885,9 +840,7 @@ def cmd_battery(a):
 
 def cmd_light(a):
     """Frontlight: LEDC duty of the channels routed to GPIO8 (cool) and GPIO9 (warm)."""
-    q = connect(a.name)
-    s = json.loads(q.qom_get(BOARD, 'state'))
-    chans = s.get('ledc', {}).get('channels', [])
+    chans = board(connect(a.name)).get('ledc', {}).get('channels', [])
     res = {'cool': None, 'warm': None, 'channels': chans}
     for c in chans:
         if c['gpio'] == 8: res['cool'] = c['duty_permille']

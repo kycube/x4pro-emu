@@ -1,34 +1,27 @@
 """In-process entry points for the CLI, for callers that want a result back instead of stdout: the
-`x4emu shell` REPL and `tools/x4emu_mcp.py` (see docs/x4emu.md, "In-process API").
+`x4emu shell` REPL, `tools/x4emu_mcp.py` and `tools/parity.py` (see docs/x4emu.md, "In-process API").
 
 `run(argv, name=None)` mirrors `--json`: it returns the JSON object the command would have printed
 (the shapes documented per-command in docs/x4emu.md), or on any failure — a bad argument, a
 command's own `sys.exit`, an unexpected exception — an error object carrying whatever fields the
 command had already gathered plus `"error"` and `"rc"` (the exit code the real CLI would have used).
-It never raises `SystemExit` and never prints anything.
+`"rc"` is there whenever that exit code is not 0: also, without `"error"`, for a result the CLI
+reports through its exit code alone (`screenshot --diff` with differing pixels: `"rc": 1`). It never
+raises `SystemExit` and never prints anything.
 
 `run_text(argv, name=None)` mirrors plain human-mode output: it returns the text the command would
-have printed to stdout. On failure it raises `RuntimeError` (never `SystemExit`) carrying that same
-text plus the failure message, which is the contract `tools/x4emu_mcp.py`'s old subprocess helper
-(`_x4`) had, so tools built on it did not need to change their error handling.
+have printed to stdout (whatever its exit code). On failure it raises `RuntimeError` (never
+`SystemExit`) carrying that same text plus the failure message.
 
 Both build the parser exactly as `cli.build_parser()` does and call the same command functions
-`main()` calls; only the presentation differs, via `output.Out`'s `collect` mode (see
-`output.suspended`, the pattern this borrows: swap `out`'s state, run the command, put it back).
+`main()` calls; only the presentation differs, via `output.Out`'s `collect` mode, and `out` is put
+back as it was afterwards (`output.preserved`).
 """
 import contextlib
 import io
 
 from . import cli
-from .output import out
-
-
-def _snapshot():
-    return (out.json_mode, out.collect, out.data, out._raw, out._done, out._text, out._collected)
-
-
-def _restore(saved):
-    (out.json_mode, out.collect, out.data, out._raw, out._done, out._text, out._collected) = saved
+from .output import out, preserved
 
 
 def _parse(full_argv):
@@ -43,59 +36,42 @@ def _parse(full_argv):
         return None, (stderr.getvalue().strip() or f'usage error (exit {code})'), code
 
 
-def _full_argv(argv, name):
-    return (['--name', str(name)] if name is not None else []) + list(argv)
+def _call(argv, name, json_mode):
+    """Run one command with `out` collecting. Returns (the failure message or None, the exit code
+    the CLI would have used)."""
+    out.configure(json_mode, collect=True)
+    a, err, code = _parse((['--name', str(name)] if name is not None else []) + list(argv))
+    if err is not None:
+        return err, code
+    try:
+        rc = a.fn(a)
+    except SystemExit as e:
+        return (e.code if isinstance(e.code, str) else f'exit {e.code}'), 1
+    except Exception as e:
+        return f'{type(e).__name__}: {e}', 1
+    out.finish()
+    return None, rc or 0
 
 
 def run(argv, name=None):
-    """Run one CLI command in-process; return its `--json` object. Never raises, never prints."""
-    saved = _snapshot()
-    try:
-        out.configure(True, collect=True)
-        a, err, code = _parse(_full_argv(argv, name))
+    """Run one CLI command in-process; return its `--json` object (plus `"rc"` when the exit code
+    would not be 0). Never raises, never prints."""
+    with preserved():
+        err, rc = _call(argv, name, True)
         if err is not None:
-            return {'error': err, 'rc': code}
-        try:
-            rc = a.fn(a)
-        except SystemExit as e:
-            out.error(e.code if isinstance(e.code, str) else f'exit {e.code}')
-            payload = dict(out.collected() or {})
-            payload['rc'] = 1
-            return payload
-        except Exception as e:
-            out.error(f'{type(e).__name__}: {e}')
-            payload = dict(out.collected() or {})
-            payload['rc'] = 1
-            return payload
-        out.finish()
-        return dict(out.collected() or {})
-    finally:
-        _restore(saved)
-
-
-def _fail_text(msg):
-    text = out.text()
-    if not text:
-        return msg
-    return text + ('' if text.endswith('\n') else '\n') + msg
+            out.error(err)
+        result = dict(out.collected() or {})
+        if err is not None or rc:
+            result['rc'] = rc
+        return result
 
 
 def run_text(argv, name=None):
     """Run one CLI command in-process; return the human text it would have printed. Raises
     `RuntimeError` (never `SystemExit`) if the command fails."""
-    saved = _snapshot()
-    try:
-        out.configure(False, collect=True)
-        a, err, code = _parse(_full_argv(argv, name))
+    with preserved():
+        err, _ = _call(argv, name, False)
+        text = out.text()
         if err is not None:
-            raise RuntimeError(err)
-        try:
-            a.fn(a)
-        except SystemExit as e:
-            raise RuntimeError(_fail_text(e.code if isinstance(e.code, str) else f'exit {e.code}')) from None
-        except Exception as e:
-            raise RuntimeError(_fail_text(f'{type(e).__name__}: {e}')) from None
-        out.finish()
-        return out.text()
-    finally:
-        _restore(saved)
+            raise RuntimeError(text + ('' if text.endswith('\n') else '\n') + err if text else err)
+        return text

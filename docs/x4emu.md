@@ -13,8 +13,9 @@ and an agent. With `--json` every command prints one JSON object and nothing els
   `shell`/`watch` subcommands — see "Developer experience" below).
 - `tools/x4emu` is a thin shim that imports the package straight from the checkout (and pins
   `X4EMU_ROOT` to it), so nothing has to be installed to use the repository exactly as before.
-- The MCP server (`tools/x4emu_mcp.py`) and `tests/` call `tools/x4emu` and parse its human output;
-  that output is a contract and does not change.
+- `tests/` call `tools/x4emu` and parse some of its human output, and the MCP server
+  (`tools/x4emu_mcp.py`) runs the package in-process and hands that text to agents: the output is a
+  contract and does not change.
 
 ## Install
 
@@ -141,8 +142,8 @@ decided)`). **With `MS`** the button is held for MS ms of *guest* time (`state.u
 the console says — for a deliberately short hold, say (`decision=2 reason=3` in the preflight's line
 means it was too short). A guest clock that stands still for 2 host seconds ends either hold only in
 a paused VM: under `-icount` a vCPU blocked on the host's disk for a moment stops the clock too, and
-that must not release the button early. The flag cannot be combined with `--gdb`, which owns the halted start. `flash-app` repeats the same kind
-of hold when it relaunches such an instance.
+that must not release the button early. The flag cannot be combined with `--gdb`, which owns the
+halted start. `flash-app` repeats the same kind of hold when it relaunches such an instance.
 
 The stock's WiFi start survives the cold boot as well: a POWERON boot runs ESP-IDF's full PHY
 calibration, whose PLL-lock and DC-offset polls the emulator answers, and the driver gives up without
@@ -208,9 +209,9 @@ boot itself), noted in `.x4emu/NAME/last_input.json` with the QEMU pid it went t
 earlier boot is never used. An input that reached the board some other way (a raw `x4emu qmp`
 qom-set, another QMP client) shows as moved input counters (`state.gt911.input_seq`,
 `state.gpio_in.changes`) and counts from the moment `wait-quiet` saw them move — at the latest the
-call, as before. Before the first refresh, and with a QEMU without those fields, the idle time
-starts at the call. A sleeping board (the deep-sleep model pauses the VM) is quiet, and so is a VM
-paused some other way (a QMP `stop`) once its clock has stood still for S host seconds.
+call, as before. Before the first refresh the idle time starts at the call. A sleeping board (the
+deep-sleep model pauses the VM) is quiet, and so is a VM paused some other way (a QMP `stop`) once
+its clock has stood still for S host seconds.
 
 ### Input
 
@@ -246,8 +247,9 @@ clear. Before that, a release landing between the firmware's status read and its
 unseen — the firmware then believed the finger or the pad was still down, the tap never completed and
 the *next* input continued the stuck contact; that was the "read by the firmware after 0.03 s, no
 refresh within 30 s" loss of about one input per full test run (`tests/test_input_delivery.py`).
-With a QEMU that predates these counters (`state.gt911.input_seq`, `state.gpio_in`), `tap`/`home`
-fall back to `clears` and buttons to the guest-time hold alone.
+The counters (`state.gt911.input_seq`/`read_seq`, `state.gpio_in`) come with qemu-patches 0023 and
+0024, and the input commands and `wait-quiet` need them: a QEMU built before those fails with a
+`KeyError` naming the field (`make build`).
 
 | Command | Arguments | `--json` object |
 |---|---|---|
@@ -258,8 +260,7 @@ fall back to `clears` and buttons to the guest-time hold alone.
 | `home` | `--ms 250`, `--wait S`, `--quiet S` | `{"ms", "held_ms", "read_after_s", "release_read", "refresh", "refresh_after_s"}` — the capacitive Home pad (Back in the stock) |
 | `swipe` | `X1 Y1 X2 Y2`, `--ms 250`, `--wait S`, `--quiet S` | `{"x1", "y1", "x2", "y2", "points", "unread", "release_read", "refresh", "refresh_after_s"}` |
 
-`held_ms` is the guest time the input was held; `release_read` is `null` for a button on a QEMU
-without `state.gpio_in`.
+`held_ms` is the guest time the input was held.
 
 ### Guest time, record and replay
 
@@ -348,7 +349,7 @@ back to back instead, which is the way to reuse a journal as a plain macro on a 
 ### Developer experience: `shell`, `watch`, the in-process API
 
 `x4emu/api.py` runs one CLI command **in-process** — no subprocess, no printing, and it never raises
-`SystemExit` — and is what `shell` below and `tools/x4emu_mcp.py` are built on:
+`SystemExit` — and is what `shell` below, `tools/x4emu_mcp.py` and `tools/parity.py` are built on:
 
 - `api.run(argv, name=None) -> dict` builds the parser exactly as the CLI does, runs the command,
   and returns its `--json` object. `argv` is the subcommand and its own arguments (`['state']`,
@@ -357,16 +358,17 @@ back to back instead, which is the way to reuse a journal as a plain macro on a 
   value is exactly the `--json` object documented above for that command. On failure — a bad
   argument, a command's own `sys.exit`, an unexpected exception — it returns that same object
   merged with `"error"` (as `--json` does) plus `"rc"`, the exit code the real CLI would have used;
-  it never prints anything and never raises.
+  it never prints anything and never raises. `"rc"` is present whenever that exit code is not 0, so
+  a result the CLI reports through its exit code alone carries it without `"error"`: `screenshot
+  --diff` with differing pixels returns its normal object plus `"rc": 1` (no `"rc"` means exit 0).
 - `api.run_text(argv, name=None) -> str` is the human-mode equivalent: it returns the text the
-  command would have printed to stdout. On failure it raises `RuntimeError` (never `SystemExit`)
-  carrying that text plus the failure message — the same contract `tools/x4emu_mcp.py`'s old
-  subprocess helper had, so callers built on it did not need to change their error handling.
+  command would have printed to stdout, whatever its exit code. On failure it raises `RuntimeError`
+  (never `SystemExit`) carrying that text plus the failure message.
 
 Both are implemented via `output.Out`'s `collect` mode (`out.configure(json_mode, collect=True)`,
 `out.collected()` / `out.text()`): the human lines and the final JSON object are buffered instead of
-printed, then the API function restores `out`'s prior state before returning (the same
-save-then-restore shape as `output.suspended()`, which `replay` uses for the same reason).
+printed, inside `output.preserved()`, which puts `out` back as it was afterwards (`replay` runs its
+steps inside `output.suspended()`, built on the same block).
 
 | Command | Arguments | Notes |
 |---|---|---|
@@ -404,8 +406,14 @@ x4emu --json --name dev0 wait-quiet --seconds 2
 x4emu --json --name dev0 tap 345 350 --quiet 2 --wait 20 | jq .refresh_after_s
 x4emu --json --name dev0 screenshot /tmp/browse.png --diff tests/golden/device-home-screenshot-3824.bmp
 
-# the stock firmware, cold boot: no deep-sleep/wake detour, Home is refresh 2 plus an idle panel
-x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img --boot-hold-power
+# the stock firmware, cold boot: no deep-sleep/wake detour, Home is refresh 2 plus an idle panel.
+# The flash is a copy of the device dump with its credentials blanked (`redact`, which also sets
+# net_en 0); the card is built from the device's files, which hold the stock's external font and
+# cache plans (images/sd-device.img lacks them)
+.venv/bin/python tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin
+.venv/bin/python tools/nvsedit.py images/stock.bin redact
+.venv/bin/python tools/mksd.py images/sd-full.img --size 256M --src images/device/sd-files
+x4emu --name stock run --flash images/stock.bin --sd images/sd-full.img --boot-hold-power
 x4emu --name stock wait-text "main_task: Returned from app_main()" --timeout 60
 x4emu --name stock wait-refresh --total 2 --timeout 90    # 1 = panel init, 2 = Home; 3 is the clock
 x4emu --name stock wait-quiet --seconds 2
