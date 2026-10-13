@@ -86,7 +86,9 @@ make test       # models unit tests + fixture replay + pytest end-to-end (no dev
 ```
 
 Homebrew/apt packages: git build-essential ninja meson pkg-config glib pixman libgcrypt libslirp
-libpng mtools dosfstools python3 platformio (`pio`). On macOS also `coreutils` (gtimeout) is handy.
+libpng mtools dosfstools python3, plus a Python 3.10–3.14 for PlatformIO: `make firmware` installs pioarduino's
+core v6.1.19 into `.venv-pio` (Homebrew's `platformio` runs on Python 3.15, which the pinned platform refuses;
+`make firmware PIO=pio` uses one on PATH). On macOS also `coreutils` (gtimeout) is handy.
 CI: `.github/workflows/ci.yml` runs exactly `make setup && make build && make test` on Ubuntu 24.04
 (cached QEMU tree and PlatformIO packages; screenshots and `.x4emu/*/` logs uploaded as artifacts).
 The stock tests skip there (the device dump never leaves `images/`); `make test PYTEST_ARGS=…` passes

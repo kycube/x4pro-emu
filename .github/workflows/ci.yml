@@ -130,7 +130,8 @@ jobs:
         run: make setup
 
       - name: make build
-        run: make build
+        # PIO=pio: the core installed above, not the Makefile's own .venv-pio (same version)
+        run: make build PIO=pio
 
       - name: Save QEMU cache
         # Saved here rather than at job end so a red test run still leaves a usable QEMU cache.

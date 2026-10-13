@@ -161,10 +161,10 @@ cloned `--depth 1` may need `git fetch --unshallow` before the rebase.
 
 The desk Mac's setup on a clean GitHub arm64 Mac: `brew update`, then CLAUDE.md's packages plus the two
 QEMU's configure finds on the desk Mac by itself (gnutls, which the Makefile's `--disable-gnutls` must
-keep out, and libusb), Homebrew's PlatformIO; `make setup`; **a fresh QEMU configure** with the
+keep out, and libusb) and python@3.14 for PlatformIO's venv; `make setup`; **a fresh QEMU configure** with the
 Makefile's own line (nothing of QEMU is cached); the models and their tests; pytest before any firmware
 exists, so only the fast cases run (the CrossPoint and stock ones skip themselves, `tests/test_aes.py`
-runs the emulator through qtest); the pinned CrossPoint built with Homebrew's PlatformIO; one boot to
+runs the emulator through qtest); the pinned CrossPoint built with the Makefile's PlatformIO venv (`.venv-pio`); one boot to
 Home (`tests/test_boot.py::test_boot_to_home_and_press_right`). The summary lists the formula versions
 and every step's outcome; a failed configure appends the tail of `meson-log.txt` (the whole file and
 `config.log` are in the `macos-build-logs` artifact).
@@ -174,7 +174,7 @@ qemu`; the fix usually goes into the Makefile's configure line (a `--disable-<fe
 dependency QEMU auto-detects), as `--disable-gnutls` did. A green run with a red desk Mac points at the
 local section of the report (stale kegs, a broken venv), not at Homebrew.
 
-Only the PlatformIO packages are cached (`~/.platformio` without `penv`, keyed by Homebrew's PlatformIO
+Only the PlatformIO packages are cached (`~/.platformio` without `penv`, keyed by the venv's PlatformIO
 version and `platformio.ini`): `penv`'s `pyvenv.cfg` names a Cellar Python that the next `python@3`
 bottle removes.
 
@@ -189,3 +189,9 @@ bottle removes.
 - `tests/conftest.py` — `--golden-drift FILE`, `GOLDEN_ORACLES`, the health check.
 - `.github/workflows/upstream.yml` — the four jobs; its shared parts are copies of ci.yml's (keep them in
   step).
+
+**Found on its first run (2026-10-13).** Homebrew's `platformio` formula now runs on Python 3.15, and
+the pinned pioarduino platform (55.03.311) refuses anything past 3.14 ("Python version must be 3.10 …
+3.14"). The Makefile therefore keeps PlatformIO in its own `.venv-pio` (pioarduino's core v6.1.19, the
+version CrossPoint's CI uses) on the newest Python 3.10–3.14 it finds; Homebrew's `platformio` is no
+longer needed. CI and the two Ubuntu jobs pass `PIO=pio` to keep using the core they install.

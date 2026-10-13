@@ -47,7 +47,8 @@ make test       # model unit tests, fixture replays, ~140 pytest cases (most boo
 ```
 
 Packages: git, ninja, meson, pkg-config, glib, pixman, libgcrypt, libslirp, libpng, mtools,
-dosfstools, python3, platformio. Then boot CrossPoint and take a screenshot:
+dosfstools, python3, and a Python 3.10–3.14 for PlatformIO (`make` installs it into `.venv-pio`).
+Then boot CrossPoint and take a screenshot:
 
 ```bash
 .venv/bin/python tools/mkflash.py images/flash.bin --build firmware/.pio/build/x4pro

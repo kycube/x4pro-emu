@@ -187,7 +187,7 @@ jobs:
 
       - name: Build CrossPoint ${{ env.TAG }}
         id: fw_build
-        run: make firmware
+        run: make firmware PIO=pio     # the core installed above
 
       - name: Tests against CrossPoint ${{ env.TAG }} (golden mismatches recorded as drift)
         id: tests
@@ -373,7 +373,7 @@ jobs:
 
       - name: Build CrossPoint (pinned)
         id: fw_build
-        run: make firmware
+        run: make firmware PIO=pio     # the core installed above
 
       - name: make test on the new QEMU
         id: tests
@@ -443,7 +443,7 @@ jobs:
 
   macos-build:
     # Independent of the report: Homebrew moves whether or not upstream did. This is the desk Mac's
-    # setup (Homebrew everything, Homebrew's PlatformIO), so it catches what ci.yml on Ubuntu cannot:
+    # setup (Homebrew everything; PlatformIO in the Makefile's .venv-pio), so it catches what ci.yml on Ubuntu cannot:
     # a formula update that breaks a fresh QEMU configure (gnutls 3.8.13, 2026-10-12).
     runs-on: macos-latest          # arm64
     timeout-minutes: 50
@@ -465,7 +465,7 @@ jobs:
           set -euo pipefail
           brew update --quiet
           brew install --quiet --overwrite ninja meson pkg-config glib pixman libgcrypt libslirp libpng \
-            mtools dosfstools coreutils python platformio gnutls libusb
+            mtools dosfstools coreutils python python@3.14 gnutls libusb
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
       - name: Record the toolchain
@@ -508,9 +508,13 @@ jobs:
           mkdir -p "$CI_TMP"
           .venv/bin/python -m pytest -q -rfE --basetemp="$CI_TMP/fast" --junitxml="$CI_TMP/junit-fast.xml" tests
 
-      - name: PlatformIO version
+      - name: PlatformIO venv (the Makefile's, on Homebrew's python@3.14)
         id: pio
-        run: echo "version=$(pio --version | awk '{print $NF}')" >> "$GITHUB_OUTPUT"
+        # Homebrew's platformio formula runs on Python 3.15, which the pinned platform refuses
+        # (found by this job on 2026-10-13); the Makefile keeps PlatformIO in .venv-pio instead.
+        run: |
+          make .venv-pio/bin/pio
+          echo "version=$(.venv-pio/bin/pio --version | awk '{print $NF}')" >> "$GITHUB_OUTPUT"
 
       - name: Restore PlatformIO cache
         id: pio-cache
@@ -521,11 +525,11 @@ jobs:
           path: |
             ~/.platformio
             !~/.platformio/penv
-          key: pio-${{ runner.os }}-${{ runner.arch }}-brew-${{ steps.pio.outputs.version }}-${{ hashFiles('firmware/platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ runner.arch }}-venv-${{ steps.pio.outputs.version }}-${{ hashFiles('firmware/platformio.ini') }}
           restore-keys: |
-            pio-${{ runner.os }}-${{ runner.arch }}-brew-${{ steps.pio.outputs.version }}-
+            pio-${{ runner.os }}-${{ runner.arch }}-venv-${{ steps.pio.outputs.version }}-
 
-      - name: Build CrossPoint (pinned) with Homebrew's PlatformIO
+      - name: Build CrossPoint (pinned) with the Makefile's PlatformIO venv
         id: fw_build
         timeout-minutes: 25
         run: make firmware
@@ -537,7 +541,7 @@ jobs:
           path: |
             ~/.platformio
             !~/.platformio/penv
-          key: pio-${{ runner.os }}-${{ runner.arch }}-brew-${{ steps.pio.outputs.version }}-${{ hashFiles('firmware/platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ runner.arch }}-venv-${{ steps.pio.outputs.version }}-${{ hashFiles('firmware/platformio.ini') }}
 
       - name: Boot CrossPoint to Home
         id: smoke

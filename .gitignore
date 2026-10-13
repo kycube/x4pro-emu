@@ -3,6 +3,7 @@
 /images/
 .x4emu/
 .venv/
+.venv-pio/
 __pycache__/
 *.pyc
 build/

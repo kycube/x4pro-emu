@@ -40,8 +40,21 @@ qemu/build/build.ninja:
 	  --enable-gcrypt --enable-slirp --enable-png --disable-user --disable-capstone \
 	  --disable-vnc --disable-gtk --disable-sdl --disable-docs --disable-werror --disable-gnutls
 
-firmware:
-	cd firmware && pio run -e x4pro
+# PlatformIO: pioarduino's core fork at the version CrossPoint's own CI uses (and ci.yml), in a venv of
+# its own on a Python the pinned platform accepts. platform-espressif32 55.03.311 refuses Python 3.15+,
+# which Homebrew's platformio formula moved to in October 2026 (the upstream watch's macos-build found
+# it), so the build no longer depends on that formula. `make firmware PIO=pio` uses one on PATH instead.
+PIO_CORE ?= https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+PIO_PYTHON ?= $(firstword $(foreach v,3.14 3.13 3.12 3.11 3.10,$(shell command -v python$(v) 2>/dev/null)))
+PIO ?= .venv-pio/bin/pio
+
+.venv-pio/bin/pio:
+	@test -n "$(PIO_PYTHON)" || { echo "PlatformIO needs Python 3.10-3.14 on PATH (python3.14 ...); the pinned platform refuses newer"; exit 1; }
+	$(PIO_PYTHON) -m venv .venv-pio
+	.venv-pio/bin/pip install -q "$(PIO_CORE)"
+
+firmware: $(filter .venv-pio/bin/pio,$(PIO))
+	cd firmware && $(if $(filter .venv-pio/%,$(PIO)),$(CURDIR)/$(PIO),$(PIO)) run -e x4pro
 
 models:
 	$(MAKE) -C models
