@@ -1301,3 +1301,37 @@ guest-time quiet and an event-driven boot hold; snapshots impossible (the Xtensa
 **Integrated and verified by the coordinator:** the four QEMU commits cherry-picked onto `x4pro`,
 qemu-patches regenerated (0021-0024), `make test` **188 passed, 2 skipped, 0 failed** in 13:18 at load
 6-8, with no input retries anywhere. The MCP `build_firmware` now uses `.venv-pio` too.
+
+## 2026-10-13 — World-class pass, wave 2: a two-minute suite, device parity, Espressif prep, the heap race
+
+Four Opus 5.5 agents again, integrated and verified by the coordinator.
+
+**Speed.** `make test` went from 13:18 sequential (188 tests) to **1:48 on 8 pytest-xdist workers**
+(219 tests, 0 failed; three agent runs and one coordinator run at load 6-9; CI 86 s on 4 workers,
+253 s before). Beyond the input fix: `wait-quiet` counts guest idle from the last refresh or input and
+returns at once when already idle; the stock's boot hold waits for its preflight line; timer-bound
+tests run with `-icount shift=2,sleep=off` (never `shift=auto`, which made the preflight reject the
+held button under load); longest-first ordering from `tests/durations.json`; APFS clones instead of
+~8 GB of image copies. `make test-serial` stays (623 s).
+
+**Device parity (`docs/parity.md`).** `tools/parity.py` walks a step script on a developer-patched,
+redacted copy of the owner's 7.6.8 and takes the stock's own Screen Captures; on the emulator they
+equal the panel on 7 of 8 screens (the light panel closes itself before a capture). The owner's side
+is a printed runbook; the comparison counts every differing pixel as masked, explained or reported.
+Found on the way: `tools/device.py restore-stock` overwrote the reference copy of the stock app even in
+plan mode (fixed: images are staged in a temporary file, and the plan says whether the image is a
+pristine known build). The first device session is planned, not run.
+
+**Espressif upstream (`docs/upstream-qemu.md`).** 9 patches go upstream whole, 8 split, 7 stay; branch
+`upstream-s3` (15 commits on esp-develop, checkpatch-clean) and `x4pro-on-upstream` (code-identical to
+x4pro) build and pass the smoke tests (local QEMU clone, and `images/upstream-qemu-2026-10-13.bundle`).
+Open PRs #185/#177/#181 already cover three of our fixes; QEMU proper's code-provenance policy declines
+AI-derived patches, so the TSO fix goes to the Xtensa maintainer as an issue. Waits for the owner.
+
+**The 7.2.4 heap corruption is the firmware's (`docs/heap.md`).** A stall injector on the core-0
+vCPU raised it to 3/371 boots; a QEMU hook on every model write into the range saw only SD sector reads
+into live buffers, and a watchpoint saw only the allocator write the poison head. The cause is two of
+7.2.4's tasks pinned to core 1 (`xteink_bgio_mt`, `xteink_ui`) closing the same system-font slot with
+no lock: the second close frees the FILE lock twice. 0/183 on 7.6.8 under the same stalls (its restore
+retries while a slot is busy). The debug instrumentation stays off the series (branch `x4pro-heap`,
+`images/qemu-debug-x4watch-2026-10-13.bundle`).

@@ -28,6 +28,12 @@ ESP-IDF's DMA-AES uses, and two AES model errors (OFB IV, INC32) turned up on th
 script time budget (a 2 s `on_draw` is cut short and leaves the app inert until Home) is unmeasured,
 and DMA-SHA through the same GDMA path is untested (no stock path seen using it yet).
 
+**2026-10-13, the world-class pass (log entries "wave 1" and "wave 2"):** inputs reliable at the root, the two
+cores in TSO, `make test` in ~2 min on parallel workers, a weekly upstream watch, the device-parity harness
+(`docs/parity.md`; **the first device session with the owner is still to run**), and the Espressif upstream series
+prepared (`docs/upstream-qemu.md`; **submission waits for the owner's sign-off**). The 7.2.4 heap corruption is the
+firmware's own race (`docs/heap.md`).
+
 **Work is organised as squads: read §10 before starting anything.** Sessions 5–8 ran four to five agents in
 parallel with cost balancing (Fable for models and symbol-less firmware reading, Opus for C/Python work with
 a mechanical acceptance). The session-8 entry of `docs/log.md` says what each agent delivered.

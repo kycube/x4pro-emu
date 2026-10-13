@@ -123,6 +123,7 @@ are at the top of [CLAUDE.md](CLAUDE.md).
 | [docs/lua-apps.md](docs/lua-apps.md) · [docs/gamebook.md](docs/gamebook.md) | writing apps for the stock firmware |
 | [docs/stock-firmware.md](docs/stock-firmware.md) · [7.5.4](docs/stock-7.5.4.md) · [7.6.8](docs/stock-7.6.8.md) | the stock app's internals, version by version |
 | [docs/README.md](docs/README.md) | every other document, with a line each |
+| [docs/smp.md](docs/smp.md) · [docs/heap.md](docs/heap.md) | two emulator-vs-firmware investigations: the two cores' memory order (an emulator bug, fixed) and a 7.2.4 heap corruption (the firmware's own race) |
 | [docs/parity.md](docs/parity.md) | device parity: the same steps on the emulator and the reader, the stock's own Screen Captures compared pixel by pixel |
 | [docs/upstream-qemu.md](docs/upstream-qemu.md) | the generic ESP32-S3 models split out for Espressif's QEMU: the series, the proposed PRs, what awaits the owner |
 | [docs/upstream.md](docs/upstream.md) | the weekly upstream watch: new CrossPoint releases, Espressif QEMU, PlatformIO and Homebrew drift |
