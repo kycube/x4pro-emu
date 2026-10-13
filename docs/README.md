@@ -25,6 +25,7 @@ the [project README](../README.md) is the overview.
 | [stock-7.5.4.md](stock-7.5.4.md) · [stock-7.6.8.md](stock-7.6.8.md) | what moved in each update, and the re-located patch sites |
 | [stock-licorice.md](stock-licorice.md) | XTOS Licorice 261013, the stock's rewrite (the device's since 2026-10-13): what changed, what runs, what the tools refuse |
 | [lua-apps.md](lua-apps.md) | the Lua app host: the container, the API as confirmed at runtime, its measured limits |
+| [licorice-apps.md](licorice-apps.md) | XTOS Licorice's signed `.xtapp` installer: the container, the ECDH/HKDF/AES-KW device-key wrap, a package it accepts, what is proven versus open |
 | [gamebook.md](gamebook.md) | gamebooks on the Lua host: writing a story, drawing plates, how the engine works |
 | [xic.md](xic.md) | the `.xic` screen-capture format and the developer menu that writes it |
 | [fonts.md](fonts.md) · [reading-fonts.md](reading-fonts.md) | the system font decision, and adding reading fonts to the stock's list |
@@ -52,7 +53,7 @@ Every tool's module docstring (`--help`) is its manual; the page named here has 
 | `stockstrings.py` | read and relabel the stock's UI string packs | [stock-firmware.md](stock-firmware.md) §6 |
 | `xic2png.py` | decode and encode the stock's `.xic` captures | [xic.md](xic.md) |
 | `xtfont.py`, `fontcompare.py` | build and install `.xtf` system fonts; compare candidates at the device's cells | [fonts.md](fonts.md), [reading-fonts.md](reading-fonts.md) |
-| `xtapp.py` | pack, inspect and install Lua apps | [lua-apps.md](lua-apps.md) |
+| `xtapp.py` | pack, inspect and install Lua apps (classic and Licorice formats) | [lua-apps.md](lua-apps.md), [licorice-apps.md](licorice-apps.md) |
 | `gamebook.py` (+ `gamebook_engine.lua`, `pixart.py`) | gamebooks for the Lua host | [gamebook.md](gamebook.md) |
 | `parity.py` | device parity: the step script on the emulator, the owner's runbook, the comparison | [parity.md](parity.md) |
 | `ghidra_stock.py` (+ `ghidra/`) | Ghidra over a stock image: `analyze` once, then xrefs, callers, decompile | [stock-firmware.md](stock-firmware.md) §9 |

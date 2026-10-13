@@ -12,8 +12,14 @@ rejects the whole app on anything else -- the mistake that made the first attemp
 the inverse of `pack`, the `new` scaffold, and `install` onto a real FAT32 card image built by
 `tools/mksd.py` (skipped when mtools/dosfstools are missing). Everything runs in tmp_path; a few
 seconds, no QEMU.
+
+The Licorice tests at the end cover the key-wrapped (XTOS 261013) format: the ECDH/HKDF/AES-KW DEK
+wrap (self-consistent: what `licorice_wrap_dek` produces, `licorice_unwrap_dek` -- the device side --
+recovers), the container header the installer parses, the stricter manifest rules and the classic/
+licorice `info` split. They need the `cryptography` package and skip without it; the live install is
+tests/test_licorice_apps.py (emulator) and the format is docs/licorice-apps.md.
 """
-import json, os, shutil, subprocess, sys
+import collections, json, os, shutil, struct, subprocess, sys
 import pytest
 from conftest import ROOT, PY
 
@@ -185,3 +191,129 @@ def test_install_puts_the_app_on_a_card_image(tmp_path, app_dir):
     assert 'hello2' in subprocess.run(['mdir', '-i', f'{img}@@{xtapp.PART_OFFSET}', '-b', '::/XTApps'],
                                       capture_output=True, text=True).stdout
     assert 'not a directory' in run('install', img, tmp_path / 'nope', expect=2)
+
+
+# ---------------------------------------------------------------- Licorice (XTOS 261013) key wrap
+def _keypair():
+    """A throwaway P-256 keypair (uncompressed public bytes, private scalar int): proves the wrap
+    ALGORITHM without the firmware's own key, which only the device/emulator can confirm."""
+    pytest.importorskip('cryptography')
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    priv = ec.generate_private_key(ec.SECP256R1())
+    pub = priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return pub, priv.private_numbers().private_value
+
+
+def test_licorice_wrap_round_trips():
+    """`licorice_wrap_dek` (ours) and `licorice_unwrap_dek` (the device side, FUN_4210a908) are
+    inverse: a DEK wrapped for Q and unwrapped with d comes back byte for byte, with the sizes the
+    firmware reads -- a 65-byte ephemeral point (0x04-led) and a 24-byte AES-KW pack."""
+    pub, scalar = _keypair()
+    dek, eph, wrapped = xtapp.licorice_wrap_dek(pub)
+    assert len(dek) == 16 and len(eph) == 65 and eph[0] == 0x04 and len(wrapped) == 24
+    assert xtapp.licorice_unwrap_dek(scalar, eph, wrapped) == dek
+    # a fresh wrap uses a new ephemeral key and a new pack each time, but still unwraps to the DEK
+    dek2, eph2, wrapped2 = xtapp.licorice_wrap_dek(pub, dek)
+    assert eph2 != eph and wrapped2 != wrapped and dek2 == dek
+    assert xtapp.licorice_unwrap_dek(scalar, eph2, wrapped2) == dek
+
+
+def test_licorice_kek_and_section_hmac_match_the_firmware_construction():
+    """The KEK is HKDF-SHA256 built from two HMACs (extract with the wrap salt, expand with the
+    appdek info + a 0x01 block); a section tag is HMAC-SHA256(DEK, bytes). Spelled out here so a
+    change to either construction is caught without the device."""
+    import hashlib, hmac
+    pytest.importorskip('cryptography')
+    shared = bytes(range(32))
+    prk = hmac.new(xtapp.LICORICE_WRAP_SALT, shared, hashlib.sha256).digest()
+    want = hmac.new(prk, xtapp.LICORICE_WRAP_INFO + b'\x01', hashlib.sha256).digest()[:16]
+    assert xtapp.licorice_kek(shared) == want and len(want) == 16
+    assert xtapp.LICORICE_WRAP_SALT == b'xteink.xtapp.wrap.36036010c7bd05af'
+    assert xtapp.licorice_section_hmac(b'\0' * 16, b'code') == \
+        hmac.new(b'\0' * 16, b'code', hashlib.sha256).digest()
+
+
+def test_build_licorice_container_lays_out_the_header_the_installer_parses():
+    """The 0x80 header confirmed by a live install (tests/test_licorice_apps.py): XTAP magic,
+    version u16 = 1, header-size u16 = 0x80, total-size u32 at 0x08, feature mask u32 at 0x0c,
+    manifest offset/length at 0x10/0x14; the manifest carries the dek_wrap_* fields and the DEK in it
+    unwraps with the matching scalar."""
+    pub, scalar = _keypair()
+    manifest = collections.OrderedDict((('app_id', 'probe'), ('display_name', 'API Probe'),
+                                        ('version', '1.0'), ('permissions', ['sys.battery'])))
+    data, dek = xtapp.build_licorice_container(manifest, pub)
+
+    assert data[0:4] == b'XTAP'
+    assert struct.unpack_from('<HH', data, 4) == (1, 0x80)
+    assert struct.unpack_from('<I', data, 0x08)[0] == len(data)          # total size
+    assert struct.unpack_from('<I', data, 0x0c)[0] == 0                  # feature mask: no sections
+    assert struct.unpack_from('<II', data, 0x10) == (0x80, len(data) - 0x80)
+
+    head, obj = xtapp.read_licorice_container(data)
+    assert head == {'magic': 'XTAP', 'version': 1, 'header_size': 0x80, 'total_size': len(data),
+                    'feature_mask': 0, 'manifest_offset': 0x80, 'manifest_length': len(data) - 0x80,
+                    'file_bytes': len(data), 'has_dek_wrap': True}
+    assert obj['app_id'] == 'probe' and obj['display_name'] == 'API Probe'
+    assert obj['dek_wrap_alg'] == xtapp.LICORICE_ALG and obj['dek_wrap_key_id'] == xtapp.LICORICE_KEY_ID
+    eph = bytes.fromhex(obj['dek_wrap_ephemeral_pub'])
+    wrapped = bytes.fromhex(obj['wrapped_dek_pack'])
+    assert len(eph) == 65 and eph[0] == 0x04 and len(wrapped) == 24
+    assert xtapp.licorice_unwrap_dek(scalar, eph, wrapped) == dek, 'the DEK in the container must unwrap'
+
+
+def test_info_tells_licorice_from_classic():
+    """A classic container has no dek_wrap_* fields; a Licorice one does. `is_licorice_container`
+    and the `info` command route each to the right reader."""
+    pub, _ = _keypair()
+    classic = xtapp.build_container(collections.OrderedDict((('app_id', 'hello'),
+                                                             ('display_name', 'Hello'))))
+    lic, _ = xtapp.build_licorice_container(collections.OrderedDict((('app_id', 'probe'),
+                                                                     ('display_name', 'API Probe'))), pub)
+    assert xtapp.is_licorice_container(lic) is True
+    assert xtapp.is_licorice_container(classic) is False
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cf, lf = os.path.join(d, 'classic.xtapp'), os.path.join(d, 'lic.xtapp')
+        open(cf, 'wb').write(classic); open(lf, 'wb').write(lic)
+        assert 'classic' in run('info', cf) and 'word_0x34' in run('info', cf)
+        out = run('info', lf)
+        assert 'licorice, key-wrapped' in out and 'total_size' in out and 'feature_mask' in out
+        assert json.loads(run('info', lf, '--json'))['format'] == 'licorice'
+
+
+@pytest.mark.parametrize('broken, message', [
+    ({'app_id': 'gull-rock', 'display_name': 'X'}, 'letter'),         # hyphen
+    ({'app_id': 'probe2', 'display_name': 'X'}, 'letter'),            # digit
+    ({'app_id': 'probe', 'display_name': 'X', 'version': '2.0'}, 'version'),
+    ({'app_id': 'probe', 'display_name': 'X', 'permissions': ['fs.write']}, 'not one Licorice knows'),
+    ({'app_id': 'probe', 'display_name': 'X', 'dek_wrap_alg': 'x'}, 'dek_wrap'),
+    ({'display_name': 'X'}, 'app_id'),
+])
+def test_licorice_manifest_rules(broken, message):
+    """Licorice is stricter than classic: an ASCII-letter app_id, a known version, its own permission
+    set, and no caller-supplied dek_wrap_* (pack writes those)."""
+    pytest.importorskip('cryptography')
+    with pytest.raises(xtapp.XtappError, match=message):
+        xtapp.validate_manifest_licorice(broken)
+
+
+def test_licorice_accepts_the_wider_permissions_and_versions():
+    pytest.importorskip('cryptography')
+    for perms in ([], ['sys.battery', 'sys.status'], ['net.http', 'net.https'], ['storage.app']):
+        obj = {'app_id': 'netapp', 'display_name': 'X', 'version': '0.8', 'permissions': perms}
+        assert xtapp.validate_manifest_licorice(dict(obj)) is not None
+    for ver in xtapp.LICORICE_VERSIONS:
+        xtapp.validate_manifest_licorice({'app_id': 'probe', 'display_name': 'X', 'version': ver})
+
+
+@pytest.mark.skipif(not os.path.exists(xtapp.LICORICE_IMAGE), reason='Licorice app image not available')
+def test_licorice_device_pubkey_is_on_curve():
+    """The device key Q = d*G read from the firmware image is a valid P-256 point (65-byte 0x04
+    form). The scalar's big-endian reading is the one a live install confirmed."""
+    pytest.importorskip('cryptography')
+    from cryptography.hazmat.primitives.asymmetric import ec
+    pub = xtapp.licorice_device_pubkey()
+    assert len(pub) == 65 and pub[0] == 0x04
+    ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)   # raises if off-curve

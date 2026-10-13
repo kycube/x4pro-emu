@@ -2,9 +2,20 @@
 r"""Build, inspect and install `.xtapp` Lua app containers for the stock `xteink_app`.
 
   xtapp.py new NAME OUT_DIR [--display-name T] [--author A]   scaffold manifest.json + index.lua
-  xtapp.py pack APP_DIR [-o OUT]                              write APP_DIR/app.xtapp
+  xtapp.py pack APP_DIR [-o OUT] [--format classic|licorice]  write APP_DIR/app.xtapp
   xtapp.py info FILE.xtapp                                    header + manifest of a container
-  xtapp.py install SD.img APP_DIR [--as DIR]                  copy the app onto a card image
+  xtapp.py install SD.img APP_DIR [--as DIR] [--format ...]   copy the app onto a card image
+
+Two container generations share the `.xtapp` name and the `XTAP` magic:
+
+* **classic** (stock `xteink_app` 7.2.4-7.6.8): a plain 0x80-byte header + a plain-JSON manifest,
+  no signature, no key. This is the default and everything below describes it.
+* **licorice** (XTOS Licorice 261013, the device's current firmware): a mandatory-encrypted,
+  device-key-wrapped package its installer accepts from All Files. `--format licorice` builds one;
+  the format, the ECDH/HKDF/AES-KW key wrap and what is proven live in **docs/licorice-apps.md**.
+  A package this tool builds installs through Licorice's own UI (verified in the emulator: the
+  "Installed" toast, the app at `/sdcard/XTApps/<app_id>/app.xtapp`); it does not yet carry a
+  runnable code section (that launch-time layer is still being reversed, docs/licorice-apps.md).
 
 A "Lua app" is a directory on the card, `/sdcard/XTApps/<dir>/`, holding `manifest.json`,
 `index.lua` (the script that runs) and `app.xtapp` (this container). The stock lists it under the
@@ -60,9 +71,12 @@ is never written to) and copies every file of the directory, recursively, into i
 the card is touched.
 
 `pack()`, `read_container()`, `validate_manifest()`, `install()` and `scaffold()` are importable;
-they raise `XtappError` with a message that says which rule was broken.
+they raise `XtappError` with a message that says which rule was broken. The Licorice helpers
+(`pack_licorice()`, `build_licorice_container()`, `read_licorice_container()`, `licorice_wrap_dek()`,
+`licorice_device_pubkey()`, `licorice_section_hmac()`, `validate_manifest_licorice()`) are importable
+too; the key-wrap ones need the `cryptography` package (P-256 / HKDF / AES-KW).
 """
-import argparse, collections, json, os, shutil, struct, subprocess, sys, tempfile
+import argparse, collections, hashlib, hmac, json, os, re, shutil, struct, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mksd import PART_START                                                    # noqa: E402
@@ -78,6 +92,26 @@ REQUIRED = ('app_id', 'display_name')
 PERMISSIONS = ('sys.battery', 'sys.status')     # FUN_4206645c accepts nothing else
 ENTRY_NAMES = ('index.lua', 'lockscreen.lua')   # what the script host opens (0x4212a92a)
 MAX_DIR = 190                        # the `%s/%.190s/app.xtapp` format truncates past this
+
+# ---- XTOS Licorice (261013) mini-app package (docs/licorice-apps.md; v261013 FUN_ addresses) ----
+# The installer (FUN_42108f68) requires a P256-ECDH-HKDF-SHA256-AESKW wrapped DEK in the manifest.
+# The "device key" is NOT device-unique: it is the firmware scalar d at DROM LICORICE_SCALAR_VA
+# (FUN_421d7118 reads 0x20 bytes, mbedtls big-endian), so any firmware reader can wrap a DEK the
+# device will unwrap -- confirmed by a successful install in the emulator (the "DEK1" cache entry at
+# RAM 0x3fc9e0f8 appears and the package reaches the "Installed" toast). Only the device PUBLIC key
+# Q = d*G is needed to wrap; d itself stays on the device, so nothing secret is embedded here --
+# `licorice_device_pubkey()` derives Q from the firmware image at build time.
+LICORICE_ALG = 'P256-ECDH-HKDF-SHA256-AESKW'      # dek_wrap_alg (checked verbatim, FUN_4210a908)
+LICORICE_KEY_ID = '36036010c7bd05af'              # dek_wrap_key_id (checked verbatim)
+LICORICE_SCALAR_VA = 0x3c32c674                   # DROM: the ECDH scalar d (FUN_421d7118)
+LICORICE_IMAGE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              'images', 'device', 'stock-app1-v261013.bin')     # gitignored
+LICORICE_WRAP_SALT = ('xteink.xtapp.wrap.' + LICORICE_KEY_ID).encode()   # HKDF-Extract salt (FUN_4210a908)
+LICORICE_WRAP_INFO = b'xteink.xtapp.appdek.wrap.v2'                      # HKDF-Expand info, then a 0x01 block
+LICORICE_PERMISSIONS = ('sys.battery', 'sys.status', 'net.http', 'net.https', 'storage.app',
+                        'storage.user_file', 'device.status', 'device.keep_awake', 'bluetooth')
+LICORICE_VERSIONS = ('1.0', '0.8', '0.7')         # FUN_42108590 accepts major 1 minor 0, or 0.7/0.8
+_P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
 
 class XtappError(ValueError):
@@ -185,6 +219,206 @@ def read_container(data, where='app.xtapp'):
     return head, obj
 
 
+# ---------------------------------------------------------------- Licorice (261013) key wrap
+def _crypto():
+    """The `cryptography` pieces the Licorice wrap needs, or an XtappError naming the package."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        from cryptography.hazmat.primitives.keywrap import aes_key_wrap, aes_key_unwrap
+    except ImportError:
+        raise XtappError('the Licorice format needs the `cryptography` package for P-256/HKDF/'
+                         'AES-KW (pip install cryptography)') from None
+    return ec, Encoding, PublicFormat, aes_key_wrap, aes_key_unwrap
+
+
+def _esp_segment_read(image, va, length):
+    """`length` bytes at virtual address `va` from an ESP app image (its segment table)."""
+    try:
+        data = open(image, 'rb').read()
+    except OSError as e:
+        raise XtappError(f'{e}') from None
+    if len(data) < 24 or data[0] != 0xE9:
+        raise XtappError(f'{image}: not an ESP app image (magic {data[:1].hex()})')
+    off = 24
+    for _ in range(data[1]):
+        la, ln = struct.unpack_from('<II', data, off)
+        if la <= va < la + ln:
+            return data[off + 8 + va - la: off + 8 + va - la + length]
+        off += 8 + ln
+    raise XtappError(f'{image}: virtual address {va:#x} is not in any segment')
+
+
+def licorice_device_pubkey(image=LICORICE_IMAGE):
+    """The device ECDH public key Q = d*G, uncompressed SEC1 (65 bytes). `d` is the firmware scalar
+    at LICORICE_SCALAR_VA, read big-endian (mbedtls convention; confirmed by a successful install).
+    Only Q is needed to wrap a DEK, so no secret key material leaves the firmware image."""
+    ec, Encoding, PublicFormat, _, _ = _crypto()
+    d = int.from_bytes(_esp_segment_read(image, LICORICE_SCALAR_VA, 32), 'big') % _P256_N
+    pub = ec.derive_private_key(d, ec.SECP256R1()).public_key()
+    return pub.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+
+
+def licorice_kek(shared_x):
+    """The 16-byte AES key-wrap KEK from an ECDH shared X (FUN_4210a908): HKDF-SHA256 built from two
+    HMACs -- extract with the wrap-salt string, expand with the appdek-wrap info and a 0x01 block."""
+    prk = hmac.new(LICORICE_WRAP_SALT, bytes(shared_x), hashlib.sha256).digest()
+    okm = hmac.new(prk, LICORICE_WRAP_INFO + b'\x01', hashlib.sha256).digest()
+    return okm[:16]
+
+
+def licorice_wrap_dek(pubkey, dek=None):
+    """Wrap a 16-byte DEK for the device public key `pubkey` (from `licorice_device_pubkey`). Picks an
+    ephemeral keypair E, derives shared = (e*Q).x, and AES-KW-wraps the DEK under `licorice_kek`.
+    Returns (dek, ephemeral_pub[65], wrapped_dek_pack[24]) -- the manifest carries the last two hex."""
+    ec, Encoding, PublicFormat, aes_key_wrap, _ = _crypto()
+    dek = bytes(dek) if dek is not None else os.urandom(16)
+    if len(dek) != 16:
+        raise XtappError(f'the DEK must be 16 bytes (AES-128), got {len(dek)}')
+    Q = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes(pubkey))
+    e = ec.generate_private_key(ec.SECP256R1())
+    E = e.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return dek, E, aes_key_wrap(licorice_kek(e.exchange(ec.ECDH(), Q)), dek)
+
+
+def licorice_unwrap_dek(scalar, ephemeral_pub, wrapped):
+    """The device side (FUN_4210a908), for round-trip tests: recover the DEK from the private scalar
+    `d`, the ephemeral public key and the wrapped pack. `scalar` is an int (big-endian d)."""
+    ec, _, _, _, aes_key_unwrap = _crypto()
+    d = ec.derive_private_key(int(scalar) % _P256_N, ec.SECP256R1())
+    E = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes(ephemeral_pub))
+    return aes_key_unwrap(licorice_kek(d.exchange(ec.ECDH(), E)), bytes(wrapped))
+
+
+def licorice_section_hmac(dek, data):
+    """A section's integrity tag = HMAC-SHA256(DEK, section bytes) (FUN_4210a630), what the manifest
+    carries as hmac_code / hmac_assets / hmac_data / hmac_fonts."""
+    return hmac.new(bytes(dek), bytes(data), hashlib.sha256).digest()
+
+
+def validate_manifest_licorice(obj, where='manifest.json'):
+    """Raise XtappError on anything Licorice's loader (FUN_42108648 / FUN_42108590) would reject.
+    Stricter than classic: an ASCII-letter app_id, a known version, and a wider permission set."""
+    for key in REQUIRED:
+        if key not in obj:
+            raise XtappError(f'{where}: no "{key}" -- {" and ".join(REQUIRED)} are required')
+        if not isinstance(obj[key], str) or not obj[key].strip():
+            raise XtappError(f'{where}: "{key}" must be a non-empty string, got {obj[key]!r}')
+    app_id = obj['app_id']
+    if not re.fullmatch(r'[A-Za-z]+', app_id):
+        raise XtappError(
+            f'{where}: Licorice\'s manifest validator (FUN_42108590) walks the app_id and rejects a '
+            f'non-ASCII-letter character; {app_id!r} is not all letters (a hyphen or digit fails). '
+            f'"probe" installs; "gull-rock" (hyphen) does not. Use an all-letter app_id')
+    if len(app_id.encode('utf-8')) > MAX_DIR:
+        raise XtappError(f'{where}: "app_id" is too long for /sdcard/XTApps/<app_id>')
+    ver = obj.get('version', '0.8')
+    if ver not in LICORICE_VERSIONS:
+        raise XtappError(f'{where}: "version" {ver!r} -- Licorice accepts {LICORICE_VERSIONS} '
+                         f'(FUN_42108590 parses "%d.%d" and wants 1.0, 0.8 or 0.7)')
+    perms = obj.get('permissions', [])
+    if not isinstance(perms, list):
+        raise XtappError(f'{where}: "permissions" must be a list, got {type(perms).__name__}')
+    for p in perms:
+        if p not in LICORICE_PERMISSIONS:
+            raise XtappError(f'{where}: permission {p!r} is not one Licorice knows '
+                             f'({", ".join(LICORICE_PERMISSIONS)}); an unknown one sets the reject bit')
+    for field in ('dek_wrap_alg', 'dek_wrap_key_id', 'dek_wrap_ephemeral_pub', 'wrapped_dek_pack'):
+        if field in obj:
+            raise XtappError(f'{where}: drop {field!r} -- `pack --format licorice` wraps a fresh DEK '
+                             f'and writes the dek_wrap_* fields itself')
+    return obj
+
+
+def build_licorice_container(manifest_obj, pubkey, dek=None):
+    """A manifest-only Licorice container (feature mask 0: no encrypted code/assets/data/fonts yet).
+    Wraps a DEK for `pubkey`, writes the dek_wrap_* fields into the manifest, and lays out the 0x80
+    header the installer parses (FUN_42108380). Returns (bytes, dek). The header, confirmed by a live
+    install: XTAP magic, version u16 = 1, header-size u16 = 0x80, total-size u32 at 0x08, feature
+    mask u32 at 0x0c, manifest offset/length at 0x10/0x14."""
+    obj = collections.OrderedDict(manifest_obj)
+    dek, E, wrapped = licorice_wrap_dek(pubkey, dek)
+    obj['dek_wrap_alg'] = LICORICE_ALG
+    obj['dek_wrap_key_id'] = LICORICE_KEY_ID
+    obj['dek_wrap_ephemeral_pub'] = E.hex()
+    obj['wrapped_dek_pack'] = wrapped.hex()
+    blob = json.dumps(obj, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    if not 1 <= len(blob) <= MANIFEST_MAX:
+        raise XtappError(f'the manifest is {len(blob)} bytes; the firmware accepts 1..{MANIFEST_MAX}')
+    total = HEADER_SIZE + len(blob)
+    head = bytearray(HEADER_SIZE)
+    head[0:4] = MAGIC
+    struct.pack_into('<HH', head, 4, VERSION, HEADER_SIZE)        # version 1, header size 0x80
+    struct.pack_into('<I', head, 0x08, total)                    # total/payload size (FUN_42108380 bound)
+    struct.pack_into('<I', head, 0x0c, 0)                        # feature mask: no encrypted sections
+    struct.pack_into('<II', head, 0x10, MANIFEST_OFF, len(blob))  # manifest offset + length
+    return bytes(head) + blob, dek
+
+
+def read_licorice_container(data, where='app.xtapp'):
+    """(header dict, manifest object) of a Licorice container, the way FUN_42108380 reads the header.
+    Does not require the classic word-0x34 == 0 (that offset is a section descriptor here)."""
+    data = bytes(data)
+    if len(data) < HEADER_SIZE:
+        raise XtappError(f'{where}: {len(data)} bytes, shorter than the {HEADER_SIZE}-byte header')
+    if data[:4] != MAGIC:
+        raise XtappError(f'{where}: magic is {data[:4]!r}, expected {MAGIC!r}')
+    version, header_size = struct.unpack_from('<HH', data, 4)
+    total, feature_mask = struct.unpack_from('<II', data, 8)
+    off, length = struct.unpack_from('<II', data, 0x10)
+    head = {'magic': MAGIC.decode(), 'version': version, 'header_size': header_size,
+            'total_size': total, 'feature_mask': feature_mask, 'manifest_offset': off,
+            'manifest_length': length, 'file_bytes': len(data)}
+    if version != VERSION or header_size != HEADER_SIZE:
+        raise XtappError(f'{where}: version {version} / header size {header_size:#x}, expected '
+                         f'{VERSION} / {HEADER_SIZE:#x}')
+    if off != MANIFEST_OFF:
+        raise XtappError(f'{where}: manifest offset {off:#x}, expected {MANIFEST_OFF:#x}')
+    if not 1 <= length <= MANIFEST_MAX or off + length > len(data):
+        raise XtappError(f'{where}: manifest {off:#x}+{length} does not fit the {len(data)}-byte file')
+    try:
+        obj = json.loads(data[off:off + length].decode('utf-8'),
+                         object_pairs_hook=collections.OrderedDict)
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise XtappError(f'{where}: the manifest is not valid UTF-8 JSON ({e})') from None
+    head['has_dek_wrap'] = all(k in obj for k in
+                               ('dek_wrap_alg', 'dek_wrap_key_id', 'dek_wrap_ephemeral_pub',
+                                'wrapped_dek_pack'))
+    return head, obj
+
+
+def is_licorice_container(data):
+    """True when a container carries the dek_wrap_* fields (the Licorice form), via its own reader."""
+    try:
+        head, _ = read_licorice_container(data)
+        return head['has_dek_wrap']
+    except XtappError:
+        return False
+
+
+def pack_licorice(app_dir, out=None, image=LICORICE_IMAGE):
+    """Write a Licorice `app.xtapp` (or `out`) from `<app_dir>/manifest.json`, wrapping a fresh DEK
+    for the device key derived from `image`. The package is manifest-only (installable, not yet
+    runnable). Returns a report. `app_dir` is only read."""
+    mpath = os.path.join(app_dir, 'manifest.json')
+    if not os.path.exists(mpath):
+        raise XtappError(f'{mpath} not found: a Lua app directory holds manifest.json')
+    obj = validate_manifest_licorice(load_manifest(mpath), mpath)
+    if not os.path.exists(image):
+        raise XtappError(f'{image} not found: the Licorice device key is read from the stock app '
+                         f'image (gitignored under images/). Pass --image to point at it')
+    data, dek = build_licorice_container(obj, licorice_device_pubkey(image))
+    dst = out or os.path.join(app_dir, 'app.xtapp')
+    with open(dst, 'wb') as f:
+        f.write(data)
+    return {'out': dst, 'bytes': len(data), 'manifest_bytes': len(data) - HEADER_SIZE,
+            'app_id': obj['app_id'], 'display_name': obj['display_name'],
+            'permissions': list(obj.get('permissions', [])), 'dek': dek.hex(),
+            'note': 'manifest-only: installs through Licorice (the "Installed" toast), lands at '
+                    '/sdcard/XTApps/<app_id>/app.xtapp; no runnable code section yet '
+                    '(docs/licorice-apps.md)'}
+
+
 # ---------------------------------------------------------------- the commands
 def pack(app_dir, out=None):
     """Write `<app_dir>/app.xtapp` (or `out`) from `<app_dir>/manifest.json`. Returns a report."""
@@ -246,6 +480,28 @@ def install(img, app_dir, as_dir=None):
     if not any(ln.lower().endswith('app.xtapp') for ln in rep['listing']):
         raise XtappError(f'{img}: app.xtapp is not in /{APPS_DIR}/{name} after the copy '
                          f'(mtools said: {listing!r})')
+    return rep
+
+
+def install_licorice(img, app_dir, image=LICORICE_IMAGE, as_name=None):
+    """Put a Licorice `.xtapp` package onto a card so Licorice can install it from All Files. Unlike
+    classic install, this does NOT drop a folder in /XTApps -- Licorice ignores that; it copies the
+    built package to the card root as `<app_id>.xtapp`, where it shows up in All Files. The user (or
+    `tests/test_licorice_apps.py`) then taps it and confirms "Install this package?"."""
+    if not os.path.isdir(app_dir):
+        raise XtappError(f'{app_dir} is not a directory')
+    if not os.path.exists(img):
+        raise XtappError(f'{img} not found (tools/mksd.py builds a card image)')
+    if not shutil.which('mcopy'):
+        raise XtappError('mcopy not found (brew install mtools / apt install mtools)')
+    with tempfile.TemporaryDirectory() as tmp:
+        rep = pack_licorice(app_dir, os.path.join(tmp, 'app.xtapp'), image)
+        name = (as_name or rep['app_id']) + '.xtapp'
+        mtools(img, 'mcopy', '-o', rep['out'], f'::/{name}')
+    listing = mtools(img, 'mdir', '-b', '::/', check=False).stdout
+    if not any(ln.strip().lower().endswith(name.lower()) for ln in listing.splitlines()):
+        raise XtappError(f'{img}: {name} is not on the card root after the copy')
+    rep.update({'image': img, 'card_path': f'/{name}'})
     return rep
 
 
@@ -368,6 +624,10 @@ def main(argv=None):
     p = sub.add_parser('pack', help='build APP_DIR/app.xtapp from APP_DIR/manifest.json')
     p.add_argument('app_dir')
     p.add_argument('-o', '--out', help='write the container here instead of APP_DIR/app.xtapp')
+    p.add_argument('--format', choices=('classic', 'licorice'), default='classic',
+                   help='classic (7.x, default) or licorice (XTOS 261013, key-wrapped)')
+    p.add_argument('--image', default=LICORICE_IMAGE,
+                   help='licorice: the stock app image the device key is read from')
 
     p = sub.add_parser('info', help='print the header and manifest of an .xtapp')
     p.add_argument('file')
@@ -377,6 +637,10 @@ def main(argv=None):
     p.add_argument('image', help='an SD card image (tools/mksd.py: FAT32 partition at 1 MiB)')
     p.add_argument('app_dir')
     p.add_argument('--as', dest='as_dir', help='card directory name (default: the manifest app_id)')
+    p.add_argument('--format', choices=('classic', 'licorice'), default='classic',
+                   help='classic (-> /XTApps/<id>/) or licorice (-> card root <id>.xtapp)')
+    p.add_argument('--key-image', dest='key_image', default=LICORICE_IMAGE,
+                   help='licorice: the stock app image the device key is read from')
 
     a = ap.parse_args(argv)
     try:
@@ -388,30 +652,50 @@ def main(argv=None):
             print(f'  next: edit index.lua, then `xtapp.py pack {a.out_dir}` and '
                   f'`xtapp.py install SD.img {a.out_dir}` (docs/lua-apps.md)')
         elif a.cmd == 'pack':
-            rep = pack(a.app_dir, a.out)
-            print(f'{rep["out"]}: {rep["bytes"]} bytes = {HEADER_SIZE:#x} header + '
-                  f'{rep["manifest_bytes"]} manifest\n'
-                  f'  app_id {rep["app_id"]!r}, display_name {rep["display_name"]!r}, '
-                  f'permissions {rep["permissions"] or "none"}')
-            for w in rep['warnings']:
-                print(f'  warning: {w}')
-        elif a.cmd == 'info':
-            head, obj = read_container(open(a.file, 'rb').read(), a.file)
-            if a.json:
-                print(json.dumps({'header': head, 'manifest': obj}, indent=2, ensure_ascii=False))
+            if a.format == 'licorice':
+                rep = pack_licorice(a.app_dir, a.out, a.image)
+                print(f'{rep["out"]}: {rep["bytes"]} bytes = {HEADER_SIZE:#x} header + '
+                      f'{rep["manifest_bytes"]} manifest (licorice, key-wrapped)\n'
+                      f'  app_id {rep["app_id"]!r}, display_name {rep["display_name"]!r}, '
+                      f'permissions {rep["permissions"] or "none"}\n  note: {rep["note"]}')
             else:
-                print(f'{a.file}: {head["file_bytes"]} bytes')
-                for k in ('magic', 'version', 'header_size', 'flags', 'manifest_offset',
-                          'manifest_length', 'word_0x30', 'word_0x34'):
+                rep = pack(a.app_dir, a.out)
+                print(f'{rep["out"]}: {rep["bytes"]} bytes = {HEADER_SIZE:#x} header + '
+                      f'{rep["manifest_bytes"]} manifest\n'
+                      f'  app_id {rep["app_id"]!r}, display_name {rep["display_name"]!r}, '
+                      f'permissions {rep["permissions"] or "none"}')
+                for w in rep['warnings']:
+                    print(f'  warning: {w}')
+        elif a.cmd == 'info':
+            raw = open(a.file, 'rb').read()
+            licorice = is_licorice_container(raw)
+            reader = read_licorice_container if licorice else read_container
+            head, obj = reader(raw, a.file)
+            if a.json:
+                print(json.dumps({'format': 'licorice' if licorice else 'classic',
+                                  'header': head, 'manifest': obj}, indent=2, ensure_ascii=False))
+            else:
+                keys = (('magic', 'version', 'header_size', 'total_size', 'feature_mask',
+                         'manifest_offset', 'manifest_length') if licorice else
+                        ('magic', 'version', 'header_size', 'flags', 'manifest_offset',
+                         'manifest_length', 'word_0x30', 'word_0x34'))
+                print(f'{a.file}: {head["file_bytes"]} bytes '
+                      f'({"licorice, key-wrapped" if licorice else "classic"})')
+                for k in keys:
                     v = head[k]
                     print(f'  {k:<16} {v if isinstance(v, str) else f"{v:#x} ({v})"}')
                 print('  manifest:')
                 for line in json.dumps(obj, indent=2, ensure_ascii=False).splitlines():
                     print(f'    {line}')
                 try:
-                    validate_manifest(obj, a.file)
+                    (validate_manifest_licorice if licorice else validate_manifest)(obj, a.file)
                 except XtappError as e:
                     print(f'  warning: {e}')
+        elif a.cmd == 'install' and a.format == 'licorice':
+            rep = install_licorice(a.image, a.app_dir, a.key_image)
+            print(f'{a.image}: {rep["card_path"]} <- {a.app_dir} (licorice)\n'
+                  f'  {rep["display_name"]!r} ({rep["app_id"]}); install it from All Files on the '
+                  f'device.\n  note: {rep["note"]}')
         else:
             rep = install(a.image, a.app_dir, a.as_dir)
             print(f'{a.image}: {rep["card_dir"]}/ <- {a.app_dir}\n'

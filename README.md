@@ -107,11 +107,15 @@ what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook
 
-The stock firmware (7.5.4 to 7.6.8) shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app
-(XTOS Licorice installs apps from a package instead; not mapped yet). An app is
-a folder with a manifest and an `index.lua`; `tools/xtapp.py` packs and installs one. What the host
+The stock firmware (7.5.4 to 7.6.8) shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app.
+An app is a folder with a manifest and an `index.lua`; `tools/xtapp.py` packs and installs one. What the host
 offers, and its hard limits (no file reads, a 1024-command frame cap, layers that have none), are in
 [docs/lua-apps.md](docs/lua-apps.md).
+
+XTOS Licorice installs apps from a signed `.xtapp` package instead. Its format is reverse-engineered in
+[docs/licorice-apps.md](docs/licorice-apps.md): `tools/xtapp.py pack --format licorice` builds a package
+its installer accepts, and the emulator takes it from All Files to the **"Installed"** confirmation
+(`tests/test_licorice_apps.py`). The launch-time layer that decrypts and runs the code is still open.
 
 **The Keeper of Gull Rock** is a choose-your-own-adventure written and drawn for this project: 13
 passages, five endings, and eight 1-bit pixel-art plates drawn in code. `tools/gamebook.py` builds it

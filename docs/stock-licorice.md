@@ -69,9 +69,12 @@ The walk (2026-10-13, by hand, then `test_licorice_walk`, 20 s):
 | Deep sleep and wake | a held power button (Settings → General: "Power button Long 1s") sleeps with the "Get Started" screen, EXT1 on GPIO3; power wakes it with reset cause DSLEEP, and it **resumes the last book**, not the screen it slept on |
 | Wi-Fi on | the full PHY calibration runs (168 calibration starts, 7 PLL calibrations in 2 s), then the radio idles: no networks to scan, nothing to join, the UI stays responsive |
 | Bluetooth on | on in 0.3 s, a BT glyph in the status bar; the radio stub sees no access |
+| Auto power-off | after 20 minutes idle (Settings → General) it deep-sleeps on its own: at 1,205 s of guest time under `--icount shift=2,sleep=off` (5 host minutes: it polls touch and the gauge too often for the idle skip to jump far) |
+| Battery | the gauge is polled all along (54 I2C transactions in 90 s); the percentage is repainted with the minute clock (15 % showed within 90 s of `x4emu battery --soc 15`); `--charging on` shows the bolt at once |
+| Images | a book cover is drawn as an ordered 1-bit dither: Licorice sends no LUTs (PSR REG 0, the panel's own waveforms), so nothing on it is grey; "Image mode" switches Built-in / External, not grey |
 | Settings | all seven subpages open (Account, General, Display, Network with OPDS / Calibre wireless / KOReader sync, Buttons, Reading, About); About reads "X4 Pro-EA30", the MAC and serial from the emulated efuses and "XT Licorice 261013" |
 | USB mode | comes up and waits for a computer ("USB mode — On"), since the USB OTG core is modelled (`docs/usb-otg.md`); before that TinyUSB asserted (`check_dwc2 177: ASSERT FAILED` … `tusb_rhport_init`) and the screen ended at "Could not start USB disk mode". Licorice restarts the CPU into the mode (two `RTC_SW_CPU_RST` banners). The built-in host reads its device descriptor, 0x303A:0x4002; no disk crosses the bus |
-| Installing a `.xtapp` | **not yet**: the prompt appears as on the device, OK gives "Install failed" for the 7.x-style `app.xtapp` (below) |
+| Installing a `.xtapp` | a package built with `tools/xtapp.py pack --format licorice` installs through the UI ("Installed" toast, lands at `/sdcard/XTApps/<app_id>/`); the 7.x-style `app.xtapp` gives "Install failed". The format is reverse-engineered in `docs/licorice-apps.md`. **Launching** an installed app is still open: the runnable code section is not built yet, so an installed app reports "Cannot run yet" |
 
 Licorice prints nothing through ESP-IDF's log on the console, but plain `printf` does reach it (the
 TinyUSB asserts above), so the console is wired; the firmware's log level is simply off.
@@ -103,8 +106,9 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
-- Whether an unsigned package installs at all (the `.xtapp` format Licorice expects, and whether it
-  checks a signature or only unwraps a key when one is present), and where Mini Apps lives in the UI.
+- Launching an installed app: the package format is reversed and a package installs (`docs/licorice-apps.md`),
+  but the runnable code section and the launch-time decrypt are not, so an installed app says "Cannot run
+  yet"; and where the Mini Apps list lives in the UI (not in the drawer's six items).
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no
   computer sees the disk.
 - What the RTC segments hold (the bootloader loads them; the emulator boots, so they are at least not
