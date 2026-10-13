@@ -91,12 +91,12 @@ def fidelity():
 def plates():
     import gamebook
     story_dir = os.path.join(ROOT, 'stories', 'gull-rock')
-    story = gamebook.parse_story(open(os.path.join(story_dir, 'story.txt')).read())
-    art, _ = gamebook.build_art(story, gamebook.load_scenes(story_dir))
-    order = list(gamebook.load_scenes(story_dir))                       # story order, not A-Z
-    names = [n for n in order if n in art]
+    with open(os.path.join(story_dir, 'story.txt')) as f:
+        story = gamebook.parse_story(f.read())
+    scenes = gamebook.load_scenes(story_dir)
+    art, _ = gamebook.build_art(story, scenes)
     cells = []
-    for n in names:
+    for n in (n for n in scenes if n in art):                          # story order, not A-Z
         img, s = art[n]
         cells.append((img.resize((img.width * s, img.height * s), Image.NEAREST).convert('L'), n))
     return grid(cells, 4, gap=16, cap=34)

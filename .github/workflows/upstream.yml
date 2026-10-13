@@ -14,8 +14,9 @@ name: Upstream watch
 # The stock firmware is not watched: its OTA packages are encrypted and arrive only through the
 # device's own update prompt (docs/upstream.md, "What stays manual").
 #
-# Patterns shared with ci.yml (the dependency list, the QEMU cache key, the PlatformIO core install,
-# the artifact collection) are copied, not referenced: keep them in step when ci.yml changes.
+# The shell steps shared with ci.yml (the dependency list, the pins, the PlatformIO core install, the
+# pytest run with one retry, the artifact collection) are .github/scripts/ci.sh. The QEMU cache key
+# is written out in both workflows (crosspoint-latest restores ci.yml's cache): keep the two in step.
 
 on:
   schedule:
@@ -47,8 +48,8 @@ jobs:
       qemu_head: ${{ steps.check.outputs.qemu_head }}
       qemu_moved: ${{ steps.check.outputs.qemu_moved }}
     steps:
-      # No submodules: the pins are the committed gitlink (git ls-tree HEAD firmware), the
-      # Makefile's QEMU_REF and ci.yml's PIO_CORE_VERSION; everything else is asked of GitHub.
+      # No submodules: the pins are the committed gitlink (git ls-tree HEAD firmware) and the
+      # Makefile's QEMU_REF and PIO_CORE_VERSION; everything else is asked of GitHub.
       - uses: actions/checkout@v7
 
       - name: What moved upstream
@@ -104,10 +105,10 @@ jobs:
           test "$sdk_pin" = "$sdk_head"
           echo "sha=$(git -C firmware rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "sdk=$sdk_head" >> "$GITHUB_OUTPUT"
-          # The pioarduino core CrossPoint's own CI installs at this tag; ci.yml's pin otherwise.
+          # The pioarduino core CrossPoint's own CI installs at this tag; the Makefile's pin otherwise.
           core=$(grep -ho 'platformio-core/archive/refs/tags/v[0-9.]*\.zip' firmware/.github/workflows/*.yml 2>/dev/null \
                  | head -1 | sed 's|.*/tags/||; s|\.zip$||' || true)
-          [ -n "$core" ] || core=$(sed -n 's/^ *PIO_CORE_VERSION: *//p' .github/workflows/ci.yml | head -1)
+          [ -n "$core" ] || core=$(bash .github/scripts/ci.sh pins | sed -n 's/^pio_core=//p')
           echo "pio_core=$core" >> "$GITHUB_OUTPUT"
           echo "CrossPoint $TAG at $(git -C firmware rev-parse --short HEAD), freeink-sdk ${sdk_head:0:8}, pioarduino core $core"
 
@@ -116,24 +117,15 @@ jobs:
           python-version: '3.12'
 
       - name: Install build dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          # ci.yml's list (CLAUDE.md's "Build" list in Ubuntu 24.04 names).
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git ninja-build meson pkg-config python3-venv \
-            libglib2.0-dev libpixman-1-dev libgcrypt20-dev libslirp-dev libpng-dev \
-            mtools dosfstools rsync
+        run: bash .github/scripts/ci.sh apt-deps
 
       - name: Configure git identity
         # `make setup` applies qemu-patches/ with `git am`, which refuses to commit without one.
-        run: |
-          git config --global user.name  "x4pro-emu CI"
-          git config --global user.email "ci@x4pro-emu.invalid"
+        run: bash .github/scripts/ci.sh git-identity
 
-      - name: Resolve the pinned QEMU ref
-        id: qemu
-        run: echo "ref=$(sed -n 's/^QEMU_REF *?*= *//p' Makefile | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Resolve the pins
+        id: pins
+        run: bash .github/scripts/ci.sh pins >> "$GITHUB_OUTPUT"
 
       - name: Restore QEMU cache
         id: qemu-cache
@@ -141,7 +133,7 @@ jobs:
         with:
           # ci.yml's cache, same key: the emulator here is the one ci.yml builds.
           path: qemu
-          key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
+          key: qemu-${{ runner.os }}-${{ steps.pins.outputs.qemu_ref }}-${{ hashFiles('qemu-patches/*.patch') }}
 
       - name: Re-mark the cached QEMU tree as patched
         if: steps.qemu-cache.outputs.cache-hit == 'true'
@@ -158,17 +150,7 @@ jobs:
             pio-${{ runner.os }}-${{ steps.fw.outputs.pio_core }}-
 
       - name: Install PlatformIO core
-        env:
-          PIO_CORE: https://github.com/pioarduino/platformio-core/archive/refs/tags/${{ steps.fw.outputs.pio_core }}.zip
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -U "$PIO_CORE"
-          python -m pip install -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
-            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
-            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
-            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
-          pio --version
+        run: bash .github/scripts/ci.sh pio-core "${{ steps.fw.outputs.pio_core }}"
 
       - name: make setup
         # firmware/platformio.ini exists already, so the submodule rule leaves the release checkout alone.
@@ -183,7 +165,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: qemu
-          key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
+          key: ${{ steps.qemu-cache.outputs.cache-primary-key }}
 
       - name: Build CrossPoint ${{ env.TAG }}
         id: fw_build
@@ -194,21 +176,11 @@ jobs:
         # --golden-drift (tests/conftest.py): a comparison against a device-made golden that fails on
         # a healthy emulator becomes xfail and a line in golden-drift.jsonl; anything else fails, and
         # so does a passing test whose emulator logged a crash or an unknown panel command.
-        # A failed run repeats its failures once (--lf): CrossPoint drops an input that lands in a
-        # rendering pass (NEXT_PHASE §0 h); the summary names any test that only passed the second time.
+        # A failed run repeats its failures once (--lf); the summary names any test that only passed the
+        # second time (a flake to look at: inputs are fixed at the root, docs/x4emu.md "Input delivery").
         run: |
           test -f firmware/.pio/build/x4pro/firmware.bin && test -x qemu/build/qemu-system-xtensa
-          mkdir -p "$CI_TMP"
-          set +e -u
-          args=(-q -rfEx "--golden-drift=$CI_TMP/golden-drift.jsonl")
-          .venv/bin/python -m pytest "${args[@]}" --basetemp="$CI_TMP/run1" --junitxml="$CI_TMP/junit-1.xml" tests
-          rc=$?
-          if [ "$rc" -eq 1 ]; then
-            echo "::warning::tests failed; repeating the failures once"
-            .venv/bin/python -m pytest "${args[@]}" --lf --basetemp="$CI_TMP/run2" --junitxml="$CI_TMP/junit-2.xml" tests
-            rc=$?
-          fi
-          exit "$rc"
+          bash .github/scripts/ci.sh pytest-retry "$CI_TMP" -q -rfEx "--golden-drift=$CI_TMP/golden-drift.jsonl"
 
       - name: Summary
         if: always()
@@ -227,24 +199,8 @@ jobs:
 
       - name: Collect screenshots and emulator logs
         if: always()
-        run: |
-          set -uo pipefail
-          mkdir -p ci-artifacts/logs
-          # As ci.yml, plus the JUnit files; never the 16 MB flash and 64 MB SD images.
-          if [ -d "$CI_TMP" ]; then
-            rsync -am \
-              --include='*/' --include='*.png' --include='*.bmp' --include='*.jsonl' --include='*.xml' \
-              --exclude='*' "$CI_TMP/" ci-artifacts/screenshots/
-          fi
-          for d in .x4emu/*/; do
-            [ -d "$d" ] || continue
-            n=$(basename "$d")
-            mkdir -p "ci-artifacts/logs/$n"
-            for f in console.log uart0.log qemu.log run.json; do
-              if [ -f "$d$f" ]; then cp "$d$f" "ci-artifacts/logs/$n/$f"; fi
-            done
-          done
-          du -sh ci-artifacts || true
+        # As ci.yml, plus the JUnit files.
+        run: bash .github/scripts/ci.sh collect ci-artifacts '*.png' '*.bmp' '*.jsonl' '*.xml'
 
       - name: Upload screenshots and logs
         if: always()
@@ -268,24 +224,14 @@ jobs:
           submodules: recursive
 
       - name: Install build dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git ninja-build meson pkg-config python3-venv \
-            libglib2.0-dev libpixman-1-dev libgcrypt20-dev libslirp-dev libpng-dev \
-            mtools dosfstools rsync
+        run: bash .github/scripts/ci.sh apt-deps
 
       - name: Configure git identity
-        run: |
-          git config --global user.name  "x4pro-emu CI"
-          git config --global user.email "ci@x4pro-emu.invalid"
+        run: bash .github/scripts/ci.sh git-identity
 
       - name: Resolve the pins
         id: pins
-        run: |
-          echo "qemu_ref=$(sed -n 's/^QEMU_REF *?*= *//p' Makefile | head -1)" >> "$GITHUB_OUTPUT"
-          echo "pio_core=$(sed -n 's/^ *PIO_CORE_VERSION: *//p' .github/workflows/ci.yml | head -1)" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/ci.sh pins >> "$GITHUB_OUTPUT"
 
       - name: Apply qemu-patches/ to esp-develop HEAD
         id: am
@@ -353,16 +299,7 @@ jobs:
             pio-${{ runner.os }}-${{ steps.pins.outputs.pio_core }}-
 
       - name: Install PlatformIO core
-        env:
-          PIO_CORE: https://github.com/pioarduino/platformio-core/archive/refs/tags/${{ steps.pins.outputs.pio_core }}.zip
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -U "$PIO_CORE"
-          python -m pip install -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
-            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
-            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
-            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
+        run: bash .github/scripts/ci.sh pio-core "${{ steps.pins.outputs.pio_core }}"
 
       - name: make setup
         run: make setup
@@ -379,17 +316,8 @@ jobs:
         id: tests
         # The pinned firmware against its own goldens: every failure here is the new QEMU base.
         run: |
-          mkdir -p "$CI_TMP"
           make -C models test
-          set +e -u
-          .venv/bin/python -m pytest -q -rfE --basetemp="$CI_TMP/run1" --junitxml="$CI_TMP/junit-1.xml" tests
-          rc=$?
-          if [ "$rc" -eq 1 ]; then
-            echo "::warning::tests failed; repeating the failures once"
-            .venv/bin/python -m pytest -q -rfE --lf --basetemp="$CI_TMP/run2" --junitxml="$CI_TMP/junit-2.xml" tests
-            rc=$?
-          fi
-          exit "$rc"
+          bash .github/scripts/ci.sh pytest-retry "$CI_TMP" -q -rfE
 
       - name: Summary
         if: always()
@@ -414,23 +342,7 @@ jobs:
 
       - name: Collect build and emulator logs
         if: always()
-        run: |
-          set -uo pipefail
-          mkdir -p ci-artifacts/logs ci-artifacts/qemu-build
-          for f in qemu/build/meson-logs/meson-log.txt qemu/build/config.log; do
-            if [ -f "$f" ]; then cp "$f" ci-artifacts/qemu-build/; fi
-          done
-          if [ -d "$CI_TMP" ]; then
-            rsync -am --include='*/' --include='*.png' --include='*.xml' --exclude='*' "$CI_TMP/" ci-artifacts/screenshots/
-          fi
-          for d in .x4emu/*/; do
-            [ -d "$d" ] || continue
-            n=$(basename "$d")
-            mkdir -p "ci-artifacts/logs/$n"
-            for f in console.log uart0.log qemu.log run.json; do
-              if [ -f "$d$f" ]; then cp "$d$f" "ci-artifacts/logs/$n/$f"; fi
-            done
-          done
+        run: bash .github/scripts/ci.sh collect ci-artifacts --qemu-build-logs '*.png' '*.xml'
 
       - name: Upload build and emulator logs
         if: always()
@@ -485,8 +397,7 @@ jobs:
       - name: make setup
         id: setup
         run: |
-          git config --global user.name  "x4pro-emu CI"
-          git config --global user.email "ci@x4pro-emu.invalid"
+          bash .github/scripts/ci.sh git-identity
           make setup
 
       - name: QEMU, fresh configure and build (the Makefile's configure line)
@@ -541,7 +452,7 @@ jobs:
           path: |
             ~/.platformio
             !~/.platformio/penv
-          key: pio-${{ runner.os }}-${{ runner.arch }}-venv-${{ steps.pio.outputs.version }}-${{ hashFiles('firmware/platformio.ini') }}
+          key: ${{ steps.pio-cache.outputs.cache-primary-key }}
 
       - name: Boot CrossPoint to Home
         id: smoke
@@ -577,24 +488,7 @@ jobs:
 
       - name: Collect build and emulator logs
         if: always()
-        run: |
-          set -uo pipefail
-          mkdir -p ci-artifacts/logs ci-artifacts/qemu-build
-          for f in qemu/build/meson-logs/meson-log.txt qemu/build/config.log; do
-            if [ -f "$f" ]; then cp "$f" ci-artifacts/qemu-build/; fi
-          done
-          if [ -d "$CI_TMP" ]; then      # tar, not rsync: macOS ships openrsync
-            mkdir -p ci-artifacts/screenshots
-            (cd "$CI_TMP" && find . \( -name '*.png' -o -name '*.xml' \) -print | tar -cf - -T -) | tar -xf - -C ci-artifacts/screenshots
-          fi
-          for d in .x4emu/*/; do
-            [ -d "$d" ] || continue
-            n=$(basename "$d")
-            mkdir -p "ci-artifacts/logs/$n"
-            for f in console.log uart0.log qemu.log run.json; do
-              if [ -f "$d$f" ]; then cp "$d$f" "ci-artifacts/logs/$n/$f"; fi
-            done
-          done
+        run: bash .github/scripts/ci.sh collect ci-artifacts --qemu-build-logs '*.png' '*.xml'
 
       - name: Upload build and emulator logs
         if: always()

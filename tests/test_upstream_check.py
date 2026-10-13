@@ -1,13 +1,10 @@
 """tools/upstream_check.py without the network: parsing, findings, rendering, the tests summary, and
 the --golden-drift oracle table in conftest.py (docs/upstream.md). The 2026-10-12 manual check is the
 fixture: CrossPoint 1.6.5 93 commits past the pin, freeink-sdk 108, QEMU unmoved."""
-import importlib.util, json, os, re
+import json, os, re, subprocess
 import pytest
 from conftest import ROOT, GOLDEN_ORACLES
-
-spec = importlib.util.spec_from_file_location('upstream_check', os.path.join(ROOT, 'tools', 'upstream_check.py'))
-uc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(uc)
+import upstream_check as uc                      # tools/, which conftest puts on sys.path
 
 PIN = '7db14a015ca4b1d74d3cbed131a748f3029a4517'
 REL = '93e98bb78702e29868a16a13b80c40e6b36ccdff'
@@ -48,10 +45,27 @@ def test_pins_from_files():
     assert uc.platform_from_ini('no platform here') is None
     assert uc.pio_core_from_workflow(CI) == 'v6.1.19'
     assert uc.pio_core_from_workflow('env:\n      PIO_CORE_VERSION: v6.2.0\n') == 'v6.2.0'
-    pins = uc.local_pins(ROOT)            # this checkout: the Makefile, the gitlink, ci.yml
+    assert uc.pio_core_from_workflow('PIO_CORE_VERSION ?= v6.1.19\nPIO_CORE ?= x/$(PIO_CORE_VERSION).zip\n') == 'v6.1.19'
+    pins = uc.local_pins(ROOT)            # this checkout: the Makefile and the gitlink
     assert re.fullmatch(r'[0-9a-f]{40}', pins['qemu_ref'])
     assert re.fullmatch(r'[0-9a-f]{40}', pins['crosspoint'])
     assert pins['pio_core'] and pins['pio_core'].startswith('v')
+
+
+def test_the_makefile_is_the_only_pin_file():
+    """QEMU_REF and the PlatformIO core are pinned once, in the Makefile: the workflows read both
+    through .github/scripts/ci.sh, which must agree with what this report reads, and carry no
+    version of their own that could drift from it."""
+    out = subprocess.run(['bash', os.path.join(ROOT, '.github', 'scripts', 'ci.sh'), 'pins'], cwd=ROOT,
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    got = dict(line.split('=', 1) for line in out.stdout.split())
+    pins = uc.local_pins(ROOT)
+    assert got == {'qemu_ref': pins['qemu_ref'], 'pio_core': pins['pio_core']}
+    for wf in ('ci.yml', 'upstream.yml'):
+        text = open(os.path.join(ROOT, '.github', 'workflows', wf)).read()
+        assert pins['pio_core'] not in text and pins['qemu_ref'][:8] not in text, wf
+        assert not re.search(r'^\s*(PIO_CORE|PIO_CORE_VERSION|QEMU_REF):', text, re.M), wf   # no env pin
 
 
 def test_local_drift_checks():
@@ -60,6 +74,21 @@ def test_local_drift_checks():
     assert uc.stale_cellar_paths(text) == [gone]
     assert uc.stale_cellar_paths('-I/usr/include -I/opt/homebrew/include') == []
     assert uc.venv_base('home = /opt/homebrew/opt/python@3.14/bin\nversion = 3.14.7\n') == '/opt/homebrew/opt/python@3.14/bin'
+
+
+def test_a_venv_with_a_vanished_base_is_reported_with_its_own_fix(tmp_path):
+    """.venv-pio (the Makefile's PlatformIO venv) goes stale exactly as .venv does when Homebrew
+    replaces the Python it was made from; each broken venv names the command that rebuilds it."""
+    gone = str(tmp_path / 'Cellar' / 'python@3.14' / 'gone' / 'bin')
+    for venv in ('.venv', '.venv-pio'):
+        (tmp_path / venv).mkdir()
+        (tmp_path / venv / 'pyvenv.cfg').write_text(f'home = {gone}\nversion = 3.14.0\n')
+    st = uc.local_state(str(tmp_path), pins={'crosspoint': None})
+    broken = {os.path.basename(v['venv']): v for v in st['broken_venvs']}
+    assert broken['.venv']['missing_base'] == gone and 'make setup' in broken['.venv']['fix']
+    assert broken['.venv-pio']['missing_base'] == gone and 'make firmware' in broken['.venv-pio']['fix']
+    texts = [f['action'] for f in uc.findings({'local': st}) if f['area'] == 'local']
+    assert any('rm -rf .venv-pio' in t for t in texts) and any('rm -rf .venv &&' in t for t in texts)
 
 
 class FakeBackend:

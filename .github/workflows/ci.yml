@@ -35,10 +35,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      # pioarduino's PlatformIO core fork, as used by the CrossPoint repo's own CI: the
-      # platform-espressif32 55.x zip pinned in firmware/platformio.ini expects it.
-      PIO_CORE: https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-      PIO_CORE_VERSION: v6.1.19
       CI_TMP: ${{ github.workspace }}/ci-tmp
 
     steps:
@@ -51,39 +47,18 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The shell steps this workflow shares with upstream.yml live in .github/scripts/ci.sh.
       - name: Install build dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          # CLAUDE.md's "Build" list, in Ubuntu 24.04 names. glib/pixman are QEMU's hard
-          # requirements; gcrypt/slirp/png back --enable-gcrypt/--enable-slirp/--enable-png in the
-          # Makefile's configure line; mtools + dosfstools are what tools/mksd.py shells out to
-          # (mkfs.vfat --offset needs dosfstools >= 4.2, which noble has).
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            git \
-            ninja-build \
-            meson \
-            pkg-config \
-            python3-venv \
-            libglib2.0-dev \
-            libpixman-1-dev \
-            libgcrypt20-dev \
-            libslirp-dev \
-            libpng-dev \
-            mtools \
-            dosfstools \
-            rsync
+        run: bash .github/scripts/ci.sh apt-deps      # CLAUDE.md's "Build" list, Ubuntu names
 
       - name: Configure git identity
         # `make setup` applies qemu-patches/ with `git am`, which refuses to commit without one.
-        run: |
-          git config --global user.name  "x4pro-emu CI"
-          git config --global user.email "ci@x4pro-emu.invalid"
+        run: bash .github/scripts/ci.sh git-identity
 
-      - name: Resolve the pinned QEMU ref
-        id: qemu
-        run: echo "ref=$(sed -n 's/^QEMU_REF *?*= *//p' Makefile | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Resolve the pins
+        # QEMU_REF and PIO_CORE_VERSION: the Makefile is where both are pinned.
+        id: pins
+        run: bash .github/scripts/ci.sh pins >> "$GITHUB_OUTPUT"
 
       - name: Restore QEMU cache
         id: qemu-cache
@@ -94,7 +69,8 @@ jobs:
           path: qemu
           # No restore-keys on purpose: a near-miss would restore a tree whose .x4pro-patched
           # marker hides a *different* patch series from `make setup`, producing a wrong binary.
-          key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
+          # upstream.yml's crosspoint-latest restores this same key: keep the two in step.
+          key: qemu-${{ runner.os }}-${{ steps.pins.outputs.qemu_ref }}-${{ hashFiles('qemu-patches/*.patch') }}
 
       - name: Re-mark the cached QEMU tree as patched
         if: steps.qemu-cache.outputs.cache-hit == 'true'
@@ -108,23 +84,14 @@ jobs:
         with:
           # Toolchain and framework packages only. The firmware build output is not cached.
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-${{ hashFiles('firmware/platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ steps.pins.outputs.pio_core }}-${{ hashFiles('firmware/platformio.ini') }}
           restore-keys: |
-            pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-
+            pio-${{ runner.os }}-${{ steps.pins.outputs.pio_core }}-
 
       - name: Install PlatformIO core
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -U "$PIO_CORE"
-          # platform-espressif32's builder imports these unconditionally and its own penv
-          # bootstrap does not install them reliably on the hosted runners (same pin as the
-          # CrossPoint repo's CI).
-          python -m pip install -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
-            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
-            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
-            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
-          pio --version
+        # pioarduino's PlatformIO core fork, as used by the CrossPoint repo's own CI: the
+        # platform-espressif32 55.x zip pinned in firmware/platformio.ini expects it.
+        run: bash .github/scripts/ci.sh pio-core "${{ steps.pins.outputs.pio_core }}"
 
       - name: make setup
         run: make setup
@@ -139,14 +106,14 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: qemu
-          key: qemu-${{ runner.os }}-${{ steps.qemu.outputs.ref }}-${{ hashFiles('qemu-patches/*.patch') }}
+          key: ${{ steps.qemu-cache.outputs.cache-primary-key }}
 
       - name: Save PlatformIO cache
         if: steps.pio-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ env.PIO_CORE_VERSION }}-${{ hashFiles('firmware/platformio.ini') }}
+          key: ${{ steps.pio-cache.outputs.cache-primary-key }}
 
       - name: make test
         # PYTEST_ARGS is empty by default; here it pins pytest's tmp_path under the workspace so
@@ -158,28 +125,9 @@ jobs:
 
       - name: Collect screenshots and emulator logs
         if: always()
-        run: |
-          set -uo pipefail
-          mkdir -p ci-artifacts/logs
-          # Screenshots, goldens diffed against them and EPD traces from pytest's basetemp. Copied
-          # by pattern, not wholesale: the same directories hold the 16 MB flash and 64 MB SD
-          # images each test builds.
-          if [ -d "$CI_TMP" ]; then
-            rsync -am \
-              --include='*/' --include='*.png' --include='*.bmp' --include='*.jsonl' \
-              --exclude='*' "$CI_TMP/" ci-artifacts/screenshots/
-          fi
-          # One .x4emu/<instance>/ per test; the console and QEMU logs are what a failure is read
-          # from. Copied out of the dot-directory so upload-artifact does not treat them as hidden.
-          for d in .x4emu/*/; do
-            [ -d "$d" ] || continue
-            n=$(basename "$d")
-            mkdir -p "ci-artifacts/logs/$n"
-            for f in console.log uart0.log qemu.log run.json; do
-              if [ -f "$d$f" ]; then cp "$d$f" "ci-artifacts/logs/$n/$f"; fi
-            done
-          done
-          du -sh ci-artifacts || true
+        # Screenshots, the goldens diffed against them and EPD traces from pytest's basetemp, and
+        # every instance's console and QEMU logs (never the flash and SD images next to them).
+        run: bash .github/scripts/ci.sh collect ci-artifacts '*.png' '*.bmp' '*.jsonl'
 
       - name: Upload screenshots and logs
         if: always()

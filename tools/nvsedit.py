@@ -38,7 +38,7 @@ image: the stock reaches Home exactly as with net_en = 0 (which also skips its 1
 still the owner's: the app, the phy calibration blobs, `otaPromptDay`, the serial in eFuse BLOCK3 and
 the MAC (docs/device/partitions.md).
 """
-import argparse, struct, sys
+import argparse, binascii, struct, sys
 
 PAGE = 4096
 STATE_ACTIVE, STATE_FULL, STATE_UNINIT = 0xfffffffe, 0xfffffffc, 0xffffffff
@@ -49,12 +49,8 @@ ENTRIES = 126                       # data entries per page (4096 - 64 header/bi
 REDACT = ('sta_ssid', 'sta_pwd', 'wifi_creds')      # user_config keys holding the owner's WiFi credentials
 
 def crc32_le(data, init=0xFFFFFFFF):
-    c = init ^ 0xFFFFFFFF
-    for b in data:
-        c ^= b
-        for _ in range(8):
-            c = (c >> 1) ^ (0xEDB88320 if c & 1 else 0)
-    return c ^ 0xFFFFFFFF
+    """ESP-IDF's esp_crc32_le(init, data): zlib's CRC-32 continued from `init`."""
+    return binascii.crc32(bytes(data), init) & 0xFFFFFFFF
 
 def entry_state(page, i):
     return (page[32 + i // 4] >> ((i % 4) * 2)) & 3

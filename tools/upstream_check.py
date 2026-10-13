@@ -12,15 +12,16 @@ r"""What moved upstream since this repository's pins: a report, not a gate (docs
     repository commits, the commits in between, its default branch, the freeink-sdk commit and the
     PlatformIO platform that release pins, and the pioarduino core its own CI installs;
   - Espressif QEMU `esp-develop` HEAD against the Makefile's QEMU_REF;
-  - the pioarduino platform and core releases against what CrossPoint pins and ci.yml installs;
+  - the pioarduino platform and core releases against what CrossPoint pins and the Makefile's
+    PIO_CORE_VERSION installs (the one core pin: ci.yml and upstream.yml read it there);
   - this checkout (no network): a qemu/build configured against Homebrew Cellar paths that no
-    longer exist (the 2026-10-12 libgcrypt case), venvs whose base interpreter is gone, and a
-    firmware/ checked out away from the pin.
+    longer exist (the 2026-10-12 libgcrypt case), venvs whose base interpreter is gone (.venv,
+    .venv-pio, ~/.platformio/penv), and a firmware/ checked out away from the pin.
 
 The stock firmware is not watched: its OTA packages are encrypted and reach the device only through
 the device's own update prompt. The report says so every time.
 
-The pins are read from this checkout (Makefile, `git ls-tree HEAD firmware`, ci.yml); upstream is
+The pins are read from this checkout (the Makefile, `git ls-tree HEAD firmware`); upstream is
 asked through `gh api` when `gh` is installed and authenticated (GH_TOKEN in CI), else through
 plain git (`git ls-remote`, and a treeless fetch into a temporary bare repository for commit
 counts and gitlinks). A gh call that fails is retried through git.
@@ -125,10 +126,11 @@ def platform_from_ini(text):
 
 
 def pio_core_from_workflow(text):
-    """The pioarduino core version a GitHub workflow installs (`.../platformio-core/archive/refs/tags/vX.zip`
-    or a `PIO_CORE_VERSION: vX` env line), or None."""
+    """The pioarduino core version a GitHub workflow or a Makefile installs (`.../platformio-core/
+    archive/refs/tags/vX.zip`, a `PIO_CORE_VERSION: vX` env line or a `PIO_CORE_VERSION ?= vX`
+    assignment), or None."""
     m = re.search(r'platformio-core/archive/refs/tags/(v?[\d.]+)\.zip', text or '') or \
-        re.search(r'^\s*PIO_CORE_VERSION:\s*(\S+)', text or '', re.M)
+        re.search(r'^\s*PIO_CORE_VERSION\s*(?::|\??=)\s*(v?[\d.]+)', text or '', re.M)
     return m.group(1) if m else None
 
 
@@ -297,7 +299,7 @@ class Remote:
     def __init__(self, backend='auto'):
         self.git = GitBackend()
         use_gh = backend == 'gh' or (backend == 'auto' and GhBackend.available())
-        self.gh = GhBackend() if use_gh and backend != 'git' else None
+        self.gh = GhBackend() if use_gh else None
         self.errors, self.notes = [], []
 
     @property
@@ -343,11 +345,10 @@ def local_pins(root=ROOT):
     mk = _read(os.path.join(root, 'Makefile')) or ''
     m = re.search(r'^QEMU_REF\s*\??=\s*([0-9a-f]{7,40})', mk, re.M)
     tree = (_git('ls-tree', 'HEAD', 'firmware', cwd=root) or '').split()
-    ci = _read(os.path.join(root, '.github', 'workflows', 'ci.yml'))
     return {
         'qemu_ref': m.group(1) if m else None,
         'crosspoint': tree[2] if len(tree) >= 3 and tree[1] == 'commit' else None,
-        'pio_core': pio_core_from_workflow(ci),
+        'pio_core': pio_core_from_workflow(mk),
     }
 
 
@@ -369,6 +370,13 @@ def venv_base(cfg_text):
     return m.group(1).strip() if m else None
 
 
+def venvs(root=ROOT):
+    """(pyvenv.cfg, how to recreate it) for every venv `make` relies on."""
+    return ((os.path.join(root, '.venv', 'pyvenv.cfg'), 'rm -rf .venv && make setup'),
+            (os.path.join(root, '.venv-pio', 'pyvenv.cfg'), 'rm -rf .venv-pio && make firmware (its rule recreates it)'),
+            (os.path.expanduser('~/.platformio/penv/pyvenv.cfg'), 'delete ~/.platformio/penv; the next pio run rebuilds it'))
+
+
 def local_state(root=ROOT, pins=None):
     """Drift on this machine (no network): what `make` would trip over next."""
     pins = pins or local_pins(root)
@@ -376,11 +384,10 @@ def local_state(root=ROOT, pins=None):
     bn = os.path.join(root, 'qemu', 'build', 'build.ninja')
     if os.path.exists(bn):
         out['qemu_build_stale_kegs'] = stale_cellar_paths(_read(bn))
-    for cfg in (os.path.join(root, '.venv', 'pyvenv.cfg'),
-                os.path.expanduser('~/.platformio/penv/pyvenv.cfg')):
+    for cfg, fix in venvs(root):
         home = venv_base(_read(cfg))
         if home and not os.path.isdir(home):
-            out['broken_venvs'].append({'venv': os.path.dirname(cfg), 'missing_base': home})
+            out['broken_venvs'].append({'venv': os.path.dirname(cfg), 'missing_base': home, 'fix': fix})
     fw = os.path.join(root, 'firmware')
     if os.path.exists(os.path.join(fw, '.git')):
         head = _git('rev-parse', 'HEAD', cwd=fw)
@@ -521,11 +528,11 @@ def findings(rep):
     core = pio.get('core') or {}
     if core.get('crosspoint_ci') and core.get('pin') and core['crosspoint_ci'] != core['pin']:
         add('action', 'platformio',
-            f'CrossPoint\'s CI at the release installs pioarduino core {core["crosspoint_ci"]}; ci.yml pins {core["pin"]}.',
-            'Move ci.yml\'s PIO_CORE / PIO_CORE_VERSION when the firmware pin moves.')
+            f'CrossPoint\'s CI at the release installs pioarduino core {core["crosspoint_ci"]}; the Makefile pins {core["pin"]}.',
+            'Move the Makefile\'s PIO_CORE_VERSION when the firmware pin moves (CI reads it there).')
     elif core.get('latest') and core.get('pin') and core['latest'] != core['pin']:
         add('info', 'platformio',
-            f'pioarduino core {core["latest"]} is out; ci.yml pins {core["pin"]}, as CrossPoint\'s own CI does.')
+            f'pioarduino core {core["latest"]} is out; the Makefile pins {core["pin"]}, as CrossPoint\'s own CI does.')
     loc = rep.get('local') or {}
     if loc.get('qemu_build_stale_kegs'):
         add('action', 'local',
@@ -534,7 +541,7 @@ def findings(rep):
             'rm -rf qemu/build && make qemu (a fresh configure; the Makefile line has --disable-gnutls).')
     for v in loc.get('broken_venvs') or []:
         add('action', 'local', f'{v["venv"]}: its base interpreter {v["missing_base"]} is gone.',
-            'Recreate it: rm -rf .venv && make setup (for ~/.platformio/penv: delete it, the next pio run rebuilds it).')
+            f'Recreate it: {v.get("fix") or "delete it and rebuild it"}.')
     fc = loc.get('firmware_checkout')
     if fc and fc.get('head') and not fc.get('at_pin'):
         add('info', 'local', f'firmware/ is checked out at {_s(fc["head"])}, not the pin '
@@ -604,7 +611,7 @@ def render_markdown(rep):
                  f'| {"no" if q.get("moved") is False else n(qvp.get("ahead_by")) + " commits"} |')
     lines.append(f'| platform-espressif32 | {pl.get("pin") or "?"} | latest {pl.get("latest") or "?"} | '
                  f'{"no" if pl.get("pin") == pl.get("latest") else "yes"} |')
-    lines.append(f'| pioarduino core (ci.yml) | {co.get("pin") or "?"} | CrossPoint CI {co.get("crosspoint_ci") or "?"}, '
+    lines.append(f'| pioarduino core (Makefile) | {co.get("pin") or "?"} | CrossPoint CI {co.get("crosspoint_ci") or "?"}, '
                  f'latest {co.get("latest") or "?"} | {"no" if co.get("pin") == co.get("latest") else "yes"} |')
     lines.append('')
     icon = {'drift': '🟠 drift', 'action': '🔴 action', 'info': 'ℹ️ info', 'ok': '🟢 ok'}
@@ -699,8 +706,9 @@ def summarize_tests(junits, drift_path=None, logs=None, prefix='', title='Tests'
     count = {}
     for v in results.values():
         count[v['outcome']] = count.get(v['outcome'], 0) + 1
-    drift = [r for r in read_drift(drift_path) if r.get('kind') == 'golden-drift'] if drift_path else []
-    unhealthy = [r for r in read_drift(drift_path) if r.get('kind') == 'unhealthy'] if drift_path else []
+    rows = read_drift(drift_path) if drift_path else []
+    drift = [r for r in rows if r.get('kind') == 'golden-drift']
+    unhealthy = [r for r in rows if r.get('kind') == 'unhealthy']
     crashes = []
     if logs:
         for c in sorted(glob.glob(os.path.join(logs, '*', 'console.log'))):
@@ -719,7 +727,8 @@ def summarize_tests(junits, drift_path=None, logs=None, prefix='', title='Tests'
         lines.append('- pytest: ' + ', '.join(f'{count[o]} {"golden drift (xfail)" if o == "xfailed" else o}'
                                               for o in order if count.get(o)))
     if flaky:
-        lines.append(f'- passed only on the retry (input race, NEXT_PHASE §0 h): {", ".join(sorted(flaky))}')
+        lines.append(f'- passed only on the retry (inputs are fixed at the root since 2026-10-13, '
+                     f'docs/x4emu.md "Input delivery": worth a look): {", ".join(sorted(flaky))}')
     if drift:
         lines += ['', '#### Golden drift — review, not a failure', '',
                   'The emulator ran healthy (no crash marker, no unknown panel command); only a comparison '

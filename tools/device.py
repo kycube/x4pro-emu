@@ -2,22 +2,23 @@
 """Toolbox for the physical Xteink X4 Pro on the desk.
 
 Safety rules (see CLAUDE.md): nothing here erases flash, burns efuses, or writes below
-0x10000. That is enforced structurally: every esptool invocation goes through `esptool()`
-or `esp_run()`, and both refuse an `erase-*` subcommand outright and refuse a `write-flash`
-carrying any address below the first app slot (`FIRST_WRITABLE` = 0x10000). Nothing here
-writes otadata. `flash-crosspoint` and `restore-stock` refuse to run unless a verified
-double backup exists under images/device/. Every write-capable subcommand prints what it
-will do and the port it will use before doing it.
+0x10000. That is enforced structurally: every esptool command line is built by
+`_esptool_cmd()`, which refuses an `erase-*` subcommand outright and refuses a `write-flash`
+carrying any address below the first app slot (`FIRST_WRITABLE` = 0x10000) before anything
+runs. Nothing here writes otadata. `flash-crosspoint` and `restore-stock` refuse to run
+unless a verified double backup exists under images/device/. Every write-capable subcommand
+prints what it will do and the port it will use before doing it.
 
 The flash layout is **read, not assumed**. The partition table at 0x8000 is parsed into
 its app slots and its otadata partition, and otadata is decoded the way the ESP-IDF
 bootloader decodes it: of the two `esp_ota_select_entry_t` sectors, the one with the
 highest sequence number whose CRC-32 checks out wins, and the slot it selects is
-`(seq - 1) % <number of OTA app slots>`. This is not academic on this device. Until
-2026-09-07 app0 held the app that boots; then the owner ran the device's own Upgrade menu,
-the OTA wrote stock 7.5.4 into **app1** and moved otadata to it, and app0 (stock 7.2.4) is
-no longer started at all. A tool that assumed app0 would now write an app the bootloader
-never runs and report success.
+`(seq - 1) % <number of OTA app slots>`. This is not academic on this device: every OTA
+the owner runs from the device's own Upgrade menu writes the *other* slot and moves otadata
+to it. Until 2026-09-07 app0 (stock 7.2.4) booted; that update wrote 7.5.4 into **app1**
+(otadata seq 2), and the 2026-10-12 one wrote 7.6.8 back into **app0** (seq 3). A tool that
+assumed a slot would, half the time, write an app the bootloader never runs and report
+success.
 
 So: `slots` prints the whole picture read-only, offline from a dump or live from the
 device; `flash-crosspoint` and `restore-stock` read otadata before they write anything and
@@ -49,9 +50,9 @@ FLASH_SIZE = 0x1000000
 FIRST_WRITABLE = 0x10000
 
 def _refuse_forbidden_write(args):
-    """Structural guard on every esptool command this file builds: no erase, and no
-    write-flash that names an address below FIRST_WRITABLE. Exits before the subprocess
-    starts, so a mistaken caller cannot reach the flash at all."""
+    """Structural guard on every esptool command this file builds (`_esptool_cmd()` calls it
+    first): no erase, and no write-flash that names an address below FIRST_WRITABLE. Exits
+    before the subprocess starts, so a mistaken caller cannot reach the flash at all."""
     args = [str(x) for x in args]
     for tok in args:
         if tok.replace('_', '-').startswith('erase-'):
@@ -76,11 +77,16 @@ def find_port(explicit=None):
         sys.exit('no USB serial port found (/dev/cu.usbmodem* or /dev/ttyACM*)')
     return cands[0]
 
-def esptool(port, *args, before='default-reset', after='hard-reset', check=True):
+def _esptool_cmd(port, args, before, after):
+    """The one place an esptool command line is built; the guard runs before it exists."""
     _refuse_forbidden_write(args)
-    cmd = [PY, '-m', 'esptool', '--chip', 'esp32s3', '-p', port, '--before', before, '--after', after] + list(args)
+    return [PY, '-m', 'esptool', '--chip', 'esp32s3', '-p', port, '--before', before, '--after', after] + list(args)
+
+def esptool(port, *args, before='default-reset', after='hard-reset'):
+    """Run esptool with its output on the terminal (progress of a 16 MB read); raises on failure."""
+    cmd = _esptool_cmd(port, args, before, after)
     print('+', ' '.join(cmd), flush=True)
-    return subprocess.run(cmd, check=check)
+    return subprocess.run(cmd, check=True)
 
 def sha256(path):
     h = hashlib.sha256()
@@ -90,15 +96,19 @@ def sha256(path):
     return h.hexdigest()
 
 def verified_backup():
-    """Return (a, b) paths of a verified backup pair, or None."""
+    """(a, b, data) for the newest backup pair whose two reads are identical, or None. `data`
+    is a's bytes, the very bytes whose SHA-256 was compared with b's: the write commands work
+    on what was verified, without reading the 16 MB a second time."""
     pairs = {}
     for p in glob.glob(os.path.join(ROOT, 'images/device/flash-*-a.bin')):
         b = p[:-5] + 'b.bin'
         if os.path.exists(b) and os.path.getsize(p) == FLASH_SIZE and os.path.getsize(b) == FLASH_SIZE:
             pairs[p] = b
     for a, b in sorted(pairs.items(), reverse=True):
-        if sha256(a) == sha256(b):
-            return a, b
+        with open(a, 'rb') as f:
+            data = f.read()
+        if len(data) == FLASH_SIZE and hashlib.sha256(data).hexdigest() == sha256(b):
+            return a, b, data
     return None
 
 def cmd_inventory(a):
@@ -175,7 +185,7 @@ def cmd_console(a):
                     if a.reset:
                         hard_reset(ser); a.reset = False
                         f.write(f'[{time.time()-t0:8.3f}] <hard reset via RTS>\n')
-                except Exception as e:
+                except Exception:
                     time.sleep(0.2)
                     continue
             try:
@@ -216,15 +226,14 @@ def cmd_image_sd(a):
             f.truncate(p2)
     print('saved', out)
 
-# No STOCK_APP0 / STOCK_APP1 / OTADATA constants any more, on purpose: those addresses are
-# what the stock table happens to say today (app0 0x10000, app1 0x7F0000, otadata 0xE000),
-# and assuming them is exactly the bug this file no longer has. Every offset below comes
-# out of the table the device is carrying. The one address still written down is
-# FIRST_WRITABLE, which is a policy floor, not a layout guess.
+# No app-slot or otadata address constants, on purpose: app0 0x10000, app1 0x7F0000 and
+# otadata 0xE000 are what the stock table happens to say, and assuming them is the bug this
+# file must not have. Every offset below comes out of the table the device is carrying; the
+# one address written down is FIRST_WRITABLE, a policy floor, not a layout guess.
 
 def esp_run(port, *args, before='default-reset', after='no-reset', quiet=False):
-    _refuse_forbidden_write(args)
-    cmd = [PY, '-m', 'esptool', '--chip', 'esp32s3', '-p', port, '--before', before, '--after', after] + list(args)
+    """Run esptool with its output captured (the interesting lines echoed); exits on failure."""
+    cmd = _esptool_cmd(port, args, before, after)
     if not quiet:
         print('+', ' '.join(cmd), flush=True)
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -237,7 +246,8 @@ def esp_run(port, *args, before='default-reset', after='no-reset', quiet=False):
 
 def read_region(port, off, size, path, before='no-reset', quiet=False):
     esp_run(port, 'read-flash', hex(off), hex(size), path, before=before, quiet=quiet)
-    return open(path, 'rb').read()
+    with open(path, 'rb') as f:
+        return f.read()
 
 # ----------------------------------------------------------------- flash layout
 # Everything below reads the layout; nothing below writes anything. A "reader" is just
@@ -373,7 +383,11 @@ def parse_app_desc(head):
 def app_image_size_via(read, off, cap):
     """Size of the ESP app image at `off` (header + segments + checksum pad + optional
     SHA-256), walking the segment headers through `read`. Only the 8-byte headers are
-    fetched, so this stays cheap even over a serial link."""
+    fetched, so this stays cheap even over a serial link.
+
+    The checksum byte is the last byte of the 16-byte block the segments end in, as
+    esptool's align_file_position(f, 16) puts it, so segments that end on a 16-byte boundary
+    are followed by 15 bytes of padding and the checksum: 16 bytes, never 0."""
     head = read(off, 24)
     if len(head) < 24 or head[0] != 0xE9:
         return None
@@ -386,7 +400,7 @@ def app_image_size_via(read, off, cap):
         p += 8 + struct.unpack('<II', h)[1]
         if p > cap:
             return None
-    p = (p + 15) // 16 * 16
+    p += 16 - p % 16                    # zero padding, then the checksum byte
     if hash_app:
         p += 32
     return p if p <= cap else None
@@ -549,11 +563,11 @@ def boot_slot_refusal(layout, target, action, subcommand):
         f"      That overwrites what {b['label']} holds now. It is in the verified backup byte for byte,"
         f" and `restore-stock --slot {b['label']}` puts it back.",
         '    * or leave the flash alone and let the device move its own boot pointer: its Upgrade menu'
-        ' writes otadata, which is how app1 became the boot slot on 2026-09-07.',
+        ' writes otadata, which is how the boot slot moved on 2026-09-07 and again on 2026-10-12.',
         '',
         '  This tool will not move the boot pointer itself: otadata sits below'
         f' {FIRST_WRITABLE:#x} and CLAUDE.md rule 2 forbids writing there without the owner saying so.',
-        # A future `flash-stock-patched` (docs/NEXT_PHASE.md §0.4.c) wants exactly that: the
+        # A future `flash-stock-patched` (docs/NEXT_PHASE.md §0.c) wants exactly that: the
         # patched app into the *other* slot plus an otadata entry marked PENDING_VERIFY so a
         # bad image rolls back. That needs the owner's explicit go-ahead first, so no code
         # for it exists here.
@@ -621,13 +635,14 @@ def pick_target(layout, label):
                  f"(it has: {', '.join(s['label'] for s in layout['apps'])})")
     return target
 
-def extracted_stock_path(slot, desc):
+def stock_image_name(slot, desc):
+    """stock-<slot>-<version>.bin, the name the reference copies under images/device/ carry."""
     ver = desc['version'] if desc else 'unknown'
-    return os.path.join(ROOT, 'images/device', f"stock-{slot['label']}-{ver}.bin")
+    return f"stock-{slot['label']}-{ver}.bin"
 
 def staged_image(data, name):
-    """The bytes esptool writes, in a temporary file. Never the reference copy at
-    extracted_stock_path(): the stock tools and tests read that one as the pristine app, and a
+    """The bytes esptool writes, in a temporary file. Never the reference copy of the same name
+    under images/device/: the stock tools and tests read that one as the pristine app, and a
     backup taken while a patched app is installed would otherwise overwrite it -- in plan-only
     mode too, since the old code wrote it before asking for --yes (found 2026-10-13)."""
     path = os.path.join(tempfile.mkdtemp(), name)
@@ -659,9 +674,10 @@ def cmd_flash_crosspoint(a):
     vb = verified_backup()
     if not vb:
         sys.exit('REFUSING: no verified double backup under images/device/ (run `device.py backup` first)')
-    backup = open(vb[0], 'rb').read()
+    backup = vb[2]
     fw = a.firmware or os.path.join(ROOT, 'firmware/.pio/build/x4pro/firmware.bin')
-    fwdata = open(fw, 'rb').read()
+    with open(fw, 'rb') as f:
+        fwdata = f.read()
     layout = device_layout(port, 'which slot boots decides everything below')
     check_backup_matches(layout, backup)
     target = pick_target(layout, a.slot)
@@ -669,7 +685,7 @@ def cmd_flash_crosspoint(a):
                                 'flash-crosspoint')
     if refusal:
         sys.exit(refusal)
-    if fwdata[0] != 0xE9 or len(fwdata) > target['size']:
+    if fwdata[:1] != b'\xe9' or len(fwdata) > target['size']:
         sys.exit(f"{fw} is not an app image that fits {target['label']} ({target['size']} bytes)")
     off = target['offset']
     other = next((s for s in layout['apps'] if s['label'] != target['label']), None)
@@ -711,7 +727,7 @@ def cmd_flash_crosspoint(a):
         h1 = read_region(port, other['offset'], 0x1000, os.path.join(tmp, 'other-head.bin'))
         if any(b != 0xFF for b in h1):
             sys.exit(f"ABORT: {other['label']} is not blank; not overwriting it")
-        stock_img = staged_image(backup[off:off + stock_size], os.path.basename(extracted_stock_path(target, stock_desc)))
+        stock_img = staged_image(backup[off:off + stock_size], stock_image_name(target, stock_desc))
         esp_run(port, 'write-flash', hex(other['offset']), stock_img)
         back = read_region(port, other['offset'], 0x1000, os.path.join(tmp, 'other-head2.bin'))
         if back != backup[off:off + 0x1000]:
@@ -737,7 +753,7 @@ def cmd_restore_stock(a):
     vb = verified_backup()
     if not vb:
         sys.exit('REFUSING: no verified double backup')
-    backup = open(vb[0], 'rb').read()
+    backup = vb[2]
     layout = device_layout(port, 'which slot boots decides everything below')
     check_backup_matches(layout, backup)
     target = pick_target(layout, a.slot)
@@ -755,7 +771,7 @@ def cmd_restore_stock(a):
     print(f"      the image is {pristine_note(data)}")
     if not a.yes:
         sys.exit('pass --yes to proceed')
-    img = staged_image(data, os.path.basename(extracted_stock_path(target, desc)))
+    img = staged_image(data, stock_image_name(target, desc))
     esp_run(port, 'write-flash', hex(off), img, before='default-reset')
     tmp = tempfile.mkdtemp()
     back = read_region(port, off, 0x1000, os.path.join(tmp, 'head.bin'))

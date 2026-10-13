@@ -21,6 +21,14 @@ PARTTABLE_OFF = 0x8000
 OTADATA_OFF = 0xE000
 APP0_OFF = 0x10000
 
+def padded(path):
+    """The image at `path` (at most 16 MB), 0xFF-padded to 16 MB."""
+    with open(path, 'rb') as f:
+        data = bytearray(f.read())
+    if len(data) > FLASH_SIZE:
+        sys.exit(f'{path} is larger than 16 MB')
+    return data + b'\xff' * (FLASH_SIZE - len(data))
+
 def find_boot_app0():
     home = os.path.expanduser('~')
     cands = glob.glob(os.path.join(home, '.platformio/packages/framework-arduinoespressif32*/tools/partitions/boot_app0.bin'))
@@ -38,19 +46,13 @@ def main():
     a = ap.parse_args()
 
     if a.raw:
-        data = bytearray(open(a.raw, 'rb').read())
-        if len(data) > FLASH_SIZE:
-            sys.exit(f'{a.raw} is larger than 16 MB')
-        data += b'\xff' * (FLASH_SIZE - len(data))
-        open(a.out, 'wb').write(data)
+        data = padded(a.raw)
+        with open(a.out, 'wb') as f:
+            f.write(data)
         print(f'{a.out}: raw copy of {a.raw} ({len(data)} bytes)')
         return
 
-    if a.base:
-        img = bytearray(open(a.base, 'rb').read())
-        img += b'\xff' * (FLASH_SIZE - len(img))
-    else:
-        img = bytearray(b'\xff' * FLASH_SIZE)
+    img = padded(a.base) if a.base else bytearray(b'\xff' * FLASH_SIZE)
 
     parts = []
     if a.build:
@@ -70,12 +72,14 @@ def main():
         sys.exit('nothing to assemble')
 
     for off, path in parts:
-        blob = open(path, 'rb').read()
+        with open(path, 'rb') as f:
+            blob = f.read()
         if off + len(blob) > FLASH_SIZE:
             sys.exit(f'{path} at {off:#x} overflows the 16 MB image')
         img[off:off + len(blob)] = blob
         print(f'  {off:#09x} {len(blob):9d}  {path}')
-    open(a.out, 'wb').write(img)
+    with open(a.out, 'wb') as f:
+        f.write(img)
     print(f'{a.out}: {len(img)} bytes')
 
 if __name__ == '__main__':

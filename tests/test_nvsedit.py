@@ -14,11 +14,10 @@ tests/golden/stock-home.png outside the status bar, so the redaction is proven n
 its NVS: an image edited this way still boots to its home screen. Skips without the dump, the device
 card files (images/device/sd-files), the built QEMU or the golden.
 """
-import os, shutil, struct, subprocess, sys, pytest
+import os, shutil, struct, subprocess, pytest
 from conftest import x4emu, ROOT, PY, QEMU, instance_name, copy_image
 from test_stock import DUMP, GOLDEN, masked_diff, state, wait_for, stock_card   # noqa: F401 (fixture)
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import nvsedit                                                                 # noqa: E402
 
 NVSEDIT = os.path.join(ROOT, 'tools', 'nvsedit.py')
@@ -81,12 +80,15 @@ def str_value(image, key, ns=NS):
 
 @pytest.fixture
 def scratch(tmp_path):
-    """A scratch copy of the device dump (never edited in place; images/ is read-only here)."""
+    """A scratch copy of the device dump (never edited in place; images/ is read-only here). It has to
+    hold the owner's WiFi credentials -- the tests prove `redact` erases them -- so it is deleted when
+    the test ends: pytest keeps its last three base temp directories."""
     if not os.path.exists(DUMP):
         pytest.skip('device dump not available')
     flash = tmp_path / 'stock.bin'
     copy_image(DUMP, flash)
-    return flash
+    yield flash
+    flash.unlink(missing_ok=True)
 
 
 def test_redact_erases_the_credentials_and_turns_wifi_off(scratch):
@@ -183,6 +185,7 @@ def redacted(tmp_path, request, stock_card):                                    
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd))
     yield name, tmp_path
     x4emu(name, 'stop', check=False)
+    (tmp_path / 'stock.bin').unlink(missing_ok=True)       # redacted, but a copy of the owner's NVS
 
 
 def boot_to_home(name):

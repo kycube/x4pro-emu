@@ -4,7 +4,7 @@ QEMU    := qemu/build/qemu-system-xtensa
 NPROC   := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 QEMU_REF ?= febae182e132e4055529be423a818225ebddaa3a
 
-.PHONY: setup build test test-serial test-durations qemu firmware models clean-run run help rom-symbols
+.PHONY: setup build test test-serial test-durations qemu firmware models run help rom-symbols
 
 help:
 	@echo "make setup   - venv, clone qemu (esp-develop @ $(QEMU_REF)) + apply patches, clone firmware"
@@ -12,6 +12,8 @@ help:
 	@echo "make test    - model unit tests + pytest end-to-end on TEST_JOBS workers (no device needed)"
 	@echo "make test-serial    - the same, one test at a time"
 	@echo "make test-durations - re-measure tests/durations.json (the parallel run's order)"
+	@echo "make run     - build the firmware, boot it as instance NAME (dev0), screenshot images/last-run.png"
+	@echo "make rom-symbols    - images/rom/esp32s3_rev0_rom.nm, the ROM's symbols for stock-firmware PCs"
 
 setup: .venv/bin/python qemu/.x4pro-patched firmware/platformio.ini
 	@echo "setup done"
@@ -19,7 +21,7 @@ setup: .venv/bin/python qemu/.x4pro-patched firmware/platformio.ini
 .venv/bin/python:
 	python3 -m venv .venv
 	.venv/bin/pip install -q --upgrade pip
-	.venv/bin/pip install -q esptool pyserial pillow pytest pytest-xdist mcp capstone
+	.venv/bin/pip install -q esptool pyserial pillow pytest pytest-xdist mcp
 
 qemu/.git:
 	git clone --branch esp-develop --depth 1 https://github.com/espressif/qemu.git qemu
@@ -42,11 +44,15 @@ qemu/build/build.ninja:
 	  --enable-gcrypt --enable-slirp --enable-png --disable-user --disable-capstone \
 	  --disable-vnc --disable-gtk --disable-sdl --disable-docs --disable-werror --disable-gnutls
 
-# PlatformIO: pioarduino's core fork at the version CrossPoint's own CI uses (and ci.yml), in a venv of
-# its own on a Python the pinned platform accepts. platform-espressif32 55.03.311 refuses Python 3.15+,
-# which Homebrew's platformio formula moved to in October 2026 (the upstream watch's macos-build found
-# it), so the build no longer depends on that formula. `make firmware PIO=pio` uses one on PATH instead.
-PIO_CORE ?= https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+# PlatformIO: pioarduino's core fork at the version CrossPoint's own CI uses, in a venv of its own on a
+# Python the pinned platform accepts. platform-espressif32 55.03.311 refuses Python 3.15+, which
+# Homebrew's platformio formula moved to in October 2026 (the upstream watch's macos-build found it), so
+# the build no longer depends on that formula. `make firmware PIO=pio` uses one on PATH instead.
+# PIO_CORE_VERSION is the pin for everything: ci.yml and upstream.yml install the same core
+# (.github/scripts/ci.sh pins reads it here, as it reads QEMU_REF) and tools/upstream_check.py
+# compares it with CrossPoint's CI.
+PIO_CORE_VERSION ?= v6.1.19
+PIO_CORE ?= https://github.com/pioarduino/platformio-core/archive/refs/tags/$(PIO_CORE_VERSION).zip
 PIO_PYTHON ?= $(firstword $(foreach v,3.14 3.13 3.12 3.11 3.10,$(shell command -v python$(v) 2>/dev/null)))
 PIO ?= .venv-pio/bin/pio
 
@@ -83,9 +89,8 @@ test: models
 	$(if $(XDIST_ARGS),,@[ "$(TEST_JOBS)" -le 1 ] || echo "pytest-xdist is not in .venv (.venv/bin/pip install pytest-xdist): the tests run one at a time")
 	$(PY) -m pytest -q $(XDIST_ARGS) $(PYTEST_ARGS) tests
 
-test-serial: models
-	$(MAKE) -C models test
-	$(PY) -m pytest -q $(PYTEST_ARGS) tests
+test-serial:
+	$(MAKE) test TEST_JOBS=1
 
 # Re-measure every test's duration into tests/durations.json (merged: tests that did not run keep
 # their old value). Run it on an otherwise idle machine after adding or reshaping a long test.
@@ -103,14 +108,15 @@ run: firmware
 	$(PY) tools/x4emu --name $(NAME) wait-quiet --seconds 2 --timeout 60
 	$(PY) tools/x4emu --name $(NAME) screenshot images/last-run.png
 
-clean-run:
-	rm -rf .x4emu
-
-# ROM symbol table for reading stock-firmware PCs (images/ is gitignored): esp-rom-elfs 20241011.
+# ROM symbol table for reading stock-firmware PCs (images/ is gitignored): esp-rom-elfs 20241011, read
+# with the PlatformIO toolchain's nm (`make firmware` installs it). Written through a temporary file, so
+# a failed nm leaves no empty table behind that make would take as up to date.
 ROM_NM := images/rom/esp32s3_rev0_rom.nm
+ROM_ELFS := https://github.com/espressif/esp-rom-elfs/releases/download/20241011/esp-rom-elfs-20241011.tar.gz
+XTENSA_NM := $(HOME)/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-nm
 rom-symbols: $(ROM_NM)
 $(ROM_NM):
 	mkdir -p images/rom && cd images/rom && \
-	  curl -sSL -o esp-rom-elfs-20241011.tar.gz https://github.com/espressif/esp-rom-elfs/releases/download/20241011/esp-rom-elfs-20241011.tar.gz && \
+	  curl -sSfL -o esp-rom-elfs-20241011.tar.gz $(ROM_ELFS) && \
 	  tar -xzf esp-rom-elfs-20241011.tar.gz esp32s3_rev0_rom.elf && \
-	  $$(ls $$HOME/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-nm) -n esp32s3_rev0_rom.elf > esp32s3_rev0_rom.nm
+	  $(XTENSA_NM) -n esp32s3_rev0_rom.elf > esp32s3_rev0_rom.nm.tmp && mv esp32s3_rev0_rom.nm.tmp esp32s3_rev0_rom.nm
