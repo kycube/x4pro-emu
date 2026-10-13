@@ -13,28 +13,17 @@ so the screenshot is read without OCR or goldens. Exit -> re-enter shows the sta
 (`test_lua_state_survives_exit_on_stock_768`); a stop and a fresh cold boot from the same flash and
 card shows it across a power cycle, i.e. read back from the card and decrypted
 (`test_lua_state_survives_reboot_on_stock_768`; two tests on fresh cards, so a parallel run does not
-walk both halves one after the other). Boots the owner's 7.6.8 dump as a redacted copy; skips
-without it.
+walk both halves one after the other). Boots the owner's 7.6.8 dump as a redacted copy
+(tests/stockkit.py); skips without it.
 """
-import json
-import os
-import shutil
-import subprocess
-import sys
-
+import json, subprocess
 import pytest
-from conftest import x4emu, ROOT, PY, instance_name, copy_image
+from conftest import x4emu, emu_log
+from stockkit import (APP_CARD, DUMP_768, FAT_OFFSET, HAMBURGER, SKIP_IDLE, booted, boot_to_home,  # noqa: F401
+                      run_stock, settle, step, stock_card)
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
-import xtapp                                                                    # noqa: E402
-from test_stock import boot_to_home, settle, stock_card, tap                   # noqa: E402,F401
-
-DUMP_768 = os.path.join(ROOT, 'images', 'device', 'flash-2026-10-12-a.bin')
 APP_ID = 'state-check'
-HAMBURGER = (88, 38)
 MINI_APPS = (500, 150)            # 7.6.8's fifth row once /XTApps holds an app (unpatched)
-APP_CARD = (225, 355)             # the first card of the Extensions list
 EXIT = (504, 185)                 # "Exit" in the Home pad's 'Exit app "..."?' notice
 
 LINE_Y0, LINE_DY = 300, 20        # visit k (1-based) is a line at portrait y = LINE_Y0 + LINE_DY * k
@@ -75,43 +64,28 @@ def write_app(d):
 
 @pytest.fixture
 def state_stock(tmp_path, request, stock_card):
-    if not os.path.exists(DUMP_768):
-        pytest.skip('the 7.6.8 device dump is not available')
-    if not shutil.which('mcopy'):
-        pytest.skip('mtools not available')
-    name = instance_name(request.node.name, request.node.nodeid)
-    flash = tmp_path / 'stock.bin'
-    copy_image(DUMP_768, flash)
-    subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'redact'],
-                   check=True, stdout=subprocess.DEVNULL)
-    sd = tmp_path / 'sd.img'
-    copy_image(stock_card, sd)
-    rep = xtapp.install(str(sd), str(write_app(tmp_path / APP_ID)))
-    assert rep['card_dir'] == f'/XTApps/{APP_ID}', rep
-    x4emu(name, 'stop', check=False)
-    yield name, tmp_path, flash, sd
-    x4emu(name, 'stop', check=False)
+    """The redacted 7.6.8 copy and a card with the app on it, not booted (`start` boots it, the
+    reboot test twice). Yields (name, tmp_path, flash, card)."""
+    app = write_app(tmp_path / APP_ID)
+    with booted(request, tmp_path, stock_card, dump=DUMP_768, apps=(app,), boot=False) as s:
+        assert s.apps[0]['card_dir'] == f'/XTApps/{APP_ID}', s.apps
+        yield s.name, s.tmp, s.flash, s.sd
 
 
 def start(name, flash, sd):
-    x4emu(name, 'stop', check=False)
-    x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power')
+    run_stock(name, flash, sd, icount=SKIP_IDLE)
     boot_to_home(name)
-    settle(name, 2, 30)
 
 
 def open_app(name, from_list=False):
     """Home -> menu -> Mini Apps -> the app; `from_list`: the Extensions list is already on screen
     (where `leave_app` lands), so only the card is tapped. The re-entry used to tap the hamburger and
     the Mini Apps row on that list too: neither draws anything there, and the taps only "passed"
-    because `test_stock.tap`'s retries waited long enough to catch the status bar's minute repaint."""
+    because the old per-tap retries waited long enough to catch the status bar's minute repaint."""
     if not from_list:
-        tap(name, *HAMBURGER)
-        settle(name, 2, 30)
-        tap(name, *MINI_APPS)
-        settle(name, 2, 30)
-    tap(name, *APP_CARD)
-    settle(name, 2, 60)
+        step(name, *HAMBURGER, quiet=2)
+        step(name, *MINI_APPS, quiet=2)
+    step(name, *APP_CARD, quiet=2)
 
 
 def leave_app(name):
@@ -119,8 +93,7 @@ def leave_app(name):
     with the GDMA unable to reach PSRAM it never did, the save spun on AES_STATE forever."""
     x4emu(name, 'home', '--quiet', '1', '--wait', '20')
     settle(name, 2, 30)
-    tap(name, *EXIT)
-    settle(name, 2, 30)
+    step(name, *EXIT, quiet=2)
 
 
 def drawn(name, tmp, label):
@@ -136,13 +109,13 @@ def drawn(name, tmp, label):
 
 
 def card_file(sd, path, out):
-    r = subprocess.run(['mcopy', '-o', '-i', f'{sd}@@{xtapp.PART_OFFSET}', f'::{path}', str(out)],
+    r = subprocess.run(['mcopy', '-o', '-i', f'{sd}@@{FAT_OFFSET}', f'::{path}', str(out)],
                        capture_output=True, text=True)
     return out.read_bytes() if r.returncode == 0 else None
 
 
 def no_aes_errors(name):
-    err = open(os.path.join(ROOT, '.x4emu', name, 'stderr.log'), errors='replace').read()
+    err = emu_log(name, 'stderr.log')
     assert '[AES]' not in err, err
 
 

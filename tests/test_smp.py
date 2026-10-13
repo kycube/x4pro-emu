@@ -23,9 +23,9 @@ copies) booted on four instances at once, three times each; no console may print
 About 35 s and opt-in: `X4EMU_SMP_STRESS=1` (boots per instance: `X4EMU_SMP_BOOTS`).
 Without the fix six instances x eight boots asserted 26 times in 48 boots.
 """
-import glob, hashlib, os, re, shutil, struct, subprocess, threading, time
+import glob, hashlib, os, re, struct, subprocess, threading, time
 import pytest
-from conftest import x4emu, ROOT, PY, instance_name
+from conftest import x4emu, ROOT, PY, copy_image, emu_log, instance_dir, instance_name
 
 N_ITER = 1000000
 
@@ -183,15 +183,10 @@ def test_cores_see_stores_in_program_order(tmp_path, request):
     x4emu(name, 'stop', check=False)
     x4emu(name, 'run', '--flash', flash)
     try:
-        log = os.path.join(ROOT, '.x4emu', name, 'uart0.log')
-        t0, m = time.time(), None
-        while time.time() - t0 < 120 and m is None:
-            time.sleep(0.5)
-            try:
-                m = re.search(r'MP litmus: (\d+) iterations, (\d+) violations', open(log, errors='replace').read())
-            except FileNotFoundError:
-                pass
-        assert m, f'the litmus printed no result in 120 s:\n{open(log, errors="replace").read()[-2000:]}'
+        done = x4emu(name, 'wait-text', ' violations', '--file', 'uart0.log', '--timeout', 120, check=False)
+        log = emu_log(name, 'uart0.log')
+        m = re.search(r'MP litmus: (\d+) iterations, (\d+) violations', log)
+        assert done.returncode == 0 and m, f'the litmus printed no result in 120 s:\n{log[-2000:]}'
         assert int(m.group(1)) == N_ITER
         assert int(m.group(2)) == 0, (
             f'the APP CPU saw FLAG == i with a stale DATA {m.group(2)} times in {N_ITER} rounds: the two '
@@ -210,7 +205,7 @@ def test_stock_boots_without_spinlock_asserts(tmp_path):
         pytest.skip('device dump / card files not available')
     k, boots = 4, int(os.environ.get('X4EMU_SMP_BOOTS', '3'))
     base = tmp_path / 'stock.bin'
-    shutil.copyfile(STOCK, base)
+    copy_image(STOCK, base)
     # the dump holds the owner's WiFi credentials: every boot below runs a copy of this redacted one
     subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(base), 'redact'], check=True, stdout=subprocess.DEVNULL)
     card = tmp_path / 'card.img'
@@ -224,11 +219,11 @@ def test_stock_boots_without_spinlock_asserts(tmp_path):
             d = tmp_path / f'w{j}'
             d.mkdir(exist_ok=True)
             fl, sd = d / 'flash.bin', d / 'card.img'
-            shutil.copyfile(base, fl)
-            shutil.copyfile(card, sd)
+            copy_image(base, fl)
+            copy_image(card, sd)
             x4emu(name, 'stop', check=False)
             x4emu(name, 'run', '--flash', str(fl), '--sd', str(sd), '--boot-hold-power')
-            con = os.path.join(ROOT, '.x4emu', name, 'console.log')
+            con = os.path.join(instance_dir(name), 'console.log')
             t0, txt, done_at = time.time(), '', None
             while time.time() - t0 < 40:
                 time.sleep(0.5)
@@ -245,11 +240,15 @@ def test_stock_boots_without_spinlock_asserts(tmp_path):
                 results.append((name, b, done_at is not None, bad))
 
     threads = [threading.Thread(target=worker, args=(j,)) for j in range(k)]
-    for t in threads:
-        t.start()
-        time.sleep(0.7)
-    for t in threads:
-        t.join()
+    try:
+        for t in threads:
+            t.start()
+            time.sleep(0.7)
+        for t in threads:
+            t.join()
+    finally:
+        for f in [base, *tmp_path.glob('w*/flash.bin')]:      # redacted, but no copy outlives the test
+            f.unlink(missing_ok=True)
     bad = [r for r in results if r[3]]
     assert not bad, f'{len(bad)} of {len(results)} boots aborted: ' + '; '.join(f'{n} boot {b}: {l}' for n, b, _, l in bad)
     assert all(r[2] for r in results), f'a boot never returned from app_main: {results}'

@@ -28,100 +28,47 @@ this test and docs/lua-apps.md should be updated. What is asserted positively is
 clean: no Lua error, no watchdog, no panic, no reset.
 
 Needs the device dump and the device card's files like the rest of tests/test_stock.py, and skips
-otherwise (CI never has them). The patched flash copy lives in pytest's tmp_path only -- it still
-carries the owner's WiFi credentials, CLAUDE.md rule 6.
+otherwise (CI never has them). The flash copy is redacted and deleted (tests/stockkit.py).
 """
-import os, shutil, subprocess, sys
+import os
 import pytest
-from conftest import x4emu, ROOT, PY, instance_name, copy_image
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
-import xtapp                                                                   # noqa: E402
-from test_stock import (DUMP, PANEL_W, STATUS_BAR_COLS, boot_to_home,          # noqa: E402
-                        masked_diff, settle, state, stock_card, tap)           # noqa: F401
+from conftest import x4emu, ROOT
+from stockkit import (APP_CARD, GOLDEN_DIR, HAMBURGER, LUA_APPS_ROW, MENU_COLS, SKIP_IDLE,  # noqa: F401
+                      booted, boot_to_home, clean_console, masked_diff, state, step, stock_card)
 
 HELLO = os.path.join(ROOT, 'tests', 'data', 'hello-app')
-HAMBURGER = (88, 38)                 # the nav-menu icon on Home
-LUA_APPS_ROW = (585, 150)            # the sixth row: 160/245/330/415/500 are the five stock ones
-APP_CARD = (225, 355)                # the "Hello Lua" card on the app list
-MENU_COLS = (STATUS_BAR_COLS, PANEL_W - 60)     # the menu draws the date in the last 60 columns
 
 
 @pytest.fixture
 def stock_lua(tmp_path, request, stock_card):
-    """`test_stock.stock` with the `lua-apps-row` patch and our app on the card: a scratch copy of
-    the dump (`net_en` 0, `tools/stockpatch.py apply ... lua-apps-row`) and a copy of the device
-    card with `tests/data/hello-app` installed into /XTApps/hello by `tools/xtapp.py`. Yields
-    (instance name, tmp_path)."""
-    if not os.path.exists(DUMP):
-        pytest.skip('device dump not available')
-    if not shutil.which('mcopy'):
-        pytest.skip('mtools not available')
-    name = instance_name(request.node.name, request.node.nodeid)
-    flash = tmp_path / 'stock.bin'
-    copy_image(DUMP, flash)
-    for cmd in (['nvsedit.py', str(flash), 'set-u8', 'user_config', 'net_en', '0'],
-                ['stockpatch.py', 'apply', str(flash), 'lua-apps-row']):
-        subprocess.run([PY, os.path.join(ROOT, 'tools', cmd[0]), *cmd[1:]],
-                       check=True, stdout=subprocess.DEVNULL)
-    sd = tmp_path / 'sd.img'
-    copy_image(stock_card, sd)
-    rep = xtapp.install(str(sd), HELLO)
-    assert rep['card_dir'] == '/XTApps/hello' and 'app.xtapp' in rep['files'], rep
-    x4emu(name, 'stop', check=False)
-    x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd),
-          '--trace-epd', str(tmp_path / 'epd.jsonl'), '--boot-hold-power')
-    yield name, tmp_path
-    x4emu(name, 'stop', check=False)
-
-
-def tap_to(name, xy, golden, shot, cols=(STATUS_BAR_COLS, PANEL_W), tries=3, quiet=2):
-    """Tap, settle, screenshot and compare against tests/golden/GOLDEN (created from the shot when
-    missing, like `test_stock.golden_check`). A tap the stock dropped, or one that left the previous
-    screen up, is repeated once (`test_stock.step`)."""
-    g = os.path.join(ROOT, 'tests', 'golden', golden)
-    for attempt in range(tries):
-        tap(name, *xy, quiet=quiet)
-        settle(name, quiet, 120)
-        x4emu(name, 'screenshot', str(shot))
-        if not os.path.exists(g):
-            shutil.copyfile(shot, g)
-            print(f'golden created: {g}')
-            return shot
-        n = masked_diff(shot, g, cols)
-        if n == 0:
-            return shot
-    raise AssertionError(f'tap {xy} did not reach tests/golden/{golden} in {tries} tries '
-                         f'({n} pixels differ in columns {cols[0]}..{cols[1] - 1}); the shot is {shot}')
+    """`test_stock.stock` with the `lua-apps-row` patch and `tests/data/hello-app` installed on the
+    card by `tools/xtapp.py`. Yields (instance name, tmp_path)."""
+    with booted(request, tmp_path, stock_card, patches=('lua-apps-row',), apps=(HELLO,), icount=SKIP_IDLE) as s:
+        assert s.apps[0]['card_dir'] == '/XTApps/hello', s.apps
+        yield s.name, s.tmp
 
 
 def test_stock_runs_a_lua_app(stock_lua):
     """The patched menu -> the app list -> our script painting the screen."""
     name, tmp = stock_lua
     boot_to_home(name)
-    settle(name, 2, 30)
 
     # 1. the sixth row exists only because of the patch (five rows without it: tests/golden/stock-menu.png)
-    menu = tap_to(name, HAMBURGER, 'stock-menu-lua.png', tmp / 'menu.png', cols=MENU_COLS)
-    assert masked_diff(menu, os.path.join(ROOT, 'tests', 'golden', 'stock-menu.png'),
-                       MENU_COLS) > 100, 'the patched menu looks like the unpatched one'
+    menu = step(name, *HAMBURGER, 'stock-menu-lua.png', cols=MENU_COLS, quiet=2)
+    assert masked_diff(menu, os.path.join(GOLDEN_DIR, 'stock-menu.png'), MENU_COLS) > 100, \
+        'the patched menu looks like the unpatched one'
 
     # 2. the Lua Apps page (title "Extensions") lists the app: the container parsed and the
     #    manifest's display_name came off the card
-    tap_to(name, LUA_APPS_ROW, 'stock-lua-apps.png', tmp / 'apps.png')
+    step(name, *LUA_APPS_ROW, 'stock-lua-apps.png', quiet=2)
 
     # 3. the script runs and owns the frame
-    tap_to(name, APP_CARD, 'stock-lua-hello.png', tmp / 'hello.png')
+    step(name, *APP_CARD, 'stock-lua-hello.png', quiet=2)
 
     # 4. a clean run: the panel took no unknown command, the script raised nothing, nothing reset
     st = state(name)
     assert st['epd_unknown_cmds'] == 0 and st['spi2']['dma_errors'] == 0, st['spi2']
-    log = x4emu(name, 'log').stdout
-    for bad in ('Guru Meditation', 'abort()', 'Backtrace', 'task_wdt',
-                'script callback exceeded time budget'):
-        assert bad not in log, f'the console shows {bad!r} after running the Lua app:\n{log[-2000:]}'
-    assert log.count('rst:0x') == 1, 'the ROM banner is there twice: something reset the guest'
+    log = clean_console(name, 'running the Lua app')
     # 5. and the app's own log line is nowhere: ctx.log.info is a no-op in 7.2.4 (see the module
     #    docstring). If this ever fires, the host started logging -- update docs/lua-apps.md.
     uart = x4emu(name, 'log', '--file', 'uart0.log').stdout
