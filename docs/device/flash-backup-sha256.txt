@@ -4,3 +4,5 @@
 326f3c8f066a8db7857d56d80eab755bba903eb3566245a985833b09e4c5bb20  images/device/flash-2026-09-07-b.bin
 01779adcf1dde51d62825c478104f71da14cf15b5d711c35c5d6a9636d6d0f9a  images/device/flash-2026-10-12-a.bin
 01779adcf1dde51d62825c478104f71da14cf15b5d711c35c5d6a9636d6d0f9a  images/device/flash-2026-10-12-b.bin
+88edadb7fb99955fd3985cb10f8646d02b6493b48ccee9f6e9c26b8080da2e9e  images/device/flash-2026-10-13-pre-parity-a.bin
+88edadb7fb99955fd3985cb10f8646d02b6493b48ccee9f6e9c26b8080da2e9e  images/device/flash-2026-10-13-pre-parity-b.bin
