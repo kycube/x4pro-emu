@@ -76,6 +76,11 @@ The walk (2026-10-13, by hand, then `test_licorice_walk`, 20 s):
 | USB mode | comes up and waits for a computer ("USB mode — On"), since the USB OTG core is modelled (`docs/usb-otg.md`); before that TinyUSB asserted (`check_dwc2 177: ASSERT FAILED` … `tusb_rhport_init`) and the screen ended at "Could not start USB disk mode". Licorice restarts the CPU into the mode (two `RTC_SW_CPU_RST` banners). The built-in host reads its device descriptor, 0x303A:0x4002; no disk crosses the bus |
 | Installing a `.xtapp` | a package built with `tools/xtapp.py pack --format licorice` installs through the UI ("Installed" toast, lands at `/sdcard/XTApps/<app_id>/`); the 7.x-style `app.xtapp` gives "Install failed". The format is reverse-engineered in `docs/licorice-apps.md`. **Launching** an installed app is still open: the runnable code section is not built yet, so an installed app reports "Cannot run yet" |
 
+**The owner's check (2026-10-13).** Licorice has no screen capture, so the pixel-exact parity method of
+`docs/parity.md` has no device side here. The owner compared twelve emulator screens with the reader by eye
+(Bookshelf, drawer, Desktop, All files, reader, light panel, Settings, Settings → Network, Settings → About,
+USB mode, the sleep screen, an app install) and judged all of them right.
+
 Licorice prints nothing through ESP-IDF's log on the console, but plain `printf` does reach it (the
 TinyUSB asserts above), so the console is wired; the firmware's log level is simply off.
 

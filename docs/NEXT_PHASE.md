@@ -9,17 +9,20 @@ Read `CLAUDE.md` first (build, device rules, where things are), then this file, 
 ## 0. Resume here (2026-10-13, after the world-class pass)
 
 **First: the device now runs XTOS Licorice 261013** (the owner's OTA of 2026-10-13; app1 boots, 7.6.8 stays
-in app0). Licorice is the stock's rewrite, not a 7.x (`docs/stock-licorice.md`): it boots to its Bookshelf in
-the emulator and takes touch, but it has no developer menu (so no Screen Capture and no parity captures), no
-XTTM string packs, a rewritten UI layer, and installs Lua apps from packages. Items b–d below were planned
-against 7.6.8, which the device no longer runs; **whether they move to Licorice or stay on 7.6.8 is the
-owner's call** — ask before starting them.
+in app0). Licorice is the stock's rewrite, not a 7.x (`docs/stock-licorice.md`). **The owner's direction, the
+same day: make this a fully functional emulator; the old plan (items b–d below: the keyboard, native patches,
+the lock screen, all against 7.6.8) matters less now — do not start them unless the owner brings them back.**
+Licorice in the emulator: reader, files, light panel and frontlight, Dark mode, Wi-Fi and Bluetooth toggles,
+sleep and wake, auto power-off, battery, USB mode (the OTG core, `docs/usb-otg.md`), and installing a signed
+package `tools/xtapp.py --format licorice` builds (`docs/licorice-apps.md`); the owner judged twelve of its
+screens 1:1 with the device by eye. **Next: launching an installed Licorice app** (the code section and the
+launch-time decrypt, `docs/licorice-apps.md` "Open"), then USB mass storage past the device descriptor.
 
-**Where things stand.** Both firmwares run unpatched: CrossPoint 1.6.0 and the stock `xteink_app` 7.2.4,
-7.5.4 and 7.6.8, and Licorice to its Bookshelf; the device runs **Licorice in app1** (7.6.8 in app0). `make test` is 219 tests in about two minutes on eight
-workers, with no input retries anywhere (log, "World-class pass, wave 2"). Lua apps reach the device as a
-card copy (7.5.4 and later show Mini Apps by themselves), keep `ctx.state` in the emulator as on the reader,
-and the gamebook was played on the device. The owner's items:
+**Where things stand.** Every firmware runs unpatched: CrossPoint 1.6.0, the stock `xteink_app` 7.2.4, 7.5.4
+and 7.6.8, and Licorice 261013; the device runs **Licorice in app1** (7.6.8 in app0). `make test` is 252 tests in
+about two minutes on eight workers, with no input retries anywhere. On 7.5.4–7.6.8 Lua apps reach the device as a
+card copy and keep `ctx.state` in the emulator as on the reader; the gamebook was played on the device under 7.6.8.
+The owner's items:
 
 1. ~~The first device-parity session~~ — **passed (2026-10-13)**: 7 captured screens, 0 unexplained
    pixels, the device back on pristine 7.6.8 (`docs/parity.md`, "The first session"). It also showed that

@@ -1457,3 +1457,39 @@ Then Licorice in the emulator: Home in refresh 1, `epd_unknown_cmds` 0, no new h
 side drawer, the Desktop widget page and the regrouped Settings render. The console stays silent after the
 ROM banner. `tests/test_licorice.py` (Home + drawer goldens, the PSR, 4 s). The roadmap's 7.6.8 items
 (keyboard, native-patch deployment, lock screen) now wait for the owner's call (NEXT_PHASE §0).
+
+## 2026-10-13 — Licorice works in the emulator: the walk, USB mode, signed app packages, the owner's check
+
+The owner's direction after the update: make this a fully functional emulator; the old 7.6.8 plan (keyboard,
+native patches, lock screen) matters less now (NEXT_PHASE §0). So the coordinator walked every Licorice feature
+by hand, then ran two Opus 5.5 agents on the gaps it found, each with its own files.
+
+**The walk** (`test_licorice_walk`, 20 s, three runs green): All files, an EPUB opened and paged with both
+side buttons, the light panel (the slider drives both LEDC channels through a perceptual curve: 3 % is duty 1
+of 1024), Dark mode, the Home pad, all seven Settings pages, deep sleep (the "Get Started" screen) and a wake
+that resumes the book. By hand also: Wi-Fi on (the full PHY calibration, then an idle radio), Bluetooth on in
+0.3 s (an 8 s stall on the first try came from my tap landing after the "Install failed" toast, not from
+Bluetooth: a clean boot reproduces nothing), auto power-off at 20 min 5 s of guest time, the battery
+percentage repainted with the minute clock, a book cover drawn as an ordered 1-bit dither (no LUTs: Licorice
+never draws grey). Licorice has no screen capture at all (no such string). The gaps: USB mode (TinyUSB's
+`check_dwc2` assert, "Could not start USB disk mode") and app installs ("Install failed").
+
+**USB OTG** (agent 1, qemu-patches/0036, `docs/usb-otg.md`): the S3's DWC2 core in device mode with
+ESP-IDF's register defaults, USB_WRAP and the RTC_CNTL PHY switch; both stock generations now show their
+"USB mode — On" screen on an idle bus, and a built-in host (`qom-set … host=enumerate`) reads the device
+descriptor in DMA and FIFO mode: 0x303A:0x4002 from both, the ID the desk unit showed a Mac. Coordinator
+checks: the 35 older patch files differ only in `[PATCH nn/36]`, the two goldens looked at, the test on the
+agent's binary and on the rebuilt shared one, `make test` 239 passed.
+
+**Licorice app packages** (agent 2, `docs/licorice-apps.md`, `tools/xtapp.py --format licorice`): the
+installer takes a new 0x80-byte `XTAP` container with a plain-JSON manifest, a mandatory content-key wrap
+(P256 ECDH, HKDF-SHA256, AES key wrap; the device scalar is a fixed constant in the image, so only its public
+point is needed to build a package) and per-section HMAC-SHA256. A package the tool builds installs through
+Licorice's own UI ("Installed — API Probe", the app at `/sdcard/XTApps/probe/`); `tests/test_licorice_apps.py`
+end to end, +7 fast tests. Open: the code section and its launch-time decrypt (an installed app reports
+"Cannot run yet"), and where the Mini Apps list sits in the UI. `cryptography` joins `make setup`.
+
+**The owner's check**: twelve emulator screens judged 1:1 with the reader by eye. Also: `ghidra_stock.py`
+names Licorice `v261013` through `stockver.release_tag` (14,778 functions); the README gains a Licorice
+section and picture; 3 GB of old scratch copies deleted (one listed two credential keys: both were empty
+strings, which 7.6.8 recreates after `redact`). `make test` **252 passed, 2 skipped**; CI green on every push.
