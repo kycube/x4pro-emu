@@ -17,11 +17,10 @@ Needs images/device/stock-app0-7.2.4.bin (gitignored, extracted from the device 
 it, as the stock tests do on CI. Everything happens on a copy in pytest's tmp_path; nothing is
 written under images/.
 """
-import os, shutil, subprocess, sys
+import os, shutil, subprocess
 import pytest
 from conftest import ROOT, PY
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import stockdev                                                                # noqa: E402
 
 TOOL = os.path.join(ROOT, 'tools', 'stockdev.py')
@@ -41,11 +40,19 @@ def run(*args, expect=0):
 
 
 def image_info(path):
-    """esptool's own view of the image footer (the independent check on our arithmetic)."""
+    """esptool's own view of the image footer (the independent check on our arithmetic; also
+    test_stockpatch.py's and test_stockstrings.py's)."""
     r = subprocess.run([PY, '-m', 'esptool', '--chip', 'esp32s3', 'image-info', str(path)],
                        capture_output=True, text=True)
     assert r.returncode == 0, f'esptool image-info failed:\n{r.stdout}\n{r.stderr}'
     return r.stdout
+
+
+def esptool_valid(path):
+    """(checksum valid, validation hash valid) as esptool reports them. Bare app images only."""
+    out = image_info(path)
+    return tuple(f in out and '(valid)' in out.split(f)[1].split('\n')[0]
+                 for f in ('Checksum:', 'Validation hash:'))
 
 
 @pytest.fixture

@@ -26,11 +26,10 @@ the fields are read as such, that a file disagreeing with itself is rejected wit
 than decoded into noise, and that the grey path does what the tool's docstring says it guesses (no
 grey `.xic` has ever been seen, so that is all it can check).
 """
-import json, os, struct, subprocess, sys
+import json, os, struct, subprocess
 import pytest
 from conftest import ROOT, PY
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import xic2png                                                                 # noqa: E402
 
 TOOL = os.path.join(ROOT, 'tools', 'xic2png.py')

@@ -33,19 +33,15 @@ SMALL_LINE = 'Settings  Bookshelf  63%  12:04  All Files'
 
 
 def faces(ttf, small, body, fid):
-    """(small 20-cell face, body 24-cell face) for a TTF, or for the device's current font."""
+    """(small 20-cell face, body 24-cell face) for a TTF, or for the device's current font. A TTF
+    is built in a temporary directory that is gone on return (`Xtf.open` reads the whole file)."""
     if ttf is None:
         return (xtfont.Xtf.open(os.path.join(CARD, 'system_small.xtf')),
                 xtfont.Xtf.open(os.path.join(CARD, 'system_medium.xtf')))
-    out = tempfile.mkdtemp(prefix='fontcompare-')
-    kw = {}
-    if small:
-        kw['small_size'] = small
-    if body:
-        kw['body_size'] = body
-    xtfont.build_package(ttf, fid, fid, out, style='Regular', **kw)
-    return (xtfont.Xtf.open(os.path.join(out, 'system_small.xtf')),
-            xtfont.Xtf.open(os.path.join(out, 'system_medium.xtf')))
+    with tempfile.TemporaryDirectory(prefix='fontcompare-') as out:
+        xtfont.build_package(ttf, fid, fid, out, small_size=small, body_size=body)
+        return (xtfont.Xtf.open(os.path.join(out, 'system_small.xtf')),
+                xtfont.Xtf.open(os.path.join(out, 'system_medium.xtf')))
 
 
 def parse(spec):

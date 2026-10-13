@@ -30,14 +30,12 @@ enough**: a boot whose `selection.config` already names a package with no `.base
 back to the built-in base font silently (no console line, no toast, and deleting the stale boot plan
 does not change it), so the test switches through the UI the way a user would.
 """
-import hashlib, json, os, shutil, struct, subprocess, sys, zipfile, zlib
+import hashlib, json, os, shutil, struct, subprocess, zipfile, zlib
 import pytest
 from conftest import ROOT, PY, x4emu, instance_name, copy_image
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import xtfont                                                                  # noqa: E402
 import xic2png                                                                 # noqa: E402
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_stock                                                              # noqa: E402
 from test_stock import stock_card                                              # noqa: E402,F401
 
@@ -292,8 +290,8 @@ def stock_font(tmp_path, request, built, stock_card):
     name = instance_name(request.node.name, request.node.nodeid)
     flash = tmp_path / 'stock.bin'
     copy_image(test_stock.DUMP, flash)
-    subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'set-u8',
-                    'user_config', 'net_en', '0'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([PY, os.path.join(ROOT, 'tools', 'nvsedit.py'), str(flash), 'redact'],
+                   check=True, stdout=subprocess.DEVNULL)      # credentials out, net_en 0 (rule 6)
     sd = tmp_path / 'sd.img'
     copy_image(stock_card, sd)
     xtfont.install_package(str(sd), built['report']['package'], direct=True)
@@ -306,6 +304,7 @@ def stock_font(tmp_path, request, built, stock_card):
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power', '--icount', test_stock.SKIP_IDLE)
     yield name, tmp_path, sd
     x4emu(name, 'stop', check=False)
+    flash.unlink(missing_ok=True)
 
 
 def title_ink(png):

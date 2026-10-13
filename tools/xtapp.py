@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Build, inspect and install `.xtapp` Lua app containers for the stock `xteink_app` 7.2.4.
+r"""Build, inspect and install `.xtapp` Lua app containers for the stock `xteink_app`.
 
   xtapp.py new NAME OUT_DIR [--display-name T] [--author A]   scaffold manifest.json + index.lua
   xtapp.py pack APP_DIR [-o OUT]                              write APP_DIR/app.xtapp
@@ -8,11 +8,12 @@ r"""Build, inspect and install `.xtapp` Lua app containers for the stock `xteink
 
 A "Lua app" is a directory on the card, `/sdcard/XTApps/<dir>/`, holding `manifest.json`,
 `index.lua` (the script that runs) and `app.xtapp` (this container). The stock lists it under the
-nav menu's **Lua Apps** row -- a row that only exists once the app image carries the `lua-apps-row`
-patch (`tools/stockpatch.py`); the page behind it is 0x09, `AppsPagePresenter`. The whole workflow
-is `docs/lua-apps.md`.
+nav menu's **Lua Apps** row (7.5.4 / 7.6.8: **Mini Apps**); the page behind it is 0x09,
+`AppsPagePresenter`. In 7.2.4 that row only exists once the app image carries the `lua-apps-row`
+patch (`tools/stockpatch.py`); 7.5.4 and 7.6.8 show it by themselves as soon as the card holds an
+app (docs/stock-7.6.8.md). The whole workflow is `docs/lua-apps.md`.
 
-THE CONTAINER (`app.xtapp`), as the firmware reads it
+THE CONTAINER (`app.xtapp`), as the firmware reads it (7.2.4's FUN_ addresses)
     `FUN_421c37e8` enumerates `/sdcard/XTApps`, builds `%s/%.190s/app.xtapp` per directory and
     **drops any directory whose container fails to open**, which is why a plain
     `manifest.json` + `index.lua` directory never appears in the list. `FUN_420664d8` opens it:
@@ -51,7 +52,7 @@ EXAMPLE
     $EDITOR /tmp/apps/clock/index.lua
     .venv/bin/python tools/xtapp.py pack /tmp/apps/clock
     .venv/bin/python tools/xtapp.py install /tmp/sd.img /tmp/apps/clock   # -> /XTApps/clock/
-    .venv/bin/python tools/stockpatch.py apply /tmp/flash.bin lua-apps-row
+    .venv/bin/python tools/stockpatch.py apply /tmp/flash.bin lua-apps-row  # 7.2.4 only needs it
 
 `install` uses mtools on the FAT32 partition at 1 MiB (`tools/mksd.py`'s layout, the device's own):
 it creates `/XTApps/<app_id>/`, packs a fresh `app.xtapp` (into a temporary file -- APP_DIR itself
@@ -63,12 +64,15 @@ they raise `XtappError` with a message that says which rule was broken.
 """
 import argparse, collections, json, os, shutil, struct, subprocess, sys, tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mksd import PART_START                                                    # noqa: E402
+
 MAGIC = b'XTAP'
 VERSION = 1
 HEADER_SIZE = 0x80
 MANIFEST_OFF = 0x80
 MANIFEST_MAX = 0x2000                # FUN_420664d8: 0x1fff < len-1 is rejected, so 1..0x2000
-PART_OFFSET = 1048576                # tools/mksd.py puts the FAT32 partition at 1 MiB
+PART_OFFSET = PART_START * 512       # tools/mksd.py puts the FAT32 partition at 1 MiB
 APPS_DIR = 'XTApps'
 REQUIRED = ('app_id', 'display_name')
 PERMISSIONS = ('sys.battery', 'sys.status')     # FUN_4206645c accepts nothing else
@@ -205,7 +209,9 @@ def pack(app_dir, out=None):
             'permissions': list(obj.get('permissions', [])), 'warnings': warnings}
 
 
-def _mtools(img, *args, check=True):
+def mtools(img, *args, check=True):
+    """One mtools command (`mcopy`, `mmd`, `mdir`, ...) on the card image's FAT32 partition
+    (also tools/xtfont.py's)."""
     return subprocess.run([args[0], '-i', f'{img}@@{PART_OFFSET}', *args[1:]],
                           capture_output=True, text=True, check=check)
 
@@ -223,18 +229,18 @@ def install(img, app_dir, as_dir=None):
     with tempfile.TemporaryDirectory() as tmp:                  # the container is built outside
         rep = pack(app_dir, os.path.join(tmp, 'app.xtapp'))     # app_dir: nothing is written there
         name = as_dir or rep['app_id']
-        _mtools(img, 'mmd', f'::/{APPS_DIR}', check=False)      # already there: mmd fails, fine
-        _mtools(img, 'mmd', f'::/{APPS_DIR}/{name}', check=False)
+        mtools(img, 'mmd', f'::/{APPS_DIR}', check=False)       # already there: mmd fails, fine
+        mtools(img, 'mmd', f'::/{APPS_DIR}/{name}', check=False)
         files = sorted(n for n in os.listdir(app_dir) if not n.startswith('.')
                        and n != 'app.xtapp' and os.path.isfile(os.path.join(app_dir, n)))
-        _mtools(img, 'mcopy', '-o', rep['out'], *[os.path.join(app_dir, n) for n in files],
-                f'::/{APPS_DIR}/{name}/')
+        mtools(img, 'mcopy', '-o', rep['out'], *[os.path.join(app_dir, n) for n in files],
+               f'::/{APPS_DIR}/{name}/')
     files = sorted(files + ['app.xtapp'])
     for sub in sorted(n for n in os.listdir(app_dir) if os.path.isdir(os.path.join(app_dir, n))
                       and not n.startswith('.')):
-        _mtools(img, 'mcopy', '-o', '-s', os.path.join(app_dir, sub), f'::/{APPS_DIR}/{name}/')
+        mtools(img, 'mcopy', '-o', '-s', os.path.join(app_dir, sub), f'::/{APPS_DIR}/{name}/')
         files.append(sub + '/')
-    listing = _mtools(img, 'mdir', '-b', f'::/{APPS_DIR}/{name}', check=False).stdout
+    listing = mtools(img, 'mdir', '-b', f'::/{APPS_DIR}/{name}', check=False).stdout
     rep.update({'image': img, 'card_dir': f'/{APPS_DIR}/{name}', 'files': files,
                 'listing': [ln.strip() for ln in listing.splitlines() if ln.strip()]})
     if not any(ln.lower().endswith('app.xtapp') for ln in rep['listing']):
@@ -244,13 +250,14 @@ def install(img, app_dir, as_dir=None):
 
 
 TEMPLATE = '''\
--- {display_name} -- a Lua screen for the stock xteink_app 7.2.4.
+-- {display_name} -- a Lua screen for the stock xteink_app.
 --
 -- Lives on the card as /sdcard/XTApps/{app_id}/index.lua, next to manifest.json and the app.xtapp
--- container that `tools/xtapp.py pack` builds. It shows up under the nav menu's "Lua Apps" row,
--- which exists only in an app image patched with `tools/stockpatch.py apply IMAGE lua-apps-row`.
+-- container that `tools/xtapp.py pack` builds. It shows up under the nav menu's "Mini Apps" row,
+-- which 7.5.4 and 7.6.8 show by themselves once the card holds an app; 7.2.4 calls it "Lua Apps"
+-- and needs an app image patched with `tools/stockpatch.py apply IMAGE lua-apps-row`.
 --
--- EVERYTHING BELOW MARKED "confirmed" WAS SEEN RUNNING IN THE EMULATOR (docs/lua-apps.md).
+-- EVERYTHING BELOW MARKED "confirmed" WAS SEEN RUNNING IN THE EMULATOR, on 7.2.4 (docs/lua-apps.md).
 --
 -- Lua 5.5, one sandboxed state per app. The globals it has: _G, _VERSION, assert, coroutine, error,
 -- getmetatable, ipairs, math, next, pairs, pcall, rawequal, rawget, rawlen, rawset, require, select,

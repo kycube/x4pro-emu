@@ -67,6 +67,13 @@ SAFETY
     .venv/bin/python tools/x4emu --name xc run --flash SCRATCH/flash.bin --sd SCRATCH/sd.img \
         --boot-hold-power
 
+THE ESP IMAGE ARITHMETIC IS SHARED
+    This module is the one implementation of the ESP-IDF app image format in tools/: `segments`
+    (the header's segment table, with load addresses), `image_layout` (plus the footer),
+    `checksum`, `refresh_image`, `verify_image`, `reseal` (refresh + verify + refuse) and
+    `app_base` (bare app or app0 of a 16 MB flash image). `tools/stockpatch.py`,
+    `tools/stockstrings.py`, `tools/appdis.py` and `tools/tcbwalk.py` import them.
+
 `stub_state(data, base)`, `patch(data)` and `refresh_image(data, base)` are importable; `patch`
 returns `(new_bytes, report_dict)` and raises `StockDevError` on anything that is not a stock stub
 of a known version.
@@ -81,6 +88,8 @@ APP0_OFF = 0x10000              # the stock partition table's app0 slot (tools/m
 ESP_MAGIC = 0xE9
 CHECKSUM_SEED = 0xEF
 HASH_BYTES = 32
+CREDENTIALS_NOTE = ("  note: a flash image made from the device dump still holds the owner's WiFi "
+                    'credentials (CLAUDE.md rule 6) -- keep it in scratch')
 # the developer stub itself (offset, bytes, the immediate) is per version: tools/stockver.d/*.json
 
 
@@ -90,38 +99,60 @@ class StockDevError(ValueError):
 
 
 # ---------------------------------------------------------------- ESP image arithmetic
-def image_layout(data, base=0):
-    """{'segments': [(offset, length)], 'checksum_off', 'hash_off'|None, 'end'} for the ESP-IDF
-    application image starting at `base`. Offsets are absolute in `data`."""
+def segments(data, base=0):
+    """[(load VA, payload file offset, length)] of the ESP-IDF application image at `base`, from
+    its header (magic, segment count, then per segment u32 load address, u32 length, payload).
+    Offsets are absolute in `data`."""
     if len(data) < base + 24 or data[base] != ESP_MAGIC:
         raise StockDevError(f'no ESP image magic {ESP_MAGIC:#04x} at {base:#x}')
-    count, hash_appended = data[base + 1], data[base + 23]
-    off, segments = base + 24, []
-    for i in range(count):
+    off, out = base + 24, []
+    for i in range(data[base + 1]):
         if off + 8 > len(data):
             raise StockDevError(f'segment {i} header runs past the end of the image')
-        _load, length = struct.unpack_from('<II', data, off)
+        load, length = struct.unpack_from('<II', data, off)
         off += 8
         if off + length > len(data):
             raise StockDevError(f'segment {i} ({length} bytes at {off:#x}) runs past the end')
-        segments.append((off, length))
+        out.append((load, off, length))
         off += length
+    return out
+
+
+def image_layout(data, base=0):
+    """{'segments': [(offset, length)], 'checksum_off', 'hash_off'|None, 'end'} for the ESP-IDF
+    application image starting at `base`. Offsets are absolute in `data`."""
+    segs = segments(data, base)
+    off = segs[-1][1] + segs[-1][2] if segs else base + 24
     checksum_off = off + (16 - off % 16 - 1) % 16       # last byte of the 16-byte-aligned block
-    hash_off = checksum_off + 1 if hash_appended == 1 else None
+    hash_off = checksum_off + 1 if data[base + 23] == 1 else None
     end = (hash_off + HASH_BYTES) if hash_off is not None else checksum_off + 1
     if end > len(data):
         raise StockDevError(f'image footer at {checksum_off:#x} runs past the end of the file')
-    return {'segments': segments, 'checksum_off': checksum_off, 'hash_off': hash_off, 'end': end,
-            'base': base}
+    return {'segments': [(o, n) for _, o, n in segs], 'checksum_off': checksum_off,
+            'hash_off': hash_off, 'end': end, 'base': base}
+
+
+def _xor_bytes(buf):
+    """The XOR of every byte of `buf`: one big integer folded in halves (a few C-level passes
+    instead of a Python loop over ~6 MB)."""
+    n, x = len(buf), int.from_bytes(buf, 'little')
+    while n > 1:
+        h = (n + 1) // 2
+        x = (x & ((1 << (8 * h)) - 1)) ^ (x >> (8 * h))
+        n = h
+    return x
 
 
 def checksum(data, layout):
     """XOR of every segment payload byte, seeded 0xEF -- the byte the bootloader compares."""
-    c = CHECKSUM_SEED
+    c, view = CHECKSUM_SEED, memoryview(data)
     for off, length in layout['segments']:
-        for b in data[off:off + length]:
-            c ^= b
+        c ^= _xor_bytes(view[off:off + length])
     return c
+
+
+def _sha256(data, base, hash_off):
+    return hashlib.sha256(memoryview(data)[base:hash_off]).digest()
 
 
 def refresh_image(data, base=0):
@@ -130,8 +161,7 @@ def refresh_image(data, base=0):
     lay = image_layout(data, base)
     data[lay['checksum_off']] = checksum(data, lay)
     if lay['hash_off'] is not None:
-        data[lay['hash_off']:lay['hash_off'] + HASH_BYTES] = \
-            hashlib.sha256(bytes(data[base:lay['hash_off']])).digest()
+        data[lay['hash_off']:lay['hash_off'] + HASH_BYTES] = _sha256(data, base, lay['hash_off'])
     return lay
 
 
@@ -141,9 +171,43 @@ def verify_image(data, base=0):
     ok_c = data[lay['checksum_off']] == checksum(data, lay)
     ok_h = True
     if lay['hash_off'] is not None:
-        want = hashlib.sha256(bytes(data[base:lay['hash_off']])).digest()
-        ok_h = bytes(data[lay['hash_off']:lay['hash_off'] + HASH_BYTES]) == want
+        ok_h = bytes(data[lay['hash_off']:lay['hash_off'] + HASH_BYTES]) == \
+            _sha256(data, base, lay['hash_off'])
     return ok_c, ok_h
+
+
+def reseal(data, base=0, error=StockDevError):
+    """`refresh_image`, then `verify_image` as an independent re-parse; raises `error` rather than
+    hand back an image the bootloader would reject. Returns the footer as a report dict:
+    checksum_offset, checksum, hash_offset, sha256 (None without an appended hash), checksum_ok,
+    hash_ok."""
+    lay = refresh_image(data, base)
+    ok_c, ok_h = verify_image(data, base)
+    if not (ok_c and ok_h):                                          # never seen; a bug if it fires
+        raise error(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
+                    f'hash_ok={ok_h}) -- refusing to write it')
+    h = lay['hash_off']
+    return {'checksum_offset': lay['checksum_off'], 'checksum': data[lay['checksum_off']],
+            'hash_offset': h, 'sha256': bytes(data[h:h + HASH_BYTES]).hex() if h is not None
+            else None, 'checksum_ok': ok_c, 'hash_ok': ok_h}
+
+
+def footer_status(data, base=0):
+    """'checksum valid, hash valid' (or INVALID / 'no appended hash'): the --check line."""
+    ok_c, ok_h = verify_image(data, base)
+    hashed = image_layout(data, base)['hash_off'] is not None
+    return (f'checksum {"valid" if ok_c else "INVALID"}, '
+            + (f'hash {"valid" if ok_h else "INVALID"}' if hashed else 'no appended hash'))
+
+
+def footer_lines(rep):
+    """The footer lines a writing command prints from a `reseal` report."""
+    lines = [f'  checksum {rep["checksum"]:#04x} at {rep["checksum_offset"]:#x} '
+             f'({"valid" if rep["checksum_ok"] else "INVALID"})']
+    if rep['hash_offset'] is not None:
+        lines.append(f'  sha-256 {rep["sha256"]} at {rep["hash_offset"]:#x} '
+                     f'({"valid" if rep["hash_ok"] else "INVALID"})')
+    return lines
 
 
 # ---------------------------------------------------------------- the patch itself
@@ -163,17 +227,11 @@ def version_of(data, base=None):
 
     Every offset this tool uses comes from the version file `stockver.identify` picks, so an
     unknown build is refused here, before any offset is read."""
-    try:
-        return stockver.identify(data, base)
-    except stockver.UnknownVersion as e:
-        ref = stockver.baseline()
-        tail = (f' -- it is not stock {ref.label} ({ref.app_bytes} bytes) either, and another '
-                f'version has the developer-mode predicate at a different offset: find it again '
-                f'with tools/appdis.py / tools/ghidra_stock.py before patching anything'
-                if ref else '')
-        raise StockDevError(f'{e}{tail}') from None
-    except stockver.StockVerError as e:
-        raise StockDevError(str(e)) from None
+    return stockver.identify_as(
+        data, base, StockDevError,
+        lambda ref: f' -- it is not stock {ref.label} ({ref.app_bytes} bytes) either, and another '
+                    f'version has the developer-mode predicate at a different offset: find it '
+                    f'again with tools/appdis.py / tools/ghidra_stock.py before patching anything')
 
 
 def stub_state(data, base=0, ver=None):
@@ -215,19 +273,11 @@ def patch(data):
             f'({ver.app_bytes} bytes) as it was found -- find the predicate again with '
             f'tools/appdis.py before patching anything')
     data[base + stub.movi_offset] = stub.patched
-    lay = refresh_image(data, base)
-    ok_c, ok_h = verify_image(data, base)
-    if not (ok_c and ok_h):                                          # never seen; a bug if it fires
-        raise StockDevError(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
-                            f'hash_ok={ok_h}) -- refusing to write it')
+    footer = reseal(data, base)
     return bytes(data), {
         'base': base, 'version': ver.version, 'project': ver.project, 'va': stub.va,
         'stub_offset': base + stub.app_offset, 'movi_offset': base + stub.movi_offset,
-        'was': was, 'now': stub_state(data, base, ver), 'checksum_offset': lay['checksum_off'],
-        'checksum': data[lay['checksum_off']], 'hash_offset': lay['hash_off'],
-        'sha256': bytes(data[lay['hash_off']:lay['hash_off'] + HASH_BYTES]).hex()
-        if lay['hash_off'] is not None else None,
-        'checksum_ok': ok_c, 'hash_ok': ok_h}
+        'was': was, 'now': stub_state(data, base, ver), **footer}
 
 
 # ---------------------------------------------------------------- CLI
@@ -241,20 +291,16 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     data = bytearray(open(a.image, 'rb').read())
-    kind = f'{len(data)} bytes'
     try:
         base, ver = version_of(data)
         stub = ver.need_dev_stub()
-        kind = ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + \
-               f', {len(data)} bytes, {ver.label}'
+        kind = stockver.image_kind(data, base, ver)
         if a.check:
             state = stub_state(data, base, ver)
-            ok_c, ok_h = verify_image(data, base)
             print(f'{a.image}: {kind}\n  developer mode: {state}'
                   f'  (stub at {base + stub.app_offset:#x}, byte {base + stub.movi_offset:#x} = '
                   f'{data[base + stub.movi_offset]:#04x})\n'
-                  f'  checksum {"valid" if ok_c else "INVALID"}, '
-                  f'{"hash " + ("valid" if ok_h else "INVALID") if image_layout(data, base)["hash_off"] else "no appended hash"}')
+                  f'  {footer_status(data, base)}')
             return {'patched': 0, 'unpatched': 1}.get(state, 2)
         out, rep = patch(data)
     except StockDevError as e:
@@ -264,17 +310,14 @@ def main(argv=None):
     dst = a.out or a.image
     with open(dst, 'wb') as f:
         f.write(out)
-    print(f'{a.image}: {kind}\n'
-          f'  {rep["movi_offset"]:#x}: movi.n a2,{"0 -> 1" if rep["was"] == "unpatched" else "1 (already patched)"}'
-          f'   (developer stub at {rep["stub_offset"]:#x}, app VA {rep["va"]:#x})\n'
-          f'  checksum {rep["checksum"]:#04x} at {rep["checksum_offset"]:#x} '
-          f'({"valid" if rep["checksum_ok"] else "INVALID"})\n'
-          f'  sha-256 {rep["sha256"]} at {rep["hash_offset"]:#x} '
-          f'({"valid" if rep["hash_ok"] else "INVALID"})\n'
-          f'  wrote {dst} ({len(out)} bytes): developer mode is {rep["now"]}')
-    if rep['base'] == APP0_OFF or os.path.getsize(dst) == FLASH_SIZE:
-        print('  note: a flash image made from the device dump still holds the owner\'s WiFi '
-              'credentials (CLAUDE.md rule 6) -- keep it in scratch')
+    print('\n'.join([f'{a.image}: {kind}',
+                     f'  {rep["movi_offset"]:#x}: movi.n a2,'
+                     f'{"0 -> 1" if rep["was"] == "unpatched" else "1 (already patched)"}'
+                     f'   (developer stub at {rep["stub_offset"]:#x}, app VA {rep["va"]:#x})',
+                     *footer_lines(rep),
+                     f'  wrote {dst} ({len(out)} bytes): developer mode is {rep["now"]}']))
+    if rep['base'] == APP0_OFF or len(out) == FLASH_SIZE:
+        print(CREDENTIALS_NOTE)
     return 0
 
 

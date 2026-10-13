@@ -4,13 +4,17 @@
   tools/appdis.py images/device/stock-app0-7.2.4.bin 0x4230bfb8 [BEFORE] [AFTER]
 
 VADDR is where a CPU sits (QMP `info registers -a`, PC=...); BEFORE/AFTER are the window in bytes
-(hex or decimal, default 0x180 / 0x100). The ESP image header is parsed (magic 0xE9, segment count,
-then per segment: load address u32, length u32, data), the segment holding VADDR is written to a
-temporary file and objdump'd as raw Xtensa at the right VMA; the line at VADDR is marked "<== PC".
+(hex or decimal, default 0x180 / 0x100). The ESP image header is parsed by `stockdev.segments`
+(magic 0xE9, segment count, then per segment: load address u32, length u32, data), the segment
+holding VADDR is written to a temporary file and objdump'd as raw Xtensa at the right VMA; the line
+at VADDR is marked "<== PC".
 ROM addresses (0x4000xxxx) are not in the app: use images/rom/esp32s3_rev0_rom.nm / .elf instead.
 Objdump comes from the pioarduino toolchain (~/.platformio/packages/toolchain-xtensa-esp-elf).
 """
-import glob, os, struct, subprocess, sys, tempfile
+import glob, os, subprocess, sys, tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stockdev import segments                                            # noqa: E402
 
 
 def parse_int(s):
@@ -26,12 +30,7 @@ def main():
     d = open(img, 'rb').read()
     if d[0] != 0xE9:
         sys.exit(f'{img}: not an ESP image (magic 0x{d[0]:02x})')
-    nseg, off, segs = d[1], 24, []
-    for _ in range(nseg):
-        la, ln = struct.unpack_from('<II', d, off)
-        off += 8
-        segs.append((la, ln, off))
-        off += ln
+    segs = [(la, ln, fo) for la, fo, ln in segments(d)]
     ods = glob.glob(os.path.expanduser('~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-objdump'))
     if not ods:
         sys.exit('xtensa-esp-elf-objdump not found under ~/.platformio/packages/toolchain-xtensa-esp-elf')

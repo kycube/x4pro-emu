@@ -6,13 +6,14 @@ r"""Decode (and encode) `.xic`, the stock Xteink firmware's image container.
   xic2png.py IN.xic [OUT.png] --diff OTHER.png compare with a PNG; exit 1 when they differ
   xic2png.py --encode IN.png OUT.xic           the inverse: a PNG back into a mono .xic
 
-`.xic` is what the stock app (`xteink_app` 7.2.4) writes for page caches, covers, font previews and
-for its Developer -> Screen Capture screenshots (`/sdcard/screenshots/screenshot_%s.xic`), so a
-capture taken in the emulator can be diffed against `x4emu screenshot` -- and a panel screenshot can
-be turned into a `.xic` and put back on the card. Reaching Screen Capture needs developer mode:
-`tools/stockdev.py` patches the 7.2.4 stub that gates it. The format was read out of the writer
-(app 0x42026138 packs the payload, 0x422153ec / 0x42026347 fill the header) and confirmed against a
-capture; docs/xic.md is the long version. A 24-byte little-endian header, then the raw pixels:
+`.xic` is what the stock app (`xteink_app`) writes for page caches, covers, font previews and for
+its Developer -> Screen Capture screenshots (`/sdcard/screenshots/screenshot_%s.xic`), so a capture
+taken in the emulator can be diffed against `x4emu screenshot` -- and a panel screenshot can be
+turned into a `.xic` and put back on the card. Reaching Screen Capture needs developer mode:
+`tools/stockdev.py` patches the stub that gates it (every version in tools/stockver.d/). The format
+was read out of 7.2.4's writer (app 0x42026138 packs the payload, 0x422153ec / 0x42026347 fill the
+header) and confirmed against a capture; 7.6.8's captures decode the same (docs/parity.md).
+docs/xic.md is the long version. A 24-byte little-endian header, then the raw pixels:
 
   0..3    magic "XIC\0"
   4..5    u16 width                     480 for a screen capture: the portrait UI frame

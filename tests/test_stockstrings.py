@@ -20,17 +20,16 @@ the nav menu differs from tests/golden/stock-menu.png only inside the third entr
 "All Files") and x 401 (the start of "Cloud Sync"), so every changed pixel must fall in x 290..370.
 It reuses test_stock.py's `stock_card`, `masked_diff`, `tap_repaints`, `state` and `wait_for`.
 """
-import os, shutil, subprocess, sys, pytest
+import os, shutil, subprocess, pytest
 from conftest import x4emu, ROOT, PY, QEMU, instance_name, copy_image
 from test_stock import (DUMP, STATUS_BAR_COLS, PANEL_W, masked_diff, state, wait_for,   # noqa: F401
                         tap_repaints, stock_card)                        # noqa: F401 (fixture)
+from test_stockdev import APP, esptool_valid
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import stockstrings                                                      # noqa: E402
 import stockdev                                                          # noqa: E402
 
 TOOL = os.path.join(ROOT, 'tools', 'stockstrings.py')
-APP = os.path.join(ROOT, 'images', 'device', 'stock-app0-7.2.4.bin')
 NVSEDIT = os.path.join(ROOT, 'tools', 'nvsedit.py')
 MENU_GOLDEN = os.path.join(ROOT, 'tests', 'golden', 'stock-menu.png')
 USB_ENTRY_COLS = (290, 370)      # the third nav-menu entry's box; its ink is x 319..341
@@ -46,16 +45,6 @@ def run(image, *args, rc=0):
 def packs(image, name='labels'):
     data = bytearray(open(image, 'rb').read())
     return stockstrings.parse_pack(data, stockdev.app_base(data), name)
-
-
-def esptool_ok(image):
-    """esptool's own opinion of the image: (checksum valid, hash valid). Bare app images only."""
-    r = subprocess.run([PY, '-m', 'esptool', '--chip', 'esp32s3', 'image-info', str(image)],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    out = r.stdout
-    return ('Checksum:' in out and '(valid)' in out.split('Checksum:')[1].split('\n')[0],
-            'Validation hash:' in out and '(valid)' in out.split('Validation hash:')[1].split('\n')[0])
 
 
 @pytest.fixture
@@ -120,7 +109,7 @@ def test_set_in_place_overwrites_and_nul_pads(app):
         set(range(lay['hash_off'], lay['hash_off'] + 32)), sorted(changed - slot_bytes)[:20]
     assert len(changed & slot_bytes) == 8, 'the eight bytes of "USB Mode" should have changed'
     assert stockdev.verify_image(after, 0) == (True, True)
-    assert esptool_ok(app) == (True, True)
+    assert esptool_valid(app) == (True, True)
     # a shorter text NUL-pads the rest of the old slot instead of leaving 'r' behind
     run(app, 'set', '11', 'en', 'Files')
     assert bytes(packs(app).blob[off:off + 9]) == b'Files\0\0\0\0'
@@ -140,7 +129,7 @@ def test_set_longer_needs_compact_and_then_appends(app):
     p = packs(app)
     assert [p.string(o) for o in p.offsets] == strings0, 'compaction changed a string'
     assert p.blob_size == 13528, 'compaction must keep the blob (and the region) the same size'
-    assert esptool_ok(app) == (True, True)
+    assert esptool_valid(app) == (True, True)
 
     was = list(packs(app).offsets)
     out = run(app, 'set', '11', 'en', 'File Transfer')
@@ -152,7 +141,7 @@ def test_set_longer_needs_compact_and_then_appends(app):
     assert p.offsets[:slot] == was[:slot] and p.offsets[slot + 1:] == was[slot + 1:]  # only that slot
     assert p.free_end - p.free_start == 499 - 14
     assert stockdev.verify_image(bytearray(open(app, 'rb').read()), 0) == (True, True)
-    assert esptool_ok(app) == (True, True)
+    assert esptool_valid(app) == (True, True)
 
     # filling the tail: the last append crosses the old blob end and grows blob_size into the two
     # bytes of padding after it, and the one after that is refused
@@ -162,7 +151,7 @@ def test_set_longer_needs_compact_and_then_appends(app):
     out = run(app, 'set', '9', 'en', 'ab', '--append')      # --append: it would fit in place
     assert 'appended' in out and packs(app).blob_size > 13528, 'blob_size did not grow into the pad'
     assert packs(app).group_strings(9)[1] == 'ab' and packs(app).free_end == packs(app).free_start
-    assert esptool_ok(app) == (True, True)
+    assert esptool_valid(app) == (True, True)
     err = run(app, 'set', '9', 'en', 'abc', rc=2)
     assert 'free tail is 0 byte(s)' in err
 
@@ -223,6 +212,9 @@ def test_works_on_a_16mb_flash_image(tmp_path):
         pytest.skip('device dump not available')
     flash = tmp_path / 'stock.bin'
     copy_image(DUMP, flash)
+    subprocess.run([PY, NVSEDIT, str(flash), 'redact'],         # the owner's WiFi credentials out
+                   check=True, stdout=subprocess.DEVNULL)      # (CLAUDE.md rule 6)
+    redacted = open(flash, 'rb').read()
     assert 'USB Mode' in run(flash, 'get', '11', '--lang', 'en')
     assert '16 MB flash image, app0 at 0x10000' in run(flash, 'set', '11', 'en', 'Transfer')
     assert packs(flash).group_strings(11)[1] == 'Transfer'
@@ -230,8 +222,9 @@ def test_works_on_a_16mb_flash_image(tmp_path):
     data = bytearray(open(flash, 'rb').read())
     assert stockdev.verify_image(data, 0x10000) == (True, True)
     assert len(data) == 0x1000000, 'a flash image must keep its size'
-    run(flash, 'restore', '--from', DUMP)
-    assert open(flash, 'rb').read() == open(DUMP, 'rb').read()
+    run(flash, 'restore', '--from', DUMP)                      # the app region of the dump itself
+    assert open(flash, 'rb').read() == redacted
+    flash.unlink()
 
 
 def test_7_6_8_wide_packs_read_and_write(tmp_path):
@@ -261,7 +254,7 @@ def test_7_6_8_wide_packs_read_and_write(tmp_path):
     assert p.width == 4 and p.offsets[14 * 16 + 1] > stockstrings.U16_MAX
     assert p.group_strings(13)[1] == 'Files' and p.group_strings(14)[1] == 'Transfer'
     assert p.group_strings(14)[4] == 'USB', 'the shared string stays for the other languages'
-    assert esptool_ok(app) == (True, True)
+    assert esptool_valid(app) == (True, True)
     run(app, 'restore', '--from', src)
     assert open(app, 'rb').read() == open(src, 'rb').read(), 'restore is not byte-exact'
 
@@ -279,8 +272,8 @@ def relabelled(tmp_path, request, stock_card):                                  
         pytest.skip('tests/golden/stock-menu.png not available')
     flash = tmp_path / 'stock.bin'
     copy_image(DUMP, flash)
-    subprocess.run([PY, NVSEDIT, str(flash), 'set-u8', 'user_config', 'net_en', '0'],
-                   check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([PY, NVSEDIT, str(flash), 'redact'],         # the owner's WiFi credentials out,
+                   check=True, stdout=subprocess.DEVNULL)      # net_en 0 (CLAUDE.md rule 6)
     subprocess.run([PY, TOOL, str(flash), 'set', '11', 'en', 'Transfer'],
                    check=True, stdout=subprocess.DEVNULL)
     sd = tmp_path / 'sd.img'
@@ -290,6 +283,7 @@ def relabelled(tmp_path, request, stock_card):                                  
     x4emu(name, 'run', '--flash', str(flash), '--sd', str(sd), '--boot-hold-power')
     yield name, tmp_path
     x4emu(name, 'stop', check=False)
+    flash.unlink(missing_ok=True)
 
 
 def diff_bbox(a_png, b_png, cols=(STATUS_BAR_COLS, PANEL_W - 60)):

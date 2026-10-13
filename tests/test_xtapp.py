@@ -17,7 +17,6 @@ import json, os, shutil, subprocess, sys
 import pytest
 from conftest import ROOT, PY
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import xtapp                                                                   # noqa: E402
 
 TOOL = os.path.join(ROOT, 'tools', 'xtapp.py')

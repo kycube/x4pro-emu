@@ -18,7 +18,10 @@ interrupt frame otherwise: PC +4, A0 +12, A1 +16) and follows the register windo
 caller SP at SP-12, return addresses carry the window size in bits 31:30. ROM PCs get names from the
 nm table, app PCs the segment and the nearest preceding `entry a1` (function start heuristic).
 """
-import argparse, bisect, struct, sys
+import argparse, bisect, os, struct, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stockdev import segments                                            # noqa: E402
 
 
 def main():
@@ -54,10 +57,7 @@ def main():
     if a.app:
         img = open(a.app, 'rb').read()
         if img[0] == 0xE9:
-            n, off = img[1], 24
-            for _ in range(n):
-                la, ln = struct.unpack_from('<II', img, off); off += 8
-                segs.append((la, ln, img[off:off + ln])); off += ln
+            segs = [(la, ln, img[off:off + ln]) for la, off, ln in segments(img)]
 
     def sym(pc):
         if rom and 0x40000000 <= pc < 0x40060000:

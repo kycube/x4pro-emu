@@ -94,7 +94,10 @@ THE API THE THREE TOOLS USE
     identify(data, base=None) -> (base, Version)   the whole check: app_base, esp_app_desc, the
                                                    version file, the ELF hash. Raises UnknownVersion
                                                    (no file) or StockVerError (hash mismatch, ...).
+    identify_as(data, base, error, unknown_tail)   the same, raising the tool's own exception
+    image_kind(data, base, ver=None)               the "bare app image, N bytes, ..." phrase
     app_desc(data, base=0)    -> {'project', 'version', 'elf_sha256', 'built', 'idf'} or None
+                                 (also tools/ghidra_stock.py's reader)
     versions()                -> [Version], every valid file, sorted
     problems()                -> {path: why} for every file that does not load
     baseline()                -> the reference version (7.2.4 when its file is there)
@@ -616,15 +619,28 @@ def identify(data, base=None):
     return base, ver
 
 
-def identify_file(path):
-    """(data, base, Version) for an image on disk."""
-    data = bytearray(open(path, 'rb').read())
-    base, ver = identify(data)
-    return data, base, ver
+def identify_as(data, base, error, unknown_tail):
+    """`identify`, with a tool's own exception type: every StockVerError becomes `error`, and an
+    UnknownVersion message gets `unknown_tail(baseline())` appended when there is a baseline
+    version to name (the tool's sentence on why it does not guess)."""
+    try:
+        return identify(data, base)
+    except UnknownVersion as e:
+        ref = baseline()
+        raise error(f'{e}{unknown_tail(ref) if ref else ""}') from None
+    except StockVerError as e:
+        raise error(str(e)) from None
+
+
+def image_kind(data, base, ver=None):
+    """'bare app image, N bytes[, xteink_app V]' or '16 MB flash image, app0 at 0x10000, ...':
+    the first line every stock tool prints about its image."""
+    return ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + \
+        f', {len(data)} bytes' + (f', {ver.label}' if ver else '')
 
 
 # ---------------------------------------------------------------- CLI
-def _describe(v, data=None):
+def _describe(v):
     lines = [f'{v.label}   {v.file}']
     if v.built or v.idf:
         lines.append(f'  built {v.built}   idf {v.idf}')
@@ -666,9 +682,8 @@ def _do_versions(a):
 def _do_identify(a):
     data = bytearray(open(a.image, 'rb').read())
     base, ver = identify(data)
-    kind = ('16 MB flash image, app0 at 0x10000' if base else 'bare app image')
     desc = app_desc(data, base)
-    print(f'{a.image}: {kind}, {len(data)} bytes')
+    print(f'{a.image}: {image_kind(data, base)}')
     print(f'  esp_app_desc at {base + DESC_OFF:#x}: {desc["project"]} {desc["version"]}, '
           f'built {desc["built"]}, idf {desc["idf"]}')
     for line in _describe(ver):

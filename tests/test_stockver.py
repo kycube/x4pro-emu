@@ -16,11 +16,10 @@ This file proves the four things that has to guarantee:
 Needs images/device/stock-app0-7.2.4.bin (gitignored) for the image half; the schema half runs
 anywhere. Nothing is written outside pytest's tmp_path.
 """
-import json, os, shutil, subprocess, sys
+import json, os, shutil, subprocess
 import pytest
 from conftest import ROOT, PY
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import stockver                                                                 # noqa: E402
 import stockdev                                                                 # noqa: E402
 import stockpatch                                                               # noqa: E402

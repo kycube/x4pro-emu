@@ -63,14 +63,16 @@ and the stock generates its own `.base.xtfp` cache on the card.
 `Xtf.from_bytes(data)`, `Xtf.glyph(cp)`, `Xtf.render(text)`, `build_xtf`, `build_package` and
 `install_package` are importable; `tests/test_xtfont.py` is the check.
 """
-import argparse, hashlib, io, json, os, shutil, struct, subprocess, sys, zipfile, zlib
+import argparse, hashlib, json, os, shutil, struct, sys, zipfile, zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from xtapp import PART_OFFSET, mtools                    # noqa: E402 (the card's FAT partition)
 
 MAGIC = b'XTF0'
 HEADER = 0x40
 VERSION = 2
 RANGE_ENTRY = 16
 ASCII_FIRST, ASCII_COUNT = 0x20, 95        # the advance table's range, and range-table entry 0
-PART_OFFSET = 1048576                      # the card's FAT partition starts at 1 MiB (mksd.py)
 
 # Per-cell header values that could not be derived from a TTF: read out of the card's
 # misans-demibold pair and written verbatim. `advance_y` and `byte0d` are derivable (cell - 2,
@@ -389,15 +391,13 @@ def _rasterise(font, cell_w, cell_h, baseline, cp):
         return advance, 0, 0, bytes(stride * cell_h)
     x_off, y_off = box[0] - pad, box[1] - pad
     w, h = min(box[2] - box[0], cell_w), min(box[3] - box[1], cell_h)
-    crop = im.crop((box[0], box[1], box[0] + w, box[1] + h))
     x_off, y_off = max(-128, min(127, x_off)), max(-128, min(127, y_off))
-    rows = bytearray(stride * cell_h)
-    px = crop.load()
-    for y in range(h):
-        for x in range(w):
-            if px[x, y]:
-                rows[y * stride + (x >> 3)] |= 0x80 >> (x & 7)
-    return advance, x_off, y_off, bytes(rows)
+    # the ink at the cell's top-left corner, packed by Pillow's own 1-bpp raw mode: rows padded to
+    # `stride` bytes, MSB first, a set bit for every ink (255) pixel
+    cell = Image.new('1', (cell_w, cell_h), 0)
+    ink = im.crop((box[0], box[1], box[0] + w, box[1] + h))
+    cell.paste(ink.convert('1', dither=Image.Dither.NONE))
+    return advance, x_off, y_off, cell.tobytes()
 
 
 def build_xtf(ttf_path, cell, codepoints, size=None):
@@ -469,7 +469,6 @@ def build_preview(small, medium, display_name, width=320, height=96):
     """The 320x96 mono `.xic` specimen: the display name in the medium font, then a sample line in
     each of the two fonts, drawn with the fonts themselves (`tools/xic2png.encode_xic`)."""
     from PIL import Image
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import xic2png
     canvas = Image.new('1', (width, height), 1)
     lines = [(medium, display_name[:26], 2), (small, 'Small  Aa Bb 123', 32),
@@ -536,20 +535,15 @@ def build_package(ttf_path, font_id, display_name, out_dir, small_size=None, bod
 
 
 # ---------------------------------------------------------------- installing
-def _mtools(img, *args, check=True):
-    return subprocess.run([args[0], '-i', f'{img}@@{PART_OFFSET}', *args[1:]],
-                          capture_output=True, text=True, check=check)
-
-
 def install_package(img, package, direct=False, font_id=None):
     """Put `package` in `XTCache/system_font_downloads/` on a card image (the stock's own installer
     picks it up from Settings -> System Font). With `direct=True` also unpack it into
     `XTData/system_fonts/<font_id>/` and rewrite `selection.config`, so the font is active at the
     next boot without touching the UI. Returns a dict of what was written."""
     out = {'image': img, 'package': os.path.basename(package)}
-    _mtools(img, 'mmd', '::/XTCache', check=False)
-    _mtools(img, 'mmd', '::/XTCache/system_font_downloads', check=False)
-    _mtools(img, 'mcopy', '-o', package, '::/XTCache/system_font_downloads/')
+    mtools(img, 'mmd', '::/XTCache', check=False)
+    mtools(img, 'mmd', '::/XTCache/system_font_downloads', check=False)
+    mtools(img, 'mcopy', '-o', package, '::/XTCache/system_font_downloads/')
     out['downloaded_to'] = '/XTCache/system_font_downloads/' + os.path.basename(package)
     if not direct:
         return out
@@ -565,11 +559,11 @@ def install_package(img, package, direct=False, font_id=None):
             with open(os.path.join(tmp, base), 'wb') as f:
                 f.write(z.read(name))
             names.append(base)
-    _mtools(img, 'mmd', '::/XTData', check=False)
-    _mtools(img, 'mmd', '::/XTData/system_fonts', check=False)
-    _mtools(img, 'mmd', f'::/XTData/system_fonts/{fid}', check=False)
-    _mtools(img, 'mcopy', '-o', *[os.path.join(tmp, n) for n in names],
-            f'::/XTData/system_fonts/{fid}/')
+    mtools(img, 'mmd', '::/XTData', check=False)
+    mtools(img, 'mmd', '::/XTData/system_fonts', check=False)
+    mtools(img, 'mmd', f'::/XTData/system_fonts/{fid}', check=False)
+    mtools(img, 'mcopy', '-o', *[os.path.join(tmp, n) for n in names],
+           f'::/XTData/system_fonts/{fid}/')
     roles = manifest['roles']
     cfg = ('format_version=1\nmode=external\n'
            f'font_id={fid}\n'
@@ -578,7 +572,7 @@ def install_package(img, package, direct=False, font_id=None):
     cfgfile = os.path.join(tmp, 'selection.config')
     with open(cfgfile, 'w') as f:
         f.write(cfg)
-    _mtools(img, 'mcopy', '-o', cfgfile, '::/XTData/system_fonts/selection.config')
+    mtools(img, 'mcopy', '-o', cfgfile, '::/XTData/system_fonts/selection.config')
     shutil.rmtree(tmp, ignore_errors=True)
     out['installed_to'] = f'/XTData/system_fonts/{fid}/'
     out['selection'] = cfg

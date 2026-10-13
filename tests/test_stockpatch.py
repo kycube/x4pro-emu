@@ -17,21 +17,17 @@ image arithmetic `tools/stockdev.py` uses (imported, not copied). What this file
 Needs images/device/stock-app0-7.2.4.bin (gitignored, extracted from the device dump); skips without
 it, as the stock tests do on CI. Everything happens on a copy in pytest's tmp_path.
 """
-import os, subprocess, sys
+import os, subprocess
 import pytest
 from conftest import ROOT, PY
+from test_stockdev import (APP, APP_BYTES, CHECKSUM_OFF, CROSSPOINT, HASH_OFF,
+                           image_info)
 
-sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import stockpatch                                                              # noqa: E402
 import stockdev                                                                # noqa: E402
 
 TOOL = os.path.join(ROOT, 'tools', 'stockpatch.py')
 STOCKDEV = os.path.join(ROOT, 'tools', 'stockdev.py')
-APP = os.path.join(ROOT, 'images', 'device', 'stock-app0-7.2.4.bin')
-CROSSPOINT = os.path.join(ROOT, 'firmware', '.pio', 'build', 'x4pro', 'firmware.bin')
-APP_BYTES = 5503680
-CHECKSUM_OFF = 0x53fa9f          # last byte of the 16-byte block after segment 7
-HASH_OFF = 0x53faa0              # ..0x53fabf, the end of the image
 FOOTER = {CHECKSUM_OFF} | set(range(HASH_OFF, HASH_OFF + 32))
 
 # the manifest, spelled out here so a silent edit of the tool's table fails this file
@@ -54,14 +50,6 @@ def run(*args, expect=0, tool=TOOL):
     assert r.returncode == expect, \
         f'{os.path.basename(tool)} {args} exited {r.returncode}, wanted {expect}:\n{r.stdout}\n{r.stderr}'
     return r.stdout + r.stderr
-
-
-def image_info(path):
-    """esptool's own view of the image footer (the independent check on our arithmetic)."""
-    r = subprocess.run([PY, '-m', 'esptool', '--chip', 'esp32s3', 'image-info', str(path)],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, f'esptool image-info failed:\n{r.stdout}\n{r.stderr}'
-    return r.stdout
 
 
 @pytest.fixture(scope='module')

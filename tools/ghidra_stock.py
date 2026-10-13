@@ -10,8 +10,8 @@ wraps Ghidra's `analyzeHeadless` to answer them.
                           or after the subcommand) pick the app image. The default is unchanged:
                           7.2.4 = images/device/stock-app0-7.2.4.bin. `--version 7.5.4` alone finds
                           images/device/stock-app*-7.5.4.bin; `--image` alone reads the version out
-                          of the image's esp_app_desc (offset 0x20, version at +0x10); both together
-                          must agree. Everything else follows the choice: the Ghidra project is
+                          of the image's esp_app_desc (`stockver.app_desc`); both together must
+                          agree. Everything else follows the choice: the Ghidra project is
                           images/ghidra/stock-<version>.gpr, the exports live in
                           images/ghidra/stock-<version>/, and the staleness check compares them
                           with *that* image. Nothing in the layout is version-specific: the
@@ -51,7 +51,7 @@ Quick start (a future agent needs no more than this):
 (or with --force). `decompile` is the only query that needs Ghidra; it opens the finished project
 read-only with -noanalysis, so it costs a JVM start, not a re-analysis. Addresses are always
 those of the selected image: nothing found in one version means anything in another
-(docs/stock-7.5.4.md is the 7.2.4 -> 7.5.4 re-location table).
+(docs/stock-7.5.4.md is the 7.2.4 -> 7.5.4 re-location table, docs/stock-7.6.8.md the next).
 
 Three things to expect from this particular binary. Nothing has C++ symbols, so functions are all
 `FUN_<addr>` (only the 254 ROM labels have names); identify them the way the survey did (typeinfo
@@ -83,6 +83,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import stockver                                                          # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEVICE_DIR = os.path.join(REPO, 'images', 'device')
 DEFAULT_VERSION = '7.2.4'
@@ -91,8 +94,6 @@ ROM_NM = os.path.join(REPO, 'images', 'rom', 'esp32s3_rev0_rom.nm')
 SCRIPT_DIR = os.path.join(REPO, 'tools', 'ghidra')
 PROJ_DIR = os.path.join(REPO, 'images', 'ghidra')
 LANGUAGE = 'Xtensa:LE:32:default'
-DESC_OFF = 0x20                 # esp_app_desc: 24-byte image header + 8-byte segment header
-DESC_MAGIC = 0xABCD5432
 
 # The image under analysis. `select()` rebinds these from --image / --version; the defaults are
 # the 7.2.4 app0 image, so the historical invocation behaves exactly as before.
@@ -114,21 +115,14 @@ class Error(Exception):
 # --------------------------------------------------------------------------- which image
 
 def app_desc(path):
-    """{'project', 'version', 'elf_sha256'} from the image's esp_app_desc, or None when the file
-    is not an ESP-IDF app image (no 0xE9 magic, no 0xABCD5432 descriptor)."""
+    """`stockver.app_desc` of the image file (project, version, elf_sha256, ...), or None when it
+    is not an ESP-IDF app image (no 0xE9 magic, no 0xABCD5432 descriptor). Only the head is read."""
     try:
         with open(path, 'rb') as fh:
-            head = fh.read(DESC_OFF + 0x100)
+            head = fh.read(stockver.DESC_OFF + stockver.DESC_BYTES)
     except OSError:
         return None
-    if len(head) < DESC_OFF + 0xb0 or head[0] != 0xE9:
-        return None
-    if int.from_bytes(head[DESC_OFF:DESC_OFF + 4], 'little') != DESC_MAGIC:
-        return None
-    field = lambda off, n: head[DESC_OFF + off:DESC_OFF + off + n].split(b'\0', 1)[0].decode(
-        'ascii', 'replace')
-    return {'version': field(0x10, 32), 'project': field(0x30, 32),
-            'elf_sha256': head[DESC_OFF + 0x90:DESC_OFF + 0xb0].hex()}
+    return stockver.app_desc(head) if head[:1] == b'\xe9' else None
 
 
 def find_image(version):
@@ -306,15 +300,6 @@ def parse_addr(text):
 
 def strings_at():
     return {int(r[0], 16): r[1] for r in _rows('strings.txt') if len(r) >= 2}
-
-
-def describe(addr):
-    """A short human label for an address: function, string, or bare."""
-    f = func_containing(addr)
-    if f:
-        off = addr - f[0]
-        return f'{f[2]} @0x{f[0]:08x}' + (f'+0x{off:x}' if off else '')
-    return '-'
 
 
 # --------------------------------------------------------------------------- queries

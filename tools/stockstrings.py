@@ -9,7 +9,7 @@ r"""Read and relabel the UI string packs of a stock `xteink_app` image (a data-o
 
 IMAGE is a bare app image (`images/device/stock-app0-7.2.4.bin`, 5,503,680 bytes, ESP magic 0xE9 at
 0) or a whole 16 MB flash image whose app0 slot starts at 0x10000; `stockdev.app_base` tells them
-apart and `stockdev.image_layout` / `refresh_image` / `verify_image` do the ESP image arithmetic, so
+apart and `stockdev.segments` / `reseal` (refresh + verify) do the ESP image arithmetic, so
 every writing command leaves the checksum byte and the appended SHA-256 the bootloader verifies
 correct (`-o/--out FILE` writes elsewhere instead of editing IMAGE in place). Languages are named
 `zh-CN`, `en`, `zh-TW`, `ja` or 0..3.
@@ -64,10 +64,10 @@ WHAT `set` DOES, EXACTLY (and the padding budget)
        up to and including its NUL, is NUL-padded. The offset table does not move; nothing else in
        the image changes. This is the safe case and the only one that needs no free space.
     2. **Appended** otherwise (a longer string, or a shared one that must not drag its neighbours
-       along, or `--append`): the text is written into the pack's free tail and the group's u16
-       offset is repointed at it. `blob_size` grows if the text goes past the old blob end, and the
-       old bytes are left where they are (dead space; `compact` reclaims it). Refused when the free
-       tail is too small or when the new offset would exceed 65,535.
+       along, or `--append`): the text is written into the pack's free tail and the group's offset
+       is repointed at it. `blob_size` grows if the text goes past the old blob end, and the old
+       bytes are left where they are (dead space; `compact` reclaims it). Refused when the free
+       tail is too small or when the new offset would exceed the offset width (65,535 for u16).
 
     **The free tail is empty in the stock image.** docs/stock-firmware.md §6 expects "~1 KB of
     padding" after the label blob before the bitmaps at 0x3c3fc020; there is none. The blob ends at
@@ -108,9 +108,7 @@ import argparse, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import stockver                                                                 # noqa: E402
-from stockver import PackSpec                                                   # noqa: E402,F401
-from stockdev import (app_base, image_layout, refresh_image, verify_image,      # noqa: E402
-                      StockDevError)
+from stockdev import app_base, reseal, segments, StockDevError                  # noqa: E402
 
 # lang_ids in the packs' own order: 7.2.4 / 7.5.4 carry the first four, 7.6.8 all sixteen (the
 # order of its toast pack's language-name groups 913..924: Deutsch, Italiano, Français, ...)
@@ -128,43 +126,24 @@ class StockStringsError(ValueError):
 
 def version_of(data, base=None):
     """(base, stockver.Version) for an image, with this tool's wording on a refusal."""
-    try:
-        return stockver.identify(data, base)
-    except stockver.UnknownVersion as e:
-        ref = stockver.baseline()
-        tail = (f' -- not stock {ref.label} and not any other version in tools/stockver.d/: the '
-                f'string packs sit at different addresses in every build, so reading here would '
-                f'read something else entirely' if ref else '')
-        raise StockStringsError(f'{e}{tail}') from None
-    except stockver.StockVerError as e:
-        raise StockStringsError(str(e)) from None
+    return stockver.identify_as(
+        data, base, StockStringsError,
+        lambda ref: f' -- not stock {ref.label} and not any other version in tools/stockver.d/: '
+                    f'the string packs sit at different addresses in every build, so reading here '
+                    f'would read something else entirely')
 
 
-def _baseline():
-    """The baseline version (tools/stockver.d/7.2.4.json), for the CLI's `--pack` choices, the help
-    epilog and the module-level defaults. The image at hand always decides for itself."""
-    return stockver.baseline()
-
-
-_REF = _baseline()
+# The baseline version (tools/stockver.d/7.2.4.json) supplies the CLI's `--pack` choices, the help
+# epilog and the default language list. The image at hand always decides for itself.
+_REF = stockver.baseline()
 PACKS = dict(_REF.packs) if _REF else {}        # the baseline version's packs
 PACK_NAMES = tuple(PACKS) or ('counts', 'labels', 'toasts')
-LANG_COUNT = (_REF.lang_count if _REF and _REF.lang_count else len(LANG_NAMES))
-LANGS = LANG_NAMES[:LANG_COUNT]
-# a handful of the label pack's group ids, printed by `list` and useful in messages
-KNOWN_GROUPS = dict(_REF.known_groups) if _REF else {}
+LANGS = LANG_NAMES[:_REF.lang_count if _REF and _REF.lang_count else len(LANG_NAMES)]
 
 
 # ---------------------------------------------------------------- VA -> file offset
-def segment_map(data, base):
-    """[(load VA, file offset of the payload, length)] of the app image at `base`, from the header's
-    segment table (`image_layout` parses it; the load address is the u32 in front of the payload)."""
-    lay = image_layout(data, base)
-    return [(struct.unpack_from('<I', data, off - 8)[0], off, length)
-            for off, length in lay['segments']]
-
-
 def va_to_file(segs, va, what='address', label='a stock app'):
+    """The file offset of `va` in `segs` (`stockdev.segments`: load VA, payload offset, length)."""
     for load, off, length in segs:
         if load <= va < load + length:
             return off + va - load
@@ -176,17 +155,17 @@ def va_to_file(segs, va, what='address', label='a stock app'):
 class Pack:
     """One parsed pack: file offsets, the offset table and the blob, plus its free tail.
 
-    `offsets` is a flat list of group_count * 4 u16 blob indexes (offset 0 = missing). `free_start`
-    is the first blob byte no live string uses at the end of the blob; the tail runs from there to
-    `free_end` (the blob end plus the zero padding that follows it, never past `spec.limit_va`)."""
+    `offsets` is a flat list of group_count * lang_count blob indexes (u16, or u32 for a width-4
+    pack; offset 0 = missing). `free_start` is the first blob byte no live string uses at the end
+    of the blob; the tail runs from there to `free_end` (the blob end plus the zero padding that
+    follows it, never past `spec.limit_va`)."""
 
     def __init__(self, data, base, spec, ver):
         self.spec, self.base, self.data, self.ver = spec, base, data, ver
         self.lang_count = ver.need_lang_count()
         self.langs = LANG_NAMES[:self.lang_count]
         lc, label = self.lang_count, ver.label
-        segs = segment_map(data, base)
-        self.segs = segs
+        segs = segments(data, base)
         self.width = spec.offset_width                      # 2: u16 offsets (7.2.4, 7.5.4), 4: u32
         self.fmt, self.off_max = OFFSET_FMT[self.width], OFFSET_MAX[self.width]
         if spec.header_va is not None:
@@ -237,7 +216,7 @@ class Pack:
         if self.blob[:1] != b'\0':
             raise StockStringsError(f'the {self.spec.name} blob does not start with the NUL that '
                                     f'offset 0 (missing string) points at')
-        used = bytearray(self.blob_size)
+        live_end = 1                         # one past the NUL of the last live string
         for off in set(self.offsets):
             if off == 0:
                 continue
@@ -248,10 +227,7 @@ class Pack:
             if end < 0:
                 raise StockStringsError(f'{self.spec.name}: the string at offset {off} is not '
                                         f'NUL-terminated inside the blob')
-            for i in range(off, end + 1):
-                used[i] = 1
-        self.used = used
-        live_end = max((i + 1 for i in range(self.blob_size) if used[i]), default=1)
+            live_end = max(live_end, end + 1)
         self.free_start = live_end
         pad = 0
         while (self.blob_off + self.blob_size + pad < self.limit_off
@@ -306,9 +282,10 @@ def open_image(path):
     return data, base
 
 
-def parse_pack(data, base, name):
-    """One pack of the image at `base`, using the addresses of *its* version's file."""
-    _base, ver = version_of(data, base)
+def parse_pack(data, base, name, ver=None):
+    """One pack of the image at `base`, using the addresses of *its* version's file (`ver`, when
+    the caller has identified the image already)."""
+    ver = ver or version_of(data, base)[1]
     if name not in ver.packs and name not in PACK_NAMES:
         raise StockStringsError(f'unknown pack {name!r}; have '
                                 f'{", ".join(ver.packs or PACK_NAMES)}')
@@ -321,7 +298,8 @@ def parse_pack(data, base, name):
 
 
 def read_pack(data, base, name):
-    """[{'group', 'strings': [4], 'offsets': [4]}] plus the pack's own numbers, for scripts."""
+    """[{'group', 'strings', 'offsets'}] (lang_count of each) plus the pack's own numbers, for
+    scripts."""
     p = parse_pack(data, base, name)
     return {'pack': name, 'groups': p.groups, 'blob_size': p.blob_size, 'free': p.free_end - p.free_start,
             'entries': [{'group': g,
@@ -395,16 +373,12 @@ def set_string(data, base, name, group, lang, text, append=False, shared=False):
         rep.update(mode='appended', offset=off, blob_size=size,
                    grew=size - p.blob_size, free_left=p.free_end - (off + need))
 
-    lay = refresh_image(data, base)
-    ok_c, ok_h = verify_image(data, base)
-    if not (ok_c and ok_h):
-        raise StockStringsError(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
-                                f'hash_ok={ok_h}) -- refusing to write it')
-    after = parse_pack(data, base, name)                 # re-parse: the pack must still be valid
+    footer = reseal(data, base, StockStringsError)
+    after = parse_pack(data, base, name, p.ver)          # re-parse: the pack must still be valid
     if after.string(after.offsets[slot]) != text:
         raise StockStringsError(f'{name}: the pack does not read back as {text!r} -- refusing')
-    rep.update(checksum=data[lay['checksum_off']], checksum_ok=ok_c, hash_ok=ok_h,
-               free_after=after.free_end - after.free_start)
+    rep.update(checksum=footer['checksum'], checksum_ok=footer['checksum_ok'],
+               hash_ok=footer['hash_ok'], free_after=after.free_end - after.free_start)
     return rep
 
 
@@ -419,15 +393,20 @@ def compact_pack(data, base, name):
         if off:
             strings[off] = bytes(p.blob[off:p.blob.find(b'\0', off)])
     uniq = sorted(set(strings.values()), key=lambda v: (-len(v), v))
+    wanted, lengths = set(uniq), {len(v) for v in uniq}
     blob, placed, stored = bytearray(b'\0'), {}, 0        # blob[0] = the NUL offset 0 points at
+    ends = {}             # string -> the NUL of the first stored string it is a suffix of
     for v in uniq:
-        hit = next((h for h in placed if h.endswith(v)), None)
-        if hit is not None:                               # a suffix of a string already in the blob
-            placed[v] = placed[hit] + len(hit) - len(v)
+        end = ends.get(v)
+        if end is not None:                               # a suffix of a string already in the blob
+            placed[v] = end - len(v)
             continue
         placed[v] = len(blob)
         blob += v + b'\0'
         stored += 1
+        for i in range(len(v) + 1):                       # (uniq is longest first, so the
+            if len(v) - i in lengths and v[i:] in wanted:  # first string to claim a suffix is
+                ends.setdefault(v[i:], len(blob) - 1)     # the one a linear search would find)
     if len(blob) > p.blob_size:
         raise StockStringsError(f'{name}: the repacked blob is {len(blob)} bytes, larger than the '
                                 f'{p.blob_size} it has to fit in')
@@ -437,22 +416,19 @@ def compact_pack(data, base, name):
     was = [p.string(o) for o in p.offsets]
     p.write_blob(bytes(blob) + b'\0' * (p.blob_size - len(blob)), p.blob_size)
     p.write_offsets(offsets)
-    lay = refresh_image(data, base)
-    ok_c, ok_h = verify_image(data, base)
-    after = parse_pack(data, base, name)
+    footer = reseal(data, base, StockStringsError)
+    after = parse_pack(data, base, name, p.ver)
     now = [after.string(o) for o in after.offsets]
     if now != was:
         bad = next(i for i, (a, b) in enumerate(zip(was, now)) if a != b)
         raise StockStringsError(f'{name}: compaction changed group {bad // p.lang_count} '
                                 f'{p.langs[bad % p.lang_count]} from {was[bad]!r} to {now[bad]!r}')
-    if not (ok_c and ok_h):
-        raise StockStringsError(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
-                                f'hash_ok={ok_h}) -- refusing to write it')
     return {'pack': name, 'strings': len(uniq), 'stored': stored,
             'blob_size': p.blob_size, 'free_before': before_free,
             'free_after': after.free_end - after.free_start,
             'freed': (after.free_end - after.free_start) - before_free,
-            'checksum': data[lay['checksum_off']], 'checksum_ok': ok_c, 'hash_ok': ok_h}
+            'checksum': footer['checksum'], 'checksum_ok': footer['checksum_ok'],
+            'hash_ok': footer['hash_ok']}
 
 
 def restore_pack(data, base, orig, orig_base, name):
@@ -464,22 +440,16 @@ def restore_pack(data, base, orig, orig_base, name):
         raise StockStringsError(f'{name}: the pack region of the two images does not line up')
     changed = bytes(data[now.start_off:now.region_end]) != bytes(orig[lo:hi])
     data[now.start_off:now.region_end] = orig[lo:hi]
-    lay = refresh_image(data, base)
-    ok_c, ok_h = verify_image(data, base)
-    after = parse_pack(data, base, name)
+    footer = reseal(data, base, StockStringsError)
+    after = parse_pack(data, base, name, now.ver)
     if [after.string(o) for o in after.offsets] != [was.string(o) for o in was.offsets]:
         raise StockStringsError(f'{name}: the restored pack does not read like the original')
     return {'pack': name, 'bytes': hi - lo, 'from': f'{lo:#x}', 'to': f'{now.start_off:#x}',
-            'changed': changed, 'checksum': data[lay['checksum_off']], 'checksum_ok': ok_c,
-            'hash_ok': ok_h}
+            'changed': changed, 'checksum': footer['checksum'],
+            'checksum_ok': footer['checksum_ok'], 'hash_ok': footer['hash_ok']}
 
 
 # ---------------------------------------------------------------- CLI
-def kind_of(data, base, ver=None):
-    return ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + \
-        f', {len(data)} bytes' + (f', {ver.label}' if ver else '')
-
-
 def print_group(p, g, lang=None, prefix=''):
     ss = p.group_strings(g)
     known = p.ver.known_groups
@@ -546,9 +516,9 @@ def main(argv=None):
 
         if a.cmd == 'list':
             for name in packs:
-                p = parse_pack(data, base, name)
+                p = parse_pack(data, base, name, ver)
                 lang = lang_index(a.lang, p.langs) if a.lang else None
-                print(f'{a.image}: {kind_of(data, base, ver)}\n'
+                print(f'{a.image}: {stockver.image_kind(data, base, ver)}\n'
                       f'{name} pack: {p.groups} groups x {p.lang_count} languages '
                       f'({", ".join(p.langs)}), blob {p.blob_size} bytes at file {p.blob_off:#x}'
                       f', free tail {p.free_end - p.free_start} bytes  -- {p.spec.what}')
@@ -558,12 +528,12 @@ def main(argv=None):
                         continue
                     print_group(p, g, lang, prefix='  ')
         elif a.cmd == 'get':
-            p = parse_pack(data, base, a.pack)
+            p = parse_pack(data, base, a.pack, ver)
             print_group(p, a.group, lang_index(a.lang, p.langs) if a.lang else None)
         elif a.cmd == 'set':
             r = set_string(data, base, a.pack, a.group, a.lang, a.text, a.append, a.shared)
             dst = write_out(a.image, data, a.out)
-            print(f'{a.image}: {kind_of(data, base, ver)}\n'
+            print(f'{a.image}: {stockver.image_kind(data, base, ver)}\n'
                   f'  {a.pack} group {r["group"]} {r["lang"]}: {r["old"]!r} -> {r["new"]!r} '
                   f'({r["mode"]}, offset {r["old_offset"]} -> {r["offset"]}, blob {r["blob_size"]} '
                   f'bytes, free tail {r["free_after"]})\n'

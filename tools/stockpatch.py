@@ -14,7 +14,7 @@ IMAGE is a bare app image (`images/device/stock-app0-7.2.4.bin`, 5,503,680 bytes
 device dump). `stockdev.app_base` tells the two apart and every offset below is an **app-image**
 offset, so a flash image simply adds 0x10000. The ESP image arithmetic -- the XOR checksum byte
 after the last segment and the appended SHA-256 the second-stage bootloader verifies -- is
-`stockdev.refresh_image` / `verify_image`, imported, not copied; `tools/stockdev.py` keeps its own
+`stockdev.reseal` (`refresh_image` + `verify_image`), imported, not copied; `tools/stockdev.py` keeps its own
 CLI and is the `developer-menu` patch below in one-command form.
 
 THE MANIFEST IS PER VERSION (tools/stockver.py)
@@ -95,13 +95,10 @@ import argparse, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import stockver                                                                # noqa: E402
-from stockver import Patch                                                     # noqa: E402,F401
-from stockdev import (FLASH_SIZE, APP0_OFF, StockDevError, app_base,           # noqa: E402,F401
-                      image_layout, refresh_image, verify_image)
+from stockdev import (FLASH_SIZE, APP0_OFF, CREDENTIALS_NOTE, StockDevError,   # noqa: E402
+                      footer_lines, footer_status, image_layout, reseal)
 
 APPLIED, ORIGINAL, UNKNOWN = 'applied', 'original', 'unknown'
-DESC_OFF = stockver.DESC_OFF            # esp_app_desc: 24-byte image header + 8-byte segment header
-DESC_MAGIC = stockver.DESC_MAGIC
 
 
 class StockPatchError(ValueError):
@@ -134,17 +131,12 @@ def app_version(data, base=0):
 
 def version_of(data, base=None):
     """(base, stockver.Version) for an image, with this tool's wording on a refusal."""
-    try:
-        return stockver.identify(data, base)
-    except stockver.UnknownVersion as e:
-        ref = stockver.baseline()
-        tail = (f' -- not {ref.label} ({ref.app_bytes} bytes) and not any other version in '
-                f'tools/stockver.d/: every offset in this tool was found per version and means '
-                f'nothing in another build, so find the sites again (tools/appdis.py, '
-                f'tools/ghidra_stock.py) before patching anything' if ref else '')
-        raise StockPatchError(f'{e}{tail}') from None
-    except stockver.StockVerError as e:
-        raise StockPatchError(str(e)) from None
+    return stockver.identify_as(
+        data, base, StockPatchError,
+        lambda ref: f' -- not {ref.label} ({ref.app_bytes} bytes) and not any other version in '
+                    f'tools/stockver.d/: every offset in this tool was found per version and means '
+                    f'nothing in another build, so find the sites again (tools/appdis.py, '
+                    f'tools/ghidra_stock.py) before patching anything')
 
 
 def check_image(data, base=None):
@@ -219,18 +211,9 @@ def _write(data, names, want, verb):
         changes.append({'name': p.name, 'offset': off, 'app_offset': p.app_offset, 'va': p.va,
                         'was': st, 'now': p.state(data, base), 'changed': was != new,
                         'from': was.hex(' '), 'to': new.hex(' '), 'detail': p.detail})
-    lay = refresh_image(data, base)
-    ok_c, ok_h = verify_image(data, base)
-    if not (ok_c and ok_h):                                          # never seen; a bug if it fires
-        raise StockPatchError(f'the re-checksummed image does not verify (checksum_ok={ok_c}, '
-                              f'hash_ok={ok_h}) -- refusing to write it')
-    return bytes(data), {
-        'base': base, 'version': ver.version, 'project': ver.project, 'changes': changes,
-        'checksum_offset': lay['checksum_off'], 'checksum': data[lay['checksum_off']],
-        'hash_offset': lay['hash_off'],
-        'sha256': bytes(data[lay['hash_off']:lay['hash_off'] + 32]).hex()
-        if lay['hash_off'] is not None else None,
-        'checksum_ok': ok_c, 'hash_ok': ok_h}
+    footer = reseal(data, base, StockPatchError)
+    return bytes(data), {'base': base, 'version': ver.version, 'project': ver.project,
+                         'changes': changes, **footer}
 
 
 def apply(data, names):
@@ -246,22 +229,14 @@ def revert(data, names):
 
 
 # ---------------------------------------------------------------- CLI
-def _kind(data, base, ver=None):
-    return ('16 MB flash image, app0 at 0x10000' if base else 'bare app image') + \
-        f', {len(data)} bytes' + (f', {ver.label}' if ver else '')
-
-
 def _do_list(a, data):
     base, _, ver = check_image(data)
-    ok_c, ok_h = verify_image(data, base)
     rows = states(data, base)
     if not rows:
-        print(f'{a.image}: {_kind(data, base, ver)}\n'
+        print(f'{a.image}: {stockver.image_kind(data, base, ver)}\n'
               f'  no patch sites are located in {ver.label} ({ver.file})')
         return 2 if a.check else 0
-    print(f'{a.image}: {_kind(data, base, ver)}\n'
-          f'  checksum {"valid" if ok_c else "INVALID"}, '
-          f'{"hash " + ("valid" if ok_h else "INVALID") if image_layout(data, base)["hash_off"] else "no appended hash"}')
+    print(f'{a.image}: {stockver.image_kind(data, base, ver)}\n  {footer_status(data, base)}')
     width = max(len(n) for n in rows)
     for name, r in rows.items():
         print(f'  {name:<{width}}  {r["state"]:<8} at {r["offset"]:#09x} '
@@ -280,7 +255,7 @@ def _do_write(a, data, verb):
     patches = resolve(a.patches, ver.patches)
     want = 'patched' if verb == 'apply' else 'original'
     target = APPLIED if verb == 'apply' else ORIGINAL
-    print(f'{a.image}: {_kind(data, base, ver)}')
+    print(f'{a.image}: {stockver.image_kind(data, base, ver)}')
     if a.check:
         rc = 0
         for p in patches:
@@ -296,18 +271,13 @@ def _do_write(a, data, verb):
               f'(app {c["app_offset"]:#x}, VA {c["va"]:#x})'
               + ('' if c['changed'] else f'   [already {target}]'))
         print(f'      {c["detail"]}')
-    print(f'  checksum {rep["checksum"]:#04x} at {rep["checksum_offset"]:#x} '
-          f'({"valid" if rep["checksum_ok"] else "INVALID"})')
-    if rep['hash_offset'] is not None:
-        print(f'  sha-256 {rep["sha256"]} at {rep["hash_offset"]:#x} '
-              f'({"valid" if rep["hash_ok"] else "INVALID"})')
+    print('\n'.join(footer_lines(rep)))
     dst = a.out or a.image
     with open(dst, 'wb') as f:
         f.write(out)
     print(f'  wrote {dst} ({len(out)} bytes)')
     if rep['base'] == APP0_OFF or len(out) == FLASH_SIZE:
-        print("  note: a flash image made from the device dump still holds the owner's WiFi "
-              'credentials (CLAUDE.md rule 6) -- keep it in scratch')
+        print(CREDENTIALS_NOTE)
     return 0
 
 
