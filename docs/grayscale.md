@@ -1,4 +1,4 @@
-# Grayscale: the waveform-level grey model (UC8279 X4)
+# Grayscale: the waveform-level grey model (UC8279 X4; the UC8179 in §7)
 
 The panel core (`models/epd_core.c`) has two ways to render a refresh that runs an external LUT bank
 (`PSR` REG=1 with 0x20..0x24 written since power-on, the core's `EPD_MODE_GRAY`):
@@ -43,7 +43,7 @@ confirmed by the settle bank: its BW (black→white) table is all `0x8x` (VDL) a
 
 Where this differs from the datasheets at hand: the UC8179c/UC8176 tables are **6-byte** groups
 (a level byte packing four 2-bit levels, four frame bytes, a repeat byte; 7 groups in KW mode). That
-reading does not fit these tables (`0x86` would be a 134-frame phase). The UC8253 sibling's
+reading does not fit these tables (`0x86` would be a 134-frame phase); it is the UC8179's own (§7). The UC8253 sibling's
 manufacturer header is paraphrased in `Uc8253MurphyLuts.h` as "7-byte groups: a level-select byte,
 four sub-phase frame counts, then repeat bytes", and its data (`01 4f 8f 0f 01 01 01`) carries the
 levels inside the frame bytes just like here; the freeink X3 notes say the UC8279 format is "group-based
@@ -202,3 +202,65 @@ sits inside the first device pixel outside the stroke): normalised reflectance m
 0.40 — the true panel grey lies between the two (the median carries some paper through the lens blur), so
 **~0.45 ≈ 114/255**, hence `gray-k` 38 (three driven frames). The model's earlier 84 (k 28) was a shade too
 dark. Remaining doubt: ±0.05 on the level, the camera's tone curve, and one photo, one page.
+
+## 7. The UC8179 (the other UltraChip batch, 2026-10-13)
+
+Source: `Uc8179Driver.cpp` (freeink-sdk; recovered from the X4 Pro OEM firmware's `UC8179_800x480`
+routines, "pending hardware validation" in its own words). No UC8179 is on the desk. Until this date the
+core read the UC8179's tables in the UC8279 layout of §1, so on `--panel uc8179` the AA and settle passes
+moved no pixel: no grey, and a page turn (whose base frame is a settle pass on this driver) left the old
+page on the glass.
+
+**LUT layout.** The same five registers (0x20 VCOM, 0x21 WW, 0x22 KW = BW, 0x23 WK = WB, 0x24 KK = BB), 42
+data bytes each with the command sent separately, read as **7 groups × 6 bytes**, group *g* at 6·g (the
+UC8179c datasheet's layout, `epd_core_lut_phases_uc8179`):
+
+| byte | meaning |
+|---|---|
+| 0 | level select: four 2-bit levels, phase 0 in bits 7:6, 1 in 5:4, 2 in 3:2, 3 in 1:0; codes as in §1 (00 GND / VCOM_DC, 01 VDH, 10 VDL, 11 floating) |
+| 1..4 | frames of phases 0..3, a whole byte each |
+| 5 | repeat count of the group (0 = not run); `0x01` in every group of both banks |
+
+There is no header byte: a group without frames is unused (the AA bank's second group, `00 00 00 00 00 01`).
+Evidence: under this reading the five tables of each bank agree on their frame totals (AA 2+2+1+1 = 6, settle
+6+1+6+6 + 2+4 = 25), and the settle bank `kGrayPreBwMid` parses to the UC8279's `kXtfPreBwMid` **phase for
+phase** (KW `AA`/`A0` all VDL, WK `55`/`50` all VDH, KK `10` in group 1 = VDH 4): one vendor waveform in two
+encodings (`test_lut_parse_uc8179`). Read in the §1 layout, every VCOM and KK group has a `0x00` header and
+the others hold only GND phases.
+
+| AA `kGrayLuts` (6 frames) | phases |
+|---|---|
+| 0x20 VCOM | DC 2, DC 2, DC 1, DC 1 |
+| 0x21 WW | GND 2, GND 2, **VDL 1**, GND 1 |
+| 0x22 KW, 0x23 WK (byte-identical) | GND 2, **VDL 2**, GND 1, GND 1 |
+| 0x24 KK | GND 2, GND 2, GND 1, GND 1 |
+
+**CDI.** The UC8179's 0x50 takes two bytes, `29 07` around a refresh and `A9 07` idle; the first is BDZ
+(bit 7), BDV (5:4), N2OCP (3), DDX (1:0) — the UC8179 datasheet's R50H as GxEPD2's UC8179 drivers send it
+(not on disk here), not the UC8279's one-byte VBD/DDX/CDI. DDX = 01 gives DDX[0] = 1, RAM bit 1 = white,
+which is the driver's own selector table ("(0,0)=LUTKK black, (0,1)=LUTKW, (1,0)=LUTWK, (1,1)=LUTWW
+white"); read at bit 4 as on the UC8279, `0x29` would invert every class (black glyph cores at 38, white
+pixels at 103 after a settle). N2OCP (copy NEW to OLD after a refresh) is not modelled: the driver rewrites
+DTM1 after every refresh itself.
+
+**Scan direction.** PSR `0x3F` / `0x1F` has UD = 1 (bit 3) and SHL = 1 (bit 2); the driver streams the 480
+rows reversed and its 120 white padding rows after them, where the UC8279 driver (PSR `0x37`, UD = 0) sends
+the padding first and the rows forward. With UD honoured as the UC81xx gate-scan bit, RAM rows 479..0 land
+on the visible gates and the picture is upright and the same as the UC8279's; before, the core showed the
+UC8179's screens mirrored and shifted by 120 rows (the padding visible). SHL = 0 (the OEM firmware's own
+`0x3B`) mirrors the sources. Both bits are honoured for the UC8179 only: the UC8279 is only ever sent UD = 0,
+SHL = 1, and its output stays bit-identical.
+
+**Levels.** CrossPoint's absolute selectors (not inverted on this driver): black (0,0) → KK, holds → 0;
+dark (1,0) → WK and light (0,1) → KW, 2 VDL frames → **76** at k 38; white (1,1) → WW → 255. Three levels as
+on the UC8279 (BW = WB here as well), one shade darker: 2 driven frames where `kXtfAa68` has 3
+(`kXtfAa02`, for LUT_VER 0x02 UC8279 units, has 2 as well). The settle bank clears greys exactly as in §3.
+
+**In the emulator** (`tests/test_panels.py::test_uc8179_reader_greys_match_uc8279`, against a UC8279 run of
+the same firmware): reader page 1 on `--panel uc8179` has 32,453 black, 14,967 grey (76) and 336,580 white
+pixels, and equals the UC8279's page with 114 mapped to 76 in 0 pixels; page 2 likewise (15,659 grey); Home
+is 0 pixels apart. Host tests: `test_lut_parse_uc8179`, `test_uc8179_reader_page`, `test_uc8179_cdi_and_scan`.
+
+Not validated: everything above against a UC8179's glass. The grey level uses `gray-k` measured on the
+UC8279's panel (§6); the repeat-count semantics and the 7-group limit come from the UC8179c reading (every
+table in use has repeat 1 and 42 bytes); the frame rate is unknown (the driver sends no PLL).

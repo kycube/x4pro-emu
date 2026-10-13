@@ -125,6 +125,12 @@ of slack that would stretch a 940-chunk frame to over a second. The frontlight d
 
 ### UC8279 / UC8179 (X4 Pro variants)
 
+**The UC8179 differs in three ways the model honours (since 2026-10-13, `docs/grayscale.md` §7):** its LUTs are
+the UC8179c layout (42 bytes per register as 7 groups of 6: a byte of four 2-bit levels, four frame counts, a
+repeat), its CDI is two bytes (`29 07` / `A9 07`, DDX in bits 1:0), and its driver sends PSR UD=1 with the rows
+reversed and the 120 padding rows last. CrossPoint's reader AA then lands at level 76 (2 frames) where the
+UC8279's lands at 114 (3 frames), pixel for pixel the same layout (`tests/test_panels.py`).
+
 Command set (`Uc8279X4Driver.cpp`): 0x00 PSR, 0x02 POF, 0x03 PFS, 0x04 PON, 0x07 DSLP (0xA5), 0x10 DTM1 (old
 plane), 0x12 DRF, 0x13 DTM2 (new plane), 0x30 PLL, 0x50 CDI, 0x61 TRES, 0x65 GSST, 0x90 PTL, 0x91 PTIN,
 0x92 PTOUT, 0xE0 CCSET, 0xE1 gate scan, 0xE5 TSSET, 0x20..0x24 LUT banks (49 or 42 bytes). BUSY_N idle HIGH,

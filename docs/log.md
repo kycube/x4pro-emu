@@ -1389,3 +1389,18 @@ and the coordinator did not run it on its behalf).
 owner keeps the status screens as they are); the hotlog has two regions named `wdev`; `x4pro.ana-i2c`
 logs every transaction on WiFi-on boots; the Espressif series predates the review's generic cleanups
 (`docs/upstream-qemu.md` §1).
+
+## 2026-10-13 — The UC8179 shows grey: its own LUT layout, its two-byte CDI, its scan direction
+
+The review had found that `--panel uc8179` showed CrossPoint's reader as bare black and white. One Opus
+5.5 agent fixed it in `models/epd_core.c`, for that variant only: the UC8179's LUTs are the UC8179c
+layout (from the SDK's `Uc8179Driver.cpp` `kGrayLuts` / `kGrayPreBwMid`: registers 0x20-0x24, 42 bytes
+as 7 groups of 6 -- four 2-bit levels, four frame counts, a repeat; every table of a bank then agrees on
+its frame total, AA 6, settle 25); its CDI is two bytes with DDX in bits 1:0 (read at bit 4 it inverted
+every pixel class); and its driver streams the rows reversed under PSR UD=1 with the padding rows last
+(screens were mirrored and shifted 120 rows). Reader page 1 on the UC8179: 14,967 grey pixels at level
+76 where there were none; mapping 76 to the UC8279's 114 makes both pages 0 px apart. UC8279 and SSD1677
+are bit-identical (71/71 and 61/61 harness sections, ASan/UBSan clean); host tests 92 -> 139 checks;
+`tests/test_panels.py::test_uc8179_reader_greys_match_uc8279`. `make test` 232 passed. Uncertain: the
+CDI field layout and the UD reading rest on the driver's design and the datasheet as remembered; `gray-k`
+was measured on UC8279 glass; there is no UC8179 oracle.

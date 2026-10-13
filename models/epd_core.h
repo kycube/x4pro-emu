@@ -38,6 +38,13 @@
 #define EPD_UC_LUT_GROUP_BYTES 7
 #define EPD_UC_LUT_GROUPS 7
 #define EPD_UC_LUT_PHASES_PER_GROUP 4
+/* The UC8179 receives the same five registers in the UC8179c datasheet layout instead
+ * (Uc8179Driver.cpp kGrayLuts / kGrayPreBwMid, 42 data bytes = 7 groups of 6, group g at 6g):
+ *   [0] level select: four 2-bit levels, phase 0 in bits 7:6 .. phase 3 in bits 1:0
+ *   [1..4] frames of phases 0..3 (0..255)   [5] repeat count of the group (0 = not run)
+ * Same level codes; no header byte (a group with no frames is unused). docs/grayscale.md §7. */
+#define EPD_UC8179_LUT_BYTES 42
+#define EPD_UC8179_LUT_GROUP_BYTES 6
 #define EPD_LUT_MAX_PHASES (EPD_UC_LUT_GROUPS * EPD_UC_LUT_PHASES_PER_GROUP)
 #define EPD_GRAY_K_DEFAULT 38           /* reflectance change per frame at VDH/VDL (0..255 scale): 3 AA frames
                                          * -> 114 = 0.45, the rim level measured on the glass (docs/grayscale.md) */
@@ -52,7 +59,7 @@ typedef enum {
 
 typedef struct {
     uint8_t level;      /* EpdLutLevel */
-    uint8_t frames;     /* 0..63 */
+    uint8_t frames;     /* 0..63 (UC8279 layout), 0..255 (UC8179 layout) */
     uint8_t group;      /* 0..6 */
     uint8_t repeat;     /* the group's repeat count, applied to all its phases */
 } EpdLutPhase;
@@ -131,7 +138,9 @@ struct EpdCore {
     bool uc_lut_loaded;             /* any 0x20..0x24 LUT written since power-on */
     uint8_t uc_lut[5][EPD_UC_LUT_BYTES];   /* the bank as last written (a new write zeroes its table) */
     uint8_t uc_lut_len[5];
-    uint8_t uc_cdi;                 /* 0x50 data byte; bit 4 = DDX[0] (1: RAM bit 1 = white). MTP default 0x97 */
+    uint8_t uc_cdi;                 /* 0x50 first data byte; DDX[0] (1: RAM bit 1 = white) is bit 4 on the UC8279
+                                     * (one byte, VBD DDX CDI), bit 0 on the UC8179 (BDZ - BDV N2OCP - DDX, then
+                                     * a CDI byte). MTP default 0x97 */
 
     /* planes (SSD1677: bw + red, 480 rows; UC: old(DTM1) + new(DTM2), 600 rows) */
     uint8_t plane0[EPD_UC_PLANE_BYTES];
@@ -195,12 +204,15 @@ int epd_core_line_level(const EpdCore *c);       /* current driven level or -1 *
 
 /* ---- UC81xx LUT interpreter and grey model (docs/grayscale.md) ---- */
 /* Parse one 0x20..0x24 table of len <= EPD_UC_LUT_BYTES bytes (a shorter table
- * reads as zero-padded) into its phase sequence. */
+ * reads as zero-padded) into its phase sequence: the UC8279 layout. */
 void epd_core_lut_phases(const uint8_t *table, size_t len, EpdLutSeq *out);
+/* The same for a UC8179 table in the UC8179c layout (only its first EPD_UC8179_LUT_BYTES bytes count). */
+void epd_core_lut_phases_uc8179(const uint8_t *table, size_t len, EpdLutSeq *out);
 /* Run a parsed source table over one reflectance value with the model (k per
  * driven frame), groups repeated as their counts say, saturating at 0/255. */
 uint8_t epd_core_lut_apply(const EpdLutSeq *seq, uint8_t reflectance, int k);
-/* Which table a pixel's (old, new) RAM bits select under the current CDI DDX:
+/* Which table a pixel's (old, new) RAM bits select under the current CDI DDX[0]
+ * (read where the variant keeps it, see uc_cdi):
  * 1 = WW (0x21), 2 = BW (0x22), 3 = WB (0x23), 4 = BB (0x24). */
 int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit);
 const char *epd_variant_name(EpdVariant v);

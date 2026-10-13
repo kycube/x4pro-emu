@@ -480,6 +480,241 @@ static void test_ssd1677_gray_unchanged_by_flag(void)
     free(c);
 }
 
+/* ---- UC8179: its own LUT layout, CDI and scan direction ------------------- */
+/* Uc8179Driver.cpp's banks (the command byte stripped; 42 data bytes, the rest zero):
+ * kGrayLuts (AA) and kGrayPreBwMid (the settle transition). 0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK. */
+static const uint8_t k79GrayLuts[5][12] = {
+    {0x00, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+    {0x08, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+    {0x20, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+    {0x20, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+    {0x00, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+};
+static const uint8_t k79GrayPreBwMid[5][12] = {
+    {0x00, 0x06, 0x01, 0x06, 0x06, 0x01, 0x00, 0x02, 0x04, 0x00, 0x00, 0x01},
+    {0x20, 0x06, 0x01, 0x06, 0x06, 0x01, 0x00, 0x02, 0x04, 0x00, 0x00, 0x01},
+    {0xAA, 0x06, 0x01, 0x06, 0x06, 0x01, 0xA0, 0x02, 0x04, 0x00, 0x00, 0x01},
+    {0x55, 0x06, 0x01, 0x06, 0x06, 0x01, 0x50, 0x02, 0x04, 0x00, 0x00, 0x01},
+    {0x00, 0x06, 0x01, 0x06, 0x06, 0x01, 0x10, 0x02, 0x04, 0x00, 0x00, 0x01},
+};
+
+static void lut79_fill(uint8_t *out, const uint8_t *head12)
+{
+    memset(out, 0, EPD_UC8179_LUT_BYTES);
+    memcpy(out, head12, 12);
+}
+
+static void test_lut_parse_uc8179(void)
+{
+    uint8_t t[49];
+    EpdLutSeq q, r;
+    /* AA VCOM: one group at VCOM_DC, 2+2+1+1 = 6 frames; group 1 (00 00 00 00 00 01) has no frames */
+    lut79_fill(t, k79GrayLuts[0]);
+    epd_core_lut_phases_uc8179(t, 42, &q);
+    CHECK(q.groups == 1 && q.nphases == 4 && q.frames == 6, "79 aa vcom groups %d phases %d frames %u", q.groups, q.nphases, q.frames);
+    for (int i = 0; i < 4; i++) CHECK(q.phase[i].level == EPD_LUT_GND && q.phase[i].repeat == 1, "79 aa vcom level %d", i);
+    /* the five tables agree on 6 frames (the UC8279 reading of the same bytes would not) */
+    for (int i = 0; i < 5; i++) {
+        lut79_fill(t, k79GrayLuts[i]);
+        epd_core_lut_phases_uc8179(t, 42, &q);
+        CHECK(q.frames == 6 && q.nphases == 4, "79 aa %d frames %u", i, q.frames);
+    }
+    /* WW 0x08 = 00 00 10 00: VDL 1 in phase 2 */
+    lut79_fill(t, k79GrayLuts[1]);
+    epd_core_lut_phases_uc8179(t, 42, &q);
+    CHECK(phase_is(&q.phase[0], EPD_LUT_GND, 2, 0, 1) && phase_is(&q.phase[1], EPD_LUT_GND, 2, 0, 1) &&
+          phase_is(&q.phase[2], EPD_LUT_VDL, 1, 0, 1) && phase_is(&q.phase[3], EPD_LUT_GND, 1, 0, 1), "79 aa ww");
+    /* KW and WK 0x20 = 00 10 00 00: VDL 2 in phase 1 (byte-identical, like the UC8279's BW/WB) */
+    for (int i = 2; i <= 3; i++) {
+        lut79_fill(t, k79GrayLuts[i]);
+        epd_core_lut_phases_uc8179(t, 42, &q);
+        CHECK(phase_is(&q.phase[1], EPD_LUT_VDL, 2, 0, 1) && q.phase[0].level == EPD_LUT_GND &&
+              q.phase[2].level == EPD_LUT_GND && q.phase[3].level == EPD_LUT_GND, "79 aa %d = VDL 2 in phase 1", i);
+    }
+    /* KK: every phase at GND */
+    lut79_fill(t, k79GrayLuts[4]);
+    epd_core_lut_phases_uc8179(t, 42, &q);
+    { int driven = 0; for (int i = 0; i < q.nphases; i++) driven += q.phase[i].level != EPD_LUT_GND;
+      CHECK(driven == 0, "79 aa kk holds"); }
+    /* the settle bank in this layout is the UC8279's settle bank in its own, phase for phase */
+    for (int i = 0; i < 5; i++) {
+        lut79_fill(t, k79GrayPreBwMid[i]);
+        epd_core_lut_phases_uc8179(t, 42, &q);
+        uint8_t u[49];
+        lut_fill(u, kXtfPreBwMid[i]);
+        epd_core_lut_phases(u, 42, &r);
+        int same = q.nphases == r.nphases && q.frames == r.frames && q.groups == r.groups && q.frames == 25;
+        for (int p = 0; same && p < q.nphases; p++)
+            same = phase_is(&q.phase[p], r.phase[p].level, r.phase[p].frames, r.phase[p].group, r.phase[p].repeat);
+        CHECK(same, "79 prebw %d equals the uc8279 settle table (phases %d/%d frames %u/%u)", i, q.nphases, r.nphases, q.frames, r.frames);
+    }
+    /* full-byte frame counts, the repeat byte multiplies, 0 repeats = not run, zero padding */
+    uint8_t syn[42] = {0x9C, 0x50, 0x00, 0x03, 0x00, 0x02,   0x40, 0x07, 0x00, 0x00, 0x00, 0x00};
+    epd_core_lut_phases_uc8179(syn, 42, &q);   /* 0x9C = 10 01 11 00: VDL 80, (VDH 0: skipped), float 3 */
+    CHECK(q.groups == 2 && q.nphases == 3 && q.frames == (80 + 3) * 2, "79 syn groups %d phases %d frames %u", q.groups, q.nphases, q.frames);
+    CHECK(phase_is(&q.phase[0], EPD_LUT_VDL, 80, 0, 2) && phase_is(&q.phase[1], EPD_LUT_FLOAT, 3, 0, 2) &&
+          phase_is(&q.phase[2], EPD_LUT_VDH, 7, 1, 0), "79 syn phases");
+    CHECK(epd_core_lut_apply(&q, 0, 1) == 160, "79 syn apply %u (group 1 never runs)", epd_core_lut_apply(&q, 0, 1));
+    epd_core_lut_phases_uc8179(syn, 3, &q);    /* only level select + one frame byte sent */
+    CHECK(q.nphases == 1 && q.frames == 0, "79 syn short: no repeat byte, no frames run (%d, %u)", q.nphases, q.frames);
+}
+
+/* Uc8179Driver::streamPlane: the 480 framebuffer rows reversed (row 479 first), then 120
+ * white padding rows. Framebuffer row 0 is `row`, the others `fill`; nothing inverted. */
+static void uc79_plane_row0(EpdCore *c, uint8_t plane_cmd, const uint8_t *row, uint8_t fill)
+{
+    static uint8_t pad[EPD_WB], rest[EPD_WB];
+    memset(pad, 0xFF, sizeof(pad));
+    memset(rest, fill, sizeof(rest));
+    cmd(c, plane_cmd);
+    for (int y = 479; y >= 1; y--) datn(c, rest, EPD_WB);
+    datn(c, row, EPD_WB);
+    for (int y = 480; y < 600; y++) datn(c, pad, EPD_WB);
+}
+
+static void uc79_load_bank(EpdCore *c, const uint8_t (*bank)[12])
+{
+    uint8_t t[EPD_UC8179_LUT_BYTES];
+    for (int i = 0; i < 5; i++) {
+        lut79_fill(t, bank[i]);
+        cmd(c, (uint8_t)(0x20 + i));
+        datn(c, t, sizeof(t));
+    }
+}
+
+/* CrossPoint's reader on a UC8179 (Uc8179Driver.cpp), pixels x = 0 black, 1 dark grey, 2 light
+ * grey, 3 white on framebuffer row 0. The base frame through the OTP waveform (PSR 0x1F, CDI 29 07),
+ * then the absolute AA selectors, (DTM1, DTM2) = black (0,0) dark (1,0) light (0,1) white (1,1),
+ * PSR 0x3F, kGrayLuts, CDI 29 07, DRF; then a page turn through kGrayPreBwMid and the next AA. */
+static void reader79_base(EpdCore *c, const uint8_t *base_row)
+{
+    static uint8_t white[EPD_WB];
+    memset(white, 0xFF, sizeof(white));
+    uc79_plane_row0(c, 0x13, base_row, 0xFF);
+    cmd(c, 0x10); for (int y = 0; y < 600; y++) datn(c, white, EPD_WB);
+    cmd(c, 0x50); dat(c, 0x29); dat(c, 0x07); cmd(c, 0xE0); dat(c, 0x02); cmd(c, 0xE5); dat(c, 0x1E);
+    cmd(c, 0x00); dat(c, 0x1F); dat(c, 0x0A);
+    cmd(c, 0x04); epd_core_busy_done(c);
+    cmd(c, 0x12); epd_core_busy_done(c);
+    cmd(c, 0x50); dat(c, 0xA9); dat(c, 0x07);
+    uc79_plane_row0(c, 0x10, base_row, 0xFF);
+}
+
+static void reader79_aa(EpdCore *c, const uint8_t *p0, const uint8_t *p1)
+{
+    uc79_plane_row0(c, 0x10, p0, 0xFF);
+    uc79_plane_row0(c, 0x13, p1, 0xFF);
+    cmd(c, 0x00); dat(c, 0x3F); dat(c, 0x0A);
+    uc79_load_bank(c, k79GrayLuts);
+    cmd(c, 0x50); dat(c, 0x29); dat(c, 0x07);
+    cmd(c, 0x12); epd_core_busy_done(c);
+}
+
+static void test_uc8179_reader_page(void)
+{
+    EpdCore *c = malloc(sizeof(*c));
+    epd_core_init(c, EPD_UC8179);
+    cmd(c, 0x00); dat(c, 0x3F); dat(c, 0x0A);
+    cmd(c, 0x61); dat(c, 0x03); dat(c, 0x20); dat(c, 0x02); dat(c, 0x58);
+    uint8_t base[EPD_WB], p0[EPD_WB], p1[EPD_WB];
+    memset(base, 0xFF, sizeof(base));
+    set_px(base, 0, 0); set_px(base, 1, 0); set_px(base, 2, 0); set_px(base, 3, 1);
+    reader79_base(c, base);
+    CHECK(c->last_mode == EPD_MODE_FULL && !c->image_gray_waveform, "79 base is mono otp");
+    /* UD = 1 and the reversed rows put framebuffer row 0 on the top row of the glass */
+    CHECK(c->image[0] == 0 && c->image[1] == 0 && c->image[2] == 0 && c->image[3] == 255 && c->image[4] == 255,
+          "79 base on row 0: %u %u %u %u", c->image[0], c->image[1], c->image[2], c->image[3]);
+    { int dark = 0; for (int i = EPD_W; i < EPD_W * EPD_H; i++) dark += c->image[i] != 255;
+      CHECK(dark == 0, "79 base: nothing but row 0 inked (%d), the padding rows invisible", dark); }
+    memcpy(p0, base, sizeof(p0)); memcpy(p1, base, sizeof(p1));   /* white background: (1,1) WW */
+    set_px(p0, 0, 0); set_px(p1, 0, 0);   /* black: KK */
+    set_px(p0, 1, 1); set_px(p1, 1, 0);   /* dark: WK (plane0 = base | lsb, plane1 = plane0 ^ msb) */
+    set_px(p0, 2, 0); set_px(p1, 2, 1);   /* light: KW */
+    reader79_aa(c, p0, p1);
+    CHECK(c->last_mode == EPD_MODE_GRAY && c->image_gray_waveform, "79 aa is a waveform refresh");
+    CHECK(c->last_lut_frames == 6, "79 aa frames %u", c->last_lut_frames);
+    CHECK(epd_core_lut_index(c, 0, 0) == 4 && epd_core_lut_index(c, 1, 0) == 3 && epd_core_lut_index(c, 0, 1) == 2 &&
+          epd_core_lut_index(c, 1, 1) == 1, "CDI 0x29: DDX[0] = 1, RAM 1 = white");
+    const int k = EPD_GRAY_K_DEFAULT;
+    CHECK(c->image[0] == 0, "79 black stays black (%u)", c->image[0]);
+    CHECK(c->image[1] == 2 * k, "79 dark = 2 VDL frames from black (%u)", c->image[1]);
+    CHECK(c->image[2] == 2 * k, "79 light = the same table (%u)", c->image[2]);
+    CHECK(c->image[3] == 255 && c->image[4] == 255 && c->image[EPD_W] == 255, "79 white stays white");
+    /* restore: both planes = the base, no refresh */
+    uc79_plane_row0(c, 0x10, base, 0xFF); uc79_plane_row0(c, 0x13, base, 0xFF);
+    CHECK(c->image[1] == 2 * k, "79 planes alone do not move pixels");
+    /* page turn (transitionGrayscaleBase): DTM2 = new base, PTIN + PTL 0..479, PSR 0x3F, the settle
+     * bank, DRF. Pixel 1 (grey) becomes white, pixel 2 (grey) black, pixel 3 (white) black. */
+    uint8_t base2[EPD_WB];
+    memset(base2, 0xFF, sizeof(base2));
+    set_px(base2, 0, 0); set_px(base2, 1, 1); set_px(base2, 2, 0); set_px(base2, 3, 0);
+    uc79_plane_row0(c, 0x13, base2, 0xFF);
+    cmd(c, 0x91);
+    cmd(c, 0x90); { uint8_t w[9] = {0, 0, 0x03, 0x1F, 0, 0, 0x01, 0xDF, 0x01}; datn(c, w, 9); }
+    cmd(c, 0x00); dat(c, 0x3F); dat(c, 0x0A);
+    cmd(c, 0x50); dat(c, 0x29); dat(c, 0x07); cmd(c, 0xE0); dat(c, 0x02); cmd(c, 0xE5); dat(c, 0x5A);
+    uc79_load_bank(c, k79GrayPreBwMid);
+    cmd(c, 0x12); epd_core_busy_done(c); cmd(c, 0x92);
+    cmd(c, 0x50); dat(c, 0xA9); dat(c, 0x07);
+    CHECK(c->image_gray_waveform && c->last_lut_frames == 25, "79 settle through the model (%u frames)", c->last_lut_frames);
+    CHECK(c->image[0] == 0 && c->image[1] == 255 && c->image[2] == 0 && c->image[3] == 0 && c->image[4] == 255,
+          "79 settle levels %u %u %u %u %u", c->image[0], c->image[1], c->image[2], c->image[3], c->image[4]);
+    /* the new page's AA: pixel 3 (black in base2) becomes a light grey */
+    uc79_plane_row0(c, 0x10, base2, 0xFF);
+    memcpy(p0, base2, sizeof(p0)); memcpy(p1, base2, sizeof(p1));
+    set_px(p1, 3, 1);                     /* light: (0,1) KW */
+    reader79_aa(c, p0, p1);
+    CHECK(c->image[3] == 2 * k && c->image[0] == 0 && c->image[1] == 255 && c->image[2] == 0,
+          "79 page 2 levels %u %u %u %u", c->image[0], c->image[1], c->image[2], c->image[3]);
+    /* a Fast B/W paint (OTP DU, PSR 0x1F) drives fully again */
+    uc79_plane_row0(c, 0x10, base2, 0xFF); uc79_plane_row0(c, 0x13, base2, 0xFF);
+    cmd(c, 0x00); dat(c, 0x1F); dat(c, 0x0A);
+    cmd(c, 0x91); cmd(c, 0x12); epd_core_busy_done(c); cmd(c, 0x92);
+    CHECK(!c->image_gray_waveform && c->image[3] == 0, "79 otp drives fully (%u)", c->image[3]);
+    CHECK(c->unknown_cmds == 0, "79 unknown %llu (last %02x)", (unsigned long long)c->unknown_cmds, c->last_unknown_cmd);
+    free(c);
+}
+
+static void test_uc8179_cdi_and_scan(void)
+{
+    EpdCore *c = malloc(sizeof(*c));
+    epd_core_init(c, EPD_UC8179);
+    /* DDX sits in bits 1:0 of the UC8179's first CDI byte: 0x28 (DDX 00) inverts, 0x97's bit 4 is not it */
+    cmd(c, 0x50); dat(c, 0x28); dat(c, 0x07);
+    CHECK(c->uc_cdi == 0x28 && epd_core_lut_index(c, 0, 0) == 1 && epd_core_lut_index(c, 1, 1) == 4, "79 DDX 00 inverts");
+    cmd(c, 0x50); dat(c, 0xA9); dat(c, 0x07);
+    CHECK(epd_core_lut_index(c, 1, 1) == 1 && epd_core_lut_index(c, 0, 0) == 4, "79 CDI 0xA9: DDX 01");
+    /* the same 0x29 on a UC8279 is read at bit 4 (DDX 10 there): the variants differ by design */
+    EpdCore *u = malloc(sizeof(*u));
+    epd_core_init(u, EPD_UC8279);
+    cmd(u, 0x50); dat(u, 0x29);
+    CHECK(epd_core_lut_index(u, 1, 1) == 4, "uc8279 reads 0x29 at bit 4");
+    free(u);
+    /* scan: a pixel at RAM row r, x 5 under each PSR orientation */
+    static const struct { uint8_t psr; int ram_row; int disp_row; int disp_x; } cases[] = {
+        {0x1F, 479, 0, 5},     /* UD 1 SHL 1 (CrossPoint): RAM row 479 is the top row */
+        {0x1F, 0, 479, 5},
+        {0x17, 120, 0, 5},     /* UD 0 SHL 1: the UC8279's mapping, padding first */
+        {0x1B, 479, 0, 794},   /* UD 1 SHL 0 (the OEM's 0x3B & 0xDF): sources mirrored */
+        {0x13, 599, 479, 794},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        epd_core_init(c, EPD_UC8179);
+        cmd(c, 0x61); dat(c, 0x03); dat(c, 0x20); dat(c, 0x02); dat(c, 0x58);
+        static uint8_t pl[EPD_UC_PLANE_BYTES];
+        memset(pl, 0xFF, sizeof(pl));
+        pl[cases[i].ram_row * EPD_WB] = 0xFB;   /* x 5 black */
+        cmd(c, 0x13); datn(c, pl, sizeof(pl));
+        cmd(c, 0x00); dat(c, cases[i].psr); dat(c, 0x0A);
+        cmd(c, 0x12); epd_core_busy_done(c);
+        int at = cases[i].disp_row * EPD_W + cases[i].disp_x, dark = 0;
+        for (int p = 0; p < EPD_W * EPD_H; p++) dark += c->image[p] != 255;
+        CHECK(c->image[at] == 0 && dark == 1, "79 psr %02x: ram row %d x 5 -> (%d, %d): %u, %d inked",
+              cases[i].psr, cases[i].ram_row, cases[i].disp_row, cases[i].disp_x, c->image[at], dark);
+    }
+    free(c);
+}
+
 int main(void)
 {
     test_ssd1677_basic();
@@ -492,6 +727,9 @@ int main(void)
     test_waveform_four_levels();
     test_waveform_off_and_otp_unchanged();
     test_ssd1677_gray_unchanged_by_flag();
+    test_lut_parse_uc8179();
+    test_uc8179_reader_page();
+    test_uc8179_cdi_and_scan();
     if (fails) { printf("%d failure(s) in %d checks\n", fails, checks); return 1; }
     printf("epd core tests: OK (%d checks)\n", checks);
     return 0;

@@ -3,6 +3,7 @@
  * See epd_core.h. Command semantics from
  *   freeink-sdk/libs/display/FreeInkDisplay/src/driver/Ssd1677Driver.cpp
  *   freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.cpp
+ *   freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8179Driver.cpp
  *   freeink-sdk/libs/hardware/XteinkDetect/src/XteinkDetect.cpp (probe)
  * and the SSD1677 / UC8179 datasheets for register widths.
  *
@@ -631,6 +632,34 @@ void epd_core_lut_phases(const uint8_t *table, size_t len, EpdLutSeq *out)
     }
 }
 
+/* UC8179c layout (Uc8179Driver.cpp's banks; docs/grayscale.md §7): 6-byte groups, the
+ * four levels packed into byte 0, full-byte frame counts, the repeat count in byte 5. */
+void epd_core_lut_phases_uc8179(const uint8_t *table, size_t len, EpdLutSeq *out)
+{
+    memset(out, 0, sizeof(*out));
+    for (int g = 0; g < EPD_UC_LUT_GROUPS; g++) {
+        size_t base = (size_t)g * EPD_UC8179_LUT_GROUP_BYTES;
+        uint8_t ls = base < len ? table[base] : 0;
+        uint8_t rp = base + 5 < len ? table[base + 5] : 0;
+        bool used = false;
+        for (int p = 0; p < EPD_UC_LUT_PHASES_PER_GROUP; p++) {
+            size_t i = base + 1 + p;
+            uint8_t frames = i < len ? table[i] : 0;
+            if (!frames) {
+                continue;
+            }
+            EpdLutPhase *ph = &out->phase[out->nphases++];
+            ph->level = (ls >> (6 - 2 * p)) & 3;
+            ph->frames = frames;
+            ph->group = (uint8_t)g;
+            ph->repeat = rp;
+            out->frames += (uint32_t)frames * rp;
+            used = true;
+        }
+        out->groups += used;
+    }
+}
+
 uint8_t epd_core_lut_apply(const EpdLutSeq *seq, uint8_t reflectance, int k)
 {
     int v = reflectance;
@@ -660,8 +689,9 @@ uint8_t epd_core_lut_apply(const EpdLutSeq *seq, uint8_t reflectance, int k)
 
 int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit)
 {
-    /* DDX[0] = 1 (CDI 0x97 / 0xD7, the MTP default): RAM bit 1 = white. Cleared: 1 = black. */
-    int white_is_one = (c->uc_cdi >> 4) & 1;
+    /* DDX[0] = 1 (UC8279 CDI 0x97 / 0xD7, the MTP default; UC8179 0x29 / 0xA9): RAM bit 1 =
+     * white. Cleared: 1 = black. The UC8179's two-byte CDI keeps DDX in bits 1:0. */
+    int white_is_one = c->variant == EPD_UC8179 ? c->uc_cdi & 1 : (c->uc_cdi >> 4) & 1;
     int o = white_is_one ? old_bit : !old_bit;
     int n = white_is_one ? new_bit : !new_bit;
     if (o && n) return 1;       /* WW */
@@ -674,14 +704,16 @@ int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit)
 static void build_gray_map(EpdCore *c)
 {
     EpdLutSeq seq;
+    void (*parse)(const uint8_t *, size_t, EpdLutSeq *) =
+        c->variant == EPD_UC8179 ? epd_core_lut_phases_uc8179 : epd_core_lut_phases;
     for (int cls = 0; cls < 4; cls++) {
         int t = epd_core_lut_index(c, cls >> 1, cls & 1);
-        epd_core_lut_phases(c->uc_lut[t], c->uc_lut_len[t], &seq);
+        parse(c->uc_lut[t], c->uc_lut_len[t], &seq);
         for (int r = 0; r < 256; r++) {
             c->gray_map[cls][r] = epd_core_lut_apply(&seq, (uint8_t)r, c->gray_k);
         }
     }
-    epd_core_lut_phases(c->uc_lut[0], c->uc_lut_len[0], &seq);
+    parse(c->uc_lut[0], c->uc_lut_len[0], &seq);
     c->last_lut_frames = seq.frames;
     c->last_lut_us = seq.frames * c->frame_us;
 }
@@ -698,7 +730,11 @@ static void build_gray_map(EpdCore *c)
  * Row mapping: SSD1677 with the X4-class NO_FLIP scan (the only one CrossPoint or
  * the stock send) has the gates reversed against the RAM rows, so RAM row 479 is
  * the top of the glass; 0x01 TB reverses that. A UC part shows gates 120..599 of
- * its 600-gate scan (Uc8279X4Driver gateOffset), i.e. the last 480 TRES rows. */
+ * its 600-gate scan (Uc8279X4Driver gateOffset), i.e. the last 480 TRES rows, in the
+ * scan order of PSR UD = 0 and SHL = 1, which is all the UC8279 is ever sent. The
+ * UC8179 honours both bits (UC81xx PSR bit 3 UD gate scan, bit 2 SHL source shift):
+ * Uc8179Driver sends UD = 1 with the rows reversed and its 120 padding rows last, so
+ * RAM rows 479..0 land on the visible gates; SHL = 0 mirrors the sources. */
 static const uint8_t lv_ssd_mono[4] = {0, 0, 255, 255};
 static const uint8_t lv_ssd_approx[4] = {0, 85, 170, 255};
 static const uint8_t lv_uc_mono[4] = {0, 255, 0, 255};
@@ -707,7 +743,7 @@ static const uint8_t lv_uc_approx[4] = {255, 170, 85, 0};
 static void compose(EpdCore *c)
 {
     const uint8_t *lv;
-    bool wave = false;
+    bool wave = false, mirror_x = false;
     int row0, row_step;
     if (c->variant == EPD_SSD1677) {
         bool gray = c->custom_lut && !(c->ctrl1 & 0x40);
@@ -727,12 +763,28 @@ static void compose(EpdCore *c)
         int gates = c->tres_h < EPD_UC_GATES ? c->tres_h : EPD_UC_GATES;
         row0 = gates > EPD_H ? gates - EPD_H : 0;   /* 120 for 600 gates */
         row_step = 1;
+        if (c->variant == EPD_UC8179) {
+            if (c->psr[0] & 0x08) {
+                row0 = EPD_H - 1;                   /* UD = 1: the scan reversed */
+                row_step = -1;
+            }
+            mirror_x = !(c->psr[0] & 0x04);         /* SHL = 0 */
+        }
     }
     for (int r = 0; r < EPD_H; r++) {
         int row = row0 + r * row_step;
         const uint8_t *p0 = &c->plane0[row * EPD_WB];
         const uint8_t *p1 = &c->plane1[row * EPD_WB];
         uint8_t *dst = &c->image[r * EPD_W];
+        if (mirror_x) {
+            for (int x = 0; x < EPD_W; x++) {
+                unsigned s = 7 - (x & 7);
+                unsigned idx = ((p0[x >> 3] >> s) & 1) << 1 | ((p1[x >> 3] >> s) & 1);
+                uint8_t *px = &dst[EPD_W - 1 - x];
+                *px = wave ? c->gray_map[idx][*px] : lv[idx];
+            }
+            continue;
+        }
         for (int xb = 0; xb < EPD_WB; xb++, dst += 8) {
             unsigned a = p0[xb], b = p1[xb];
             for (int i = 0; i < 8; i++) {
