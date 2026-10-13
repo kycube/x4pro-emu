@@ -58,6 +58,24 @@ The redacted dump copy runs as it is, with `--boot-hold-power` and a card from `
 - `tests/test_licorice.py` boots it, checks the PSR, and compares Home and the drawer with
   `tests/golden/licorice-{home,drawer}.png` (4 s under icount).
 
+The walk (2026-10-13, by hand, then `test_licorice_walk`, 20 s):
+
+| Feature | In the emulator |
+|---|---|
+| All files, opening an EPUB, pagination | works; the right side button pages forward, the left back |
+| Light panel (pull from the top edge) | brightness, colour temperature and the Wi-Fi / Bluetooth / Dark / Light toggles; the slider drives both LEDC channels through a perceptual curve (3 % = duty 1 of 1024 on the warm channel, the slider's right part about 12 % on each), the temperature moves the cool/warm split |
+| Dark mode | the whole UI inverts |
+| Home pad | Back, one level, as in 7.x |
+| Deep sleep and wake | a held power button (Settings → General: "Power button Long 1s") sleeps with the "Get Started" screen, EXT1 on GPIO3; power wakes it with reset cause DSLEEP, and it **resumes the last book**, not the screen it slept on |
+| Wi-Fi on | the full PHY calibration runs (168 calibration starts, 7 PLL calibrations in 2 s), then the radio idles: no networks to scan, nothing to join, the UI stays responsive |
+| Bluetooth on | on in 0.3 s, a BT glyph in the status bar; the radio stub sees no access |
+| Settings | all seven subpages open (Account, General, Display, Network with OPDS / Calibre wireless / KOReader sync, Buttons, Reading, About); About reads "X4 Pro-EA30", the MAC and serial from the emulated efuses and "XT Licorice 261013" |
+| USB mode | **not yet**: TinyUSB asserts (`check_dwc2 177: ASSERT FAILED` … `tusb_rhport_init`), the USB OTG controller is not modelled, the screen ends at "Could not start USB disk mode" |
+| Installing a `.xtapp` | **not yet**: the prompt appears as on the device, OK gives "Install failed" for the 7.x-style `app.xtapp` (below) |
+
+Licorice prints nothing through ESP-IDF's log on the console, but plain `printf` does reach it (the
+TinyUSB asserts above), so the console is wired; the firmware's log level is simply off.
+
 ## What the stock tools make of it
 
 `tools/stockver.py identify` refuses it (no `stockver.d` file; project `dragon_example` is none of

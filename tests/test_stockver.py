@@ -341,3 +341,22 @@ def test_the_7_6_8_ota_image_is_identified_with_its_own_sites():
     fbase, fver = stockver.identify(flash)
     assert (fbase, fver.version) == (0x10000, '7.6.8')
     assert all(p.state(flash, fbase) == 'original' for p in fver.patches.values())
+
+
+def test_release_tag_names_7x_by_version_and_licorice_by_its_identity_string():
+    """An xteink_app image goes by its esp_app_desc version; XTOS Licorice, whose descriptor says only
+    `dragon_example` `e77bdf08-dirty`, by "v" + the build date in "XTOS Licorice NNNNNN" (the name the
+    backups, the extracted app and the Ghidra project use). Synthetic images: no dump needed."""
+    def image(project, version, extra=b''):
+        d = bytearray(0x200)
+        d[0] = 0xE9
+        d[stockver.DESC_OFF:stockver.DESC_OFF + 4] = stockver.DESC_MAGIC.to_bytes(4, 'little')
+        for at, text in ((stockver.DESC_VERSION, version), (stockver.DESC_PROJECT, project)):
+            o = stockver.DESC_OFF + at
+            d[o:o + len(text)] = text.encode()
+        return bytes(d) + extra
+    assert stockver.release_tag(image('xteink_app', '7.6.8')) == '7.6.8'
+    lic = image('dragon_example', 'e77bdf08-dirty', b'\0XT Licorice 261013\0XTOS Licorice 261013\0')
+    assert stockver.release_tag(lic) == 'v261013'
+    assert stockver.release_tag(image('other', '1.0')) == '1.0'
+    assert stockver.release_tag(b'\0' * 0x200) is None

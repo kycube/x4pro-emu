@@ -10,8 +10,9 @@ wraps Ghidra's `analyzeHeadless` to answer them.
                           or after the subcommand) pick the app image. The default is unchanged:
                           7.2.4 = images/device/stock-app0-7.2.4.bin. `--version 7.5.4` alone finds
                           images/device/stock-app*-7.5.4.bin; `--image` alone reads the version out
-                          of the image's esp_app_desc (`stockver.app_desc`); both together must
-                          agree. Everything else follows the choice: the Ghidra project is
+                          of the image (`stockver.release_tag`: an xteink_app's esp_app_desc
+                          version, XTOS Licorice's "v261013" from its identity string); both
+                          together must agree. Everything else follows the choice: the Ghidra project is
                           images/ghidra/stock-<version>.gpr, the exports live in
                           images/ghidra/stock-<version>/, and the staleness check compares them
                           with *that* image. Nothing in the layout is version-specific: the
@@ -148,12 +149,16 @@ def select(image=None, version=None):
         image = find_image(version)
     image = os.path.abspath(image)
     desc = app_desc(image)
+    tag = None
+    if desc is not None:
+        with open(image, 'rb') as fh:
+            tag = stockver.release_tag(fh.read(0x10000), desc)    # 7.x: its version; Licorice: v261013
     if version is None:
         if desc is None:
             raise Error(f'{image}: not an ESP-IDF app image (no esp_app_desc); pass --version TAG')
-        version = desc['version']
-    elif desc is not None and desc['version'] != version:
-        raise Error(f'{image} says it is {desc["project"]} {desc["version"]}, not {version}; '
+        version = tag
+    elif tag is not None and tag != version:
+        raise Error(f'{image} says it is {desc["project"]} {desc["version"]} ({tag}), not {version}; '
                     f'drop --version or pass the matching image')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', version):
         raise Error(f'not a usable version tag: {version!r}')

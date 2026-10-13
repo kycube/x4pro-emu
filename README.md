@@ -4,7 +4,7 @@
 
 An emulator for the **Xteink X4 Pro** e-reader (ESP32-S3, 800 × 480 e-paper, GT911 touch, front light),
 built on Espressif's QEMU. It runs **unmodified firmware images** — the stock `xteink_app` (7.2.4
-through 7.6.8), the stock's new XTOS Licorice generation (boot and touch so far) and the open-source [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
+through 7.6.8), the stock's new XTOS Licorice generation and the open-source [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
 — and you drive it from a shell, a test, or an AI agent: press the buttons, tap and swipe the
 screen, read the console, screenshot the panel, query the whole device as JSON.
 
@@ -17,7 +17,8 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
 - **Run the real firmware.** The stock app boots to Home, opens and pages books, runs its menu,
   light panel and settings, fades its front light, and its WiFi start comes up and stops itself
   cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. The stock's rewrite, XTOS Licorice 261013,
-  boots to its Bookshelf and opens its menu by touch ([docs/stock-licorice.md](docs/stock-licorice.md)).
+  reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes; its USB disk mode
+  and app installs are not emulated yet ([docs/stock-licorice.md](docs/stock-licorice.md)).
   A raw 16 MB flash dump runs as it comes off the device; so does a fresh build.
 - **Drive it like a device.** `x4emu tap`, `swipe`, `press`, `hold`, `chord`, `home`, `battery`,
   `light`, `screenshot --diff`, `wait-text`, `wait-refresh`, `state` — every command can print JSON.

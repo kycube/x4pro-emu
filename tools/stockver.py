@@ -115,7 +115,7 @@ ADDING A VERSION
     it and the three tools accept the image. Never guess an offset across versions: the tools refuse
     an item that is absent, and that is the safe answer.
 """
-import argparse, json, os, sys
+import argparse, json, os, re, sys
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
@@ -573,6 +573,24 @@ def app_desc(data, base=0):
     return {'project': s(DESC_PROJECT), 'version': s(DESC_VERSION),
             'built': f'{s(DESC_TIME, 16)} {s(DESC_DATE, 16)}'.strip(), 'idf': s(DESC_IDF),
             'elf_sha256': bytes(data[off + DESC_ELF:off + DESC_ELF + 32]).hex()}
+
+
+LICORICE_ID = re.compile(rb'XTOS Licorice (\d{6})')   # the identity string of the stock's rewrite
+
+
+def release_tag(data, desc=None):
+    """The name a stock image goes by in file names and Ghidra projects: an `xteink_app` image's
+    version ("7.6.8"); an XTOS Licorice image's "v" + the build date in its identity string
+    ("v261013": its esp_app_desc says only `dragon_example` `e77bdf08-dirty`); otherwise the
+    descriptor's version, or None without one. `data` is the image (its first ~0x5000 bytes hold
+    Licorice's identity string)."""
+    desc = desc or app_desc(data)
+    if desc and desc['project'] == 'xteink_app':
+        return desc['version']
+    m = LICORICE_ID.search(bytes(data[:0x10000]))
+    if m:
+        return 'v' + m.group(1).decode()
+    return desc['version'] if desc else None
 
 
 def app_base(data):
