@@ -1,0 +1,70 @@
+From 64621592b5577cb501eb018781e973fe70d705c8 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:56:18 -0500
+Subject: [PATCH 25/35] esp32s3.cache: complete the DCache lock and occupy
+ operations
+
+The model did not implement EXTMEM_DCACHE_LOCK_CTRL and
+EXTMEM_DCACHE_OCCUPY_CTRL: both read as 0. ESP-IDF 6.x startup calls the
+ROM's Cache_Occupy_Items(), which sets the operations' enable bits and
+polls their DONE bits, so the stock xteink_app hung in the ROM before
+app_main(). The board has answered DONE from an overlay since patch 0005;
+this is the model-side fix from the upstream series (upstream-s3 aa35a01),
+so the overlay can go.
+
+Locking and occupying cache lines have no effect in the model, so treat
+them like the other cache maintenance operations: a read clears the
+enable bits that were set and reports the operation as done.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/esp32s3_cache.c         | 17 +++++++++++++++++
+ include/hw/misc/esp32s3_cache.h |  4 ++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/hw/misc/esp32s3_cache.c b/hw/misc/esp32s3_cache.c
+index a2f5c8b..dc71d36 100644
+--- a/hw/misc/esp32s3_cache.c
++++ b/hw/misc/esp32s3_cache.c
+@@ -163,6 +163,23 @@ static uint64_t esp32s3_cache_read(void *opaque, hwaddr addr, unsigned int size)
+                                     R_EXTMEM_ICACHE_AUTOLOAD_CTRL_AUTOLOAD_ENA_MASK,
+                                     R_EXTMEM_ICACHE_AUTOLOAD_CTRL_AUTOLOAD_DONE_MASK);
+             break;
++        /*
++         * Locking and occupying cache lines are not modelled: the operation
++         * completes as soon as it is requested. The ROM's
++         * Cache_Occupy_Items() (ESP-IDF 6.x startup) polls these DONE bits.
++         */
++        case A_EXTMEM_DCACHE_LOCK_CTRL:
++            r = check_and_reset_ena(&s->regs[index],
++                                    R_EXTMEM_DCACHE_LOCK_CTRL_LOCK_ENA_MASK |
++                                    R_EXTMEM_DCACHE_LOCK_CTRL_UNLOCK_ENA_MASK,
++                                    R_EXTMEM_DCACHE_LOCK_CTRL_LOCK_DONE_MASK);
++            break;
++        case A_EXTMEM_DCACHE_OCCUPY_CTRL:
++            r = check_and_reset_ena(
++                    &s->regs[index],
++                    R_EXTMEM_DCACHE_OCCUPY_CTRL_OCCUPY_ENA_MASK,
++                    R_EXTMEM_DCACHE_OCCUPY_CTRL_OCCUPY_DONE_MASK);
++            break;
+         case A_EXTMEM_DCACHE_PRELOAD_CTRL:
+             r = check_and_reset_ena(&s->regs[index],
+                                     R_EXTMEM_DCACHE_PRELOAD_CTRL_PRELOAD_ENA_MASK,
+diff --git a/include/hw/misc/esp32s3_cache.h b/include/hw/misc/esp32s3_cache.h
+index c0a4159..dca28e3 100644
+--- a/include/hw/misc/esp32s3_cache.h
++++ b/include/hw/misc/esp32s3_cache.h
+@@ -172,6 +172,10 @@ REG32(EXTMEM_DCACHE_SYNC_ADDR, 0x02C)
+ REG32(EXTMEM_DCACHE_SYNC_SIZE, 0x030)
+     FIELD(EXTMEM_DCACHE_SYNC_SIZE, SYNC_SIZE, 0, 23)
+ 
++REG32(EXTMEM_DCACHE_OCCUPY_CTRL, 0x034)
++    FIELD(EXTMEM_DCACHE_OCCUPY_CTRL, OCCUPY_DONE, 1, 1)
++    FIELD(EXTMEM_DCACHE_OCCUPY_CTRL, OCCUPY_ENA, 0, 1)
++
+ 
+ REG32(EXTMEM_DCACHE_PRELOAD_CTRL, 0x040)
+     FIELD(EXTMEM_DCACHE_PRELOAD_CTRL, PRELOAD_ORDER, 2, 1)
+-- 
+2.54.0 (Apple Git-157)
+

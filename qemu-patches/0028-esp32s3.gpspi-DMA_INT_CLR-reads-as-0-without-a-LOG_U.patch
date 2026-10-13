@@ -1,0 +1,35 @@
+From 05085a22e420b0b8ddadc4b009cb7084c8b166b8 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:57:01 -0500
+Subject: [PATCH 28/35] esp32s3.gpspi: DMA_INT_CLR reads as 0 without a
+ LOG_UNIMP line
+
+DMA_INT_CLR is write-only and read as 0 already, but through the default
+case, which logged "unhandled read +0x38" for every read. The drivers
+clear interrupt bits through bit-field assignments, i.e. a read-modify-
+write, so every SPI transaction read it: 10,656 of the 11,948 lines of one
+CrossPoint test's qemu.log (508 and 832 in two stock tests). Answer it
+beside DMA_INT_SET, which had the same treatment for the same reason.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/ssi/esp32s3_gpspi.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/hw/ssi/esp32s3_gpspi.c b/hw/ssi/esp32s3_gpspi.c
+index c6ed20d..a288cd6 100644
+--- a/hw/ssi/esp32s3_gpspi.c
++++ b/hw/ssi/esp32s3_gpspi.c
+@@ -226,7 +226,8 @@ static uint64_t gpspi_read(void *opaque, hwaddr addr, unsigned int size)
+     case R_DMA_INT_ENA: r = s->dma_int_ena; break;
+     case R_DMA_INT_RAW: r = s->dma_int_raw; break;
+     case R_DMA_INT_ST:  r = s->dma_int_raw & s->dma_int_ena; break;
+-    case R_DMA_INT_SET: r = 0; break;               /* write-only; ESP-IDF's spi_ll reads it back */
++    case R_DMA_INT_CLR:                             /* write-only: read as 0; ESP-IDF's spi_ll writes */
++    case R_DMA_INT_SET: r = 0; break;               /* their bit fields read-modify-write */
+     case R_SLAVE:      r = s->slave; break;
+     case R_SLAVE1:     r = s->slave1; break;
+     case R_CLK_GATE:   r = s->clk_gate; break;
+-- 
+2.54.0 (Apple Git-157)
+

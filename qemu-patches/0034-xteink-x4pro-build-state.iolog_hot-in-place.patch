@@ -1,0 +1,51 @@
+From c338a10975c4ada2938ec78bf18ba9f8054519de Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 22:05:16 -0500
+Subject: [PATCH 34/35] xteink-x4pro: build state.iolog_hot in place
+
+The board state built "iolog_hot" through a GString per logger region
+(30 of them) plus one for the whole object, on every `state` query, and
+copied each into the next. Append each region's entry to the state string
+directly and cut it again when the region has nothing past its cap. Same
+JSON.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/xtensa/xteink_x4pro.c | 19 ++++++++-----------
+ 1 file changed, 8 insertions(+), 11 deletions(-)
+
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index f54d26a..984caf2 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -451,19 +451,16 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+         x4pro_hotlog_json(&b->rf->hot, j, 8);
+         g_string_append(j, "},");
+     }
+-    {
+-        /* unmodelled blocks whose registers were polled past the log cap */
+-        GString *h = g_string_new("");
+-        for (size_t i = 0; i < ARRAY_SIZE(iolog_regions); i++) {
+-            GString *one = g_string_new("");
+-            if (x4pro_hotlog_json(&iolog_regions[i].hot, one, 4) > 0) {
+-                g_string_append_printf(h, "%s\"%s\":%s", h->len ? "," : "", iolog_regions[i].name, one->str);
+-            }
+-            g_string_free(one, true);
++    /* unmodelled blocks whose registers were polled past the log cap */
++    g_string_append(j, "\"iolog_hot\":{");
++    for (size_t i = 0, first = j->len; i < ARRAY_SIZE(iolog_regions); i++) {
++        gsize mark = j->len;
++        g_string_append_printf(j, "%s\"%s\":", j->len > first ? "," : "", iolog_regions[i].name);
++        if (x4pro_hotlog_json(&iolog_regions[i].hot, j, 4) == 0) {
++            g_string_truncate(j, mark);   /* nothing hot in this block */
+         }
+-        g_string_append_printf(j, "\"iolog_hot\":{%s},", h->str);
+-        g_string_free(h, true);
+     }
++    g_string_append(j, "},");
+     if (j->str[j->len - 1] == ',') {
+         g_string_truncate(j, j->len - 1);
+     }
+-- 
+2.54.0 (Apple Git-157)
+

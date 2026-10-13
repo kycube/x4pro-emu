@@ -1,0 +1,87 @@
+From d6018ebb9ae1ebbe8c9688a71aba8cfe9df17ece Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:56:29 -0500
+Subject: [PATCH 26/35] xteink-x4pro: drop the cache DONE overlay, the cache
+ model answers it
+
+The overlay on EXTMEM_DCACHE_LOCK_CTRL / OCCUPY_CTRL (priority 2, added in
+patch 0005 because the cache model read both as 0) shadowed the model's own
+handling since the previous commit. Without it the stock xteink_app's
+Cache_Occupy_Items() poll is answered by esp32s3_cache itself, which is
+also the first real test of that model change: the upstream board branch
+kept the overlay, so it never ran there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/xtensa/xteink_x4pro.c | 48 ----------------------------------------
+ 1 file changed, 48 deletions(-)
+
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 001ce17..6e30de5 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -136,53 +136,6 @@ static void x4pro_add_iolog(MachineState *machine, MemoryRegion *sys_mem)
+     }
+ }
+ 
+-/* ---- cache "done" overlay ----------------------------------------------------
+- * Espressif's esp32s3_cache model does not implement the D-cache OCCUPY and LOCK
+- * operations; ESP-IDF 6.x startup (stock xteink_app) polls their DONE bits in
+- * ROM (Cache_Occupy_Items) forever. Answer "done" for those two registers.
+- */
+-typedef struct CacheDoneReg {
+-    const char *name;
+-    hwaddr addr;
+-    uint32_t done_bit;
+-    uint32_t value;
+-    MemoryRegion mr;
+-} CacheDoneReg;
+-
+-static CacheDoneReg cache_done_regs[] = {
+-    { "dcache_lock_ctrl",   0x600C401C, 1u << 2, 0 },   /* EXTMEM_DCACHE_LOCK_CTRL: LOCK_DONE */
+-    { "dcache_occupy_ctrl", 0x600C4034, 1u << 1, 0 },   /* EXTMEM_DCACHE_OCCUPY_CTRL: OCCUPY_DONE */
+-};
+-
+-static uint64_t cache_done_read(void *opaque, hwaddr addr, unsigned size)
+-{
+-    CacheDoneReg *r = opaque;
+-    return r->value | r->done_bit;
+-}
+-
+-static void cache_done_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+-{
+-    CacheDoneReg *r = opaque;
+-    r->value = value & ~r->done_bit;
+-}
+-
+-static const MemoryRegionOps cache_done_ops = {
+-    .read = cache_done_read,
+-    .write = cache_done_write,
+-    .endianness = DEVICE_LITTLE_ENDIAN,
+-    .valid.min_access_size = 4,
+-    .valid.max_access_size = 4,
+-};
+-
+-static void x4pro_add_cache_done(MachineState *machine, MemoryRegion *sys_mem)
+-{
+-    for (size_t i = 0; i < ARRAY_SIZE(cache_done_regs); i++) {
+-        CacheDoneReg *r = &cache_done_regs[i];
+-        memory_region_init_io(&r->mr, OBJECT(machine), &cache_done_ops, r, r->name, 4);
+-        memory_region_add_subregion_overlap(sys_mem, r->addr, &r->mr, 2);
+-    }
+-}
+-
+ /* ---- board pins (docs/hardware.md) -------------------------------------- */
+ #define PIN_BTN_LEFT   0
+ #define PIN_BTN_RIGHT  7
+@@ -803,7 +756,6 @@ static void x4pro_machine_init(MachineState *machine)
+     }
+ 
+     x4pro_add_iolog(machine, sys_mem);
+-    x4pro_add_cache_done(machine, sys_mem);
+ }
+ 
+ static void x4pro_machine_class_init(ObjectClass *oc, void *data)
+-- 
+2.54.0 (Apple Git-157)
+

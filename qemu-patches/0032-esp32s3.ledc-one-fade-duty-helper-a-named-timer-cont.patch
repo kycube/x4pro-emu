@@ -1,0 +1,101 @@
+From f0d92bf9dc46b457d0f67c2b6370b0ea7d4dc5ac Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 22:04:49 -0500
+Subject: [PATCH 32/35] esp32s3.ledc: one fade-duty helper, a named timer
+ context
+
+ledc_cur_duty() and ledc_fade_target() computed the same clamped
+"from +/- steps * scale" twice; both are ledc_fade_duty() now, with the
+current step count or the fade's last. The per-channel timer context was
+an anonymous struct declared twice (the state and the callback's cast);
+it is ESP32S3LedcFadeCtx. Same duty, same DUTY_R, same timers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/esp32s3_ledc.c         | 26 +++++++++++++-------------
+ include/hw/misc/esp32s3_ledc.h |  7 ++++++-
+ 2 files changed, 19 insertions(+), 14 deletions(-)
+
+diff --git a/hw/misc/esp32s3_ledc.c b/hw/misc/esp32s3_ledc.c
+index 8e94aad..b3f41d1 100644
+--- a/hw/misc/esp32s3_ledc.c
++++ b/hw/misc/esp32s3_ledc.c
+@@ -45,6 +45,16 @@ static void ledc_update_irq(ESP32S3LedcState *s)
+     qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+ }
+ 
++/* the fade's duty after `steps` steps of one scale each, clamped to 0..DUTY_MAX */
++static uint32_t ledc_fade_duty(ESP32S3LedcState *s, int ch, uint64_t steps)
++{
++    uint64_t delta = steps * s->fade_scale[ch];
++    if (s->fade_inc[ch]) {
++        return (uint32_t)MIN((uint64_t)s->fade_from[ch] + delta, (uint64_t)DUTY_MAX);
++    }
++    return s->fade_from[ch] > delta ? s->fade_from[ch] - (uint32_t)delta : 0;
++}
++
+ /* integer duty the output is at now: the fade walks it one scale per step in guest time */
+ static uint32_t ledc_cur_duty(ESP32S3LedcState *s, int ch)
+ {
+@@ -52,22 +62,12 @@ static uint32_t ledc_cur_duty(ESP32S3LedcState *s, int ch)
+         return s->ch_duty_cur[ch];
+     }
+     int64_t steps = (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->fade_t0_ns[ch]) / s->fade_step_ns[ch];
+-    if (steps < 0) steps = 0;
+-    if (steps > s->fade_num[ch]) steps = s->fade_num[ch];
+-    uint64_t delta = (uint64_t)steps * s->fade_scale[ch];
+-    if (s->fade_inc[ch]) {
+-        return (uint32_t)MIN((uint64_t)s->fade_from[ch] + delta, (uint64_t)DUTY_MAX);
+-    }
+-    return s->fade_from[ch] > delta ? s->fade_from[ch] - (uint32_t)delta : 0;
++    return ledc_fade_duty(s, ch, MIN(MAX(steps, 0), (int64_t)s->fade_num[ch]));
+ }
+ 
+ static uint32_t ledc_fade_target(ESP32S3LedcState *s, int ch)
+ {
+-    uint64_t delta = (uint64_t)s->fade_num[ch] * s->fade_scale[ch];
+-    if (s->fade_inc[ch]) {
+-        return (uint32_t)MIN((uint64_t)s->fade_from[ch] + delta, (uint64_t)DUTY_MAX);
+-    }
+-    return s->fade_from[ch] > delta ? s->fade_from[ch] - (uint32_t)delta : 0;
++    return ledc_fade_duty(s, ch, s->fade_num[ch]);
+ }
+ 
+ static int ledc_permille(ESP32S3LedcState *s, int ch, uint32_t duty)
+@@ -115,7 +115,7 @@ static void ledc_fade_done(ESP32S3LedcState *s, int ch)
+ 
+ static void ledc_fade_cb(void *opaque)
+ {
+-    struct { ESP32S3LedcState *s; int ch; } *ctx = opaque;
++    ESP32S3LedcFadeCtx *ctx = opaque;
+     ledc_fade_done(ctx->s, ctx->ch);
+ }
+ 
+diff --git a/include/hw/misc/esp32s3_ledc.h b/include/hw/misc/esp32s3_ledc.h
+index 2417b0f..24db7ee 100644
+--- a/include/hw/misc/esp32s3_ledc.h
++++ b/include/hw/misc/esp32s3_ledc.h
+@@ -16,6 +16,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3LedcState, ESP32S3_LEDC)
+ #define ESP32S3_LEDC_CHANNELS 8
+ #define ESP32S3_LEDC_TIMERS 4
+ 
++typedef struct ESP32S3LedcFadeCtx {
++    ESP32S3LedcState *s;
++    int ch;
++} ESP32S3LedcFadeCtx;
++
+ struct ESP32S3LedcState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+@@ -33,7 +38,7 @@ struct ESP32S3LedcState {
+     uint32_t fade_from[ESP32S3_LEDC_CHANNELS], fade_num[ESP32S3_LEDC_CHANNELS], fade_scale[ESP32S3_LEDC_CHANNELS];
+     int64_t fade_t0_ns[ESP32S3_LEDC_CHANNELS], fade_step_ns[ESP32S3_LEDC_CHANNELS];
+     QEMUTimer fade_timer[ESP32S3_LEDC_CHANNELS];
+-    struct { ESP32S3LedcState *s; int ch; } fade_ctx[ESP32S3_LEDC_CHANNELS];
++    ESP32S3LedcFadeCtx fade_ctx[ESP32S3_LEDC_CHANNELS];
+ };
+ 
+ /* duty in permille (0..1000) of the channel's current setting; -1 if the output is disabled */
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,176 @@
+From 88aafc0fcb2b56aee0c5a5e82d6d0f483c1cc395 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:58:34 -0500
+Subject: [PATCH 31/35] esp32s3.gpio: interrupt types as masks, no pin loops on
+ a pad refresh
+
+gpio_refresh() decoded all 49 PINn registers on every call (interrupt
+type per pin, then the core-0 enable bit again in gpio_pcpu_int()), and
+it runs on every OUT/ENABLE write and every external driver update: the
+panel's BUSY line re-asserts once per SPI byte, so a 48 KB plane cost
+48,000 such double loops. PINn is now decoded when it is written, into
+one mask per interrupt type and one for the core-0 enable; a refresh is a
+handful of mask operations, and the changed-pin and sample loops walk only
+the set bits. Same interrupts, same irq_count (one per firing pin and
+refresh, as before), same pin-out order.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/gpio/esp32s3_gpio_full.c         | 82 ++++++++++++-----------------
+ include/hw/gpio/esp32s3_gpio_full.h |  4 ++
+ 2 files changed, 37 insertions(+), 49 deletions(-)
+
+diff --git a/hw/gpio/esp32s3_gpio_full.c b/hw/gpio/esp32s3_gpio_full.c
+index 26b56f5..af81991 100644
+--- a/hw/gpio/esp32s3_gpio_full.c
++++ b/hw/gpio/esp32s3_gpio_full.c
+@@ -28,6 +28,7 @@
+ #include "hw/sysbus.h"
+ #include "hw/qdev-properties.h"
+ #include "qemu/timer.h"
++#include "qemu/host-utils.h"
+ #include "hw/gpio/esp32s3_gpio_full.h"
+ 
+ #define R_BT_SELECT      0x00
+@@ -78,25 +79,23 @@ enum { INT_DISABLE = 0, INT_POSEDGE = 1, INT_NEGEDGE = 2, INT_ANYEDGE = 3, INT_L
+ 
+ #define PINMASK ((1ULL << ESP32S3_GPIO_PINS) - 1)
+ 
+-static inline int pin_int_type(ESP32S3GpioFullState *s, int n)
++/* Re-derive pin n's bit in the interrupt-type and core-0 masks from its PINn register. */
++static void gpio_decode_pin(ESP32S3GpioFullState *s, int n)
+ {
+-    return (s->pin[n] >> PIN_INT_TYPE_SHIFT) & PIN_INT_TYPE_MASK;
+-}
+-
+-static inline int pin_int_ena(ESP32S3GpioFullState *s, int n)
+-{
+-    return (s->pin[n] >> PIN_INT_ENA_SHIFT) & PIN_INT_ENA_MASK;
++    uint64_t bit = 1ULL << n;
++    int type = (s->pin[n] >> PIN_INT_TYPE_SHIFT) & PIN_INT_TYPE_MASK;
++    int ena = (s->pin[n] >> PIN_INT_ENA_SHIFT) & PIN_INT_ENA_MASK;
++    s->int_posedge = (s->int_posedge & ~bit) | (type == INT_POSEDGE ? bit : 0);
++    s->int_negedge = (s->int_negedge & ~bit) | (type == INT_NEGEDGE ? bit : 0);
++    s->int_anyedge = (s->int_anyedge & ~bit) | (type == INT_ANYEDGE ? bit : 0);
++    s->int_low = (s->int_low & ~bit) | (type == INT_LOW ? bit : 0);
++    s->int_high = (s->int_high & ~bit) | (type == INT_HIGH ? bit : 0);
++    s->int_core0 = (s->int_core0 & ~bit) | ((ena & 1) ? bit : 0);
+ }
+ 
+ static uint64_t gpio_pcpu_int(ESP32S3GpioFullState *s)
+ {
+-    uint64_t r = 0;
+-    for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
+-        if ((s->status >> n & 1) && (pin_int_ena(s, n) & 1)) {
+-            r |= 1ULL << n;
+-        }
+-    }
+-    return r;
++    return s->status & s->int_core0;
+ }
+ 
+ static void gpio_update_irq(ESP32S3GpioFullState *s)
+@@ -116,39 +115,24 @@ static void gpio_refresh(ESP32S3GpioFullState *s)
+ {
+     uint64_t old = s->level;
+     uint64_t new = gpio_compute_level(s);
+-    uint64_t changed = old ^ new;
++    uint64_t changed = (old ^ new) & PINMASK;   /* a reset sets old to ~level */
+     s->level = new;
+ 
+-    /* level-type interrupts latch whenever the level is present */
+-    for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
+-        int type = pin_int_type(s, n);
+-        int lvl = (new >> n) & 1;
+-        bool edge = (changed >> n) & 1;
+-        bool fire = false;
+-        switch (type) {
+-        case INT_POSEDGE: fire = edge && lvl; break;
+-        case INT_NEGEDGE: fire = edge && !lvl; break;
+-        case INT_ANYEDGE: fire = edge; break;
+-        case INT_LOW:     fire = !lvl; break;
+-        case INT_HIGH:    fire = lvl; break;
+-        default: break;
+-        }
+-        if (fire) {
+-            s->status |= 1ULL << n;
+-            s->irq_count++;
+-        }
++    /* edge types fire on a change, level types whenever the level is present */
++    uint64_t fire = (changed & new & s->int_posedge) | (changed & ~new & s->int_negedge) |
++                    (changed & s->int_anyedge) | (~new & s->int_low) | (new & s->int_high);
++    if (fire) {
++        s->status |= fire;
++        s->irq_count += ctpop64(fire);
+     }
+-    if (changed) {
+-        for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
+-            if ((changed >> n) & 1) {
+-                /* a new level: its samples start from zero */
+-                s->samples[n] = 0;
+-                s->last_sample_ns[n] = INT64_MIN;
+-                s->level_changes[n]++;
+-                s->sample_watch |= 1ULL << n;
+-                qemu_set_irq(s->pin_out[n], (new >> n) & 1);
+-            }
+-        }
++    for (uint64_t c = changed; c; c &= c - 1) {
++        int n = ctz64(c);
++        /* a new level: its samples start from zero */
++        s->samples[n] = 0;
++        s->last_sample_ns[n] = INT64_MIN;
++        s->level_changes[n]++;
++        s->sample_watch |= 1ULL << n;
++        qemu_set_irq(s->pin_out[n], (new >> n) & 1);
+     }
+     gpio_update_irq(s);
+ }
+@@ -174,11 +158,8 @@ static void gpio_note_in_read(ESP32S3GpioFullState *s, uint64_t word_mask)
+     }
+     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+     int64_t gap = (int64_t)s->sample_gap_us * 1000;
+-    for (int n = 0; n < ESP32S3_GPIO_PINS && w; n++) {
+-        if (!((w >> n) & 1)) {
+-            continue;
+-        }
+-        w &= ~(1ULL << n);
++    for (; w; w &= w - 1) {
++        int n = ctz64(w);
+         if (s->last_sample_ns[n] == INT64_MIN || now - s->last_sample_ns[n] >= gap) {
+             s->last_sample_ns[n] = now;
+             if (++s->samples[n] >= ESP32S3_GPIO_SAMPLES_CAP) {
+@@ -282,6 +263,7 @@ static void gpio_write(void *opaque, hwaddr addr, uint64_t value, unsigned int s
+     default:
+         if (addr >= R_PIN0 && addr < R_PIN_END) {
+             s->pin[(addr - R_PIN0) / 4] = v;
++            gpio_decode_pin(s, (addr - R_PIN0) / 4);
+             gpio_refresh(s);   /* a newly enabled level interrupt may latch at once */
+             return;
+         } else if (addr >= R_FUNC_IN_SEL0 && addr < R_FUNC_IN_SEL_END) {
+@@ -312,6 +294,8 @@ static void gpio_reset_hold(Object *obj, ResetType type)
+     s->enable = 0;
+     s->status = 0;
+     memset(s->pin, 0, sizeof(s->pin));
++    s->int_posedge = s->int_negedge = s->int_anyedge = s->int_low = s->int_high = 0;
++    s->int_core0 = 0;
+     memset(s->func_in_sel, 0, sizeof(s->func_in_sel));
+     for (int n = 0; n < ESP32S3_GPIO_PINS; n++) {
+         s->func_out_sel[n] = 0x100;   /* SIG_GPIO_OUT_IDX */
+diff --git a/include/hw/gpio/esp32s3_gpio_full.h b/include/hw/gpio/esp32s3_gpio_full.h
+index f31ca81..0cd188d 100644
+--- a/include/hw/gpio/esp32s3_gpio_full.h
++++ b/include/hw/gpio/esp32s3_gpio_full.h
+@@ -38,6 +38,10 @@ struct ESP32S3GpioFullState {
+     uint64_t status;     /* STATUS + STATUS1 (interrupt status) */
+     uint64_t level;      /* current pad level (cached) */
+     uint32_t pin[ESP32S3_GPIO_PINS];       /* PINn config */
++    /* PINn decoded once per write: the pins of each interrupt type, and the pins whose
++     * INT_ENA has bit 0 (core 0), so a pad refresh is mask arithmetic, not a pin loop */
++    uint64_t int_posedge, int_negedge, int_anyedge, int_low, int_high;
++    uint64_t int_core0;
+     uint32_t func_in_sel[ESP32S3_GPIO_FUNC_IN_COUNT];
+     uint32_t func_out_sel[ESP32S3_GPIO_PINS];
+     uint32_t clock_gate;
+-- 
+2.54.0 (Apple Git-157)
+

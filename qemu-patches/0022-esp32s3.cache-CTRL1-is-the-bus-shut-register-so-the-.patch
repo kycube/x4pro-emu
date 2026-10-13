@@ -1,7 +1,7 @@
 From 61336a88eccefc0998a812e25d72fe0c69d07127 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 19:24:42 -0500
-Subject: [PATCH 22/24] esp32s3.cache: CTRL1 is the bus-shut register, so the
+Subject: [PATCH 22/35] esp32s3.cache: CTRL1 is the bus-shut register, so the
  caches read as enabled
 
 The model took bit 0 of EXTMEM_DCACHE_CTRL1 / EXTMEM_ICACHE_CTRL1 for the

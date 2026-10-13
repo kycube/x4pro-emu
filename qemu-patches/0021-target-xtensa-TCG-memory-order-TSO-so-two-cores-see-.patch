@@ -1,7 +1,7 @@
 From d8529031090d993015e64b24edb0ee8e79c5fb7e Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 19:04:25 -0500
-Subject: [PATCH 21/24] target/xtensa: TCG memory order TSO, so two cores see
+Subject: [PATCH 21/35] target/xtensa: TCG memory order TSO, so two cores see
  stores in program order
 
 TCG_GUEST_DEFAULT_MO was 0 ("Xtensa processors have a weak memory model"),

@@ -1,0 +1,50 @@
+From 212d0634ab8da72b45f9c2ef2214c67d38cbbefb Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:58:34 -0500
+Subject: [PATCH 30/35] esp32s3.intmatrix: forward a source only when its level
+ changes
+
+Since patch 0006 every qemu_set_irq() on a source walks all 99 sources of
+both cores to OR the lines routed with it, and sources re-assert unchanged
+levels constantly: the GPIO block on every pad refresh, which the panel's
+BUSY output triggers once per SPI byte. On the host profile of CrossPoint
+page turns (macOS `sample`, 8 turns) the handler was the busiest function,
+842 of the 931 samples under epd_transfer(); idle, the USB Serial/JTAG
+SOF tick reached it 1000 times a second with the line already low.
+
+The CPU lines are the OR of the sources' levels, so an unchanged level
+cannot move them: return early. Re-routing still recomputes both lines
+(the map write path is unchanged). The only other effect of a repeated
+assertion was to set INTSET again for an edge-type CPU interrupt (10, 22,
+28, 30) that the firmware had cleared, which a steady line does not do on
+the chip either; ESP-IDF routes the S3's peripherals to level-type
+interrupts. Espressif's open PR #185 forwards on change only as well.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/xtensa/esp32s3_intc.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/hw/xtensa/esp32s3_intc.c b/hw/xtensa/esp32s3_intc.c
+index 496a5d0..b176950 100644
+--- a/hw/xtensa/esp32s3_intc.c
++++ b/hw/xtensa/esp32s3_intc.c
+@@ -52,7 +52,14 @@ static void esp32s3_intmatrix_update_output(Esp32s3IntMatrixState *s, int cpu, i
+ static void esp32s3_intmatrix_irq_handler(void *opaque, int n, int level)
+ {
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
+-    s->level[n] = level ? 1 : 0;
++    level = level ? 1 : 0;
++    /* Sources re-assert unchanged levels all the time (a GPIO block on every pad
++     * refresh, a peripheral on every register write); the CPU lines are the OR of
++     * the sources' levels, so only a change can move them. */
++    if (s->level[n] == level) {
++        return;
++    }
++    s->level[n] = level;
+     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
+         esp32s3_intmatrix_update_output(s, i, IRQ_MAP(i, n));
+     }
+-- 
+2.54.0 (Apple Git-157)
+

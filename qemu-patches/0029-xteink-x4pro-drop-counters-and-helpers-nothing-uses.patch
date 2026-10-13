@@ -1,0 +1,170 @@
+From cbf1711fd31292a45e8197aa3ee487c723bb5cbb Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:57:32 -0500
+Subject: [PATCH 29/35] xteink-x4pro: drop counters and helpers nothing uses
+
+- esp32s3_gpio_full_set_idle(): never called; the board sets the idle
+  levels through the "idle" property.
+- x4pro_sleep_wake(): only called inside x4pro_sleep.c; static now.
+- x4pro.epd busy_intervals / spi_probe_bytes, x4pro.gt911 reads,
+  x4pro.cw2017 reads / writes: counted on every access, but neither the
+  board state JSON nor any QOM property reports them.
+
+No state field changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/display/x4pro_epd.c              |  2 --
+ hw/gpio/esp32s3_gpio_full.c         | 13 -------------
+ hw/misc/x4pro_i2c_devs.c            |  3 ---
+ hw/misc/x4pro_sleep.c               |  2 +-
+ include/hw/display/x4pro_epd.h      |  2 --
+ include/hw/gpio/esp32s3_gpio_full.h |  1 -
+ include/hw/misc/x4pro_i2c_devs.h    |  4 ++--
+ include/hw/misc/x4pro_sleep.h       |  2 --
+ 8 files changed, 3 insertions(+), 26 deletions(-)
+
+diff --git a/hw/display/x4pro_epd.c b/hw/display/x4pro_epd.c
+index 0c46bb1..20c9ef3 100644
+--- a/hw/display/x4pro_epd.c
++++ b/hw/display/x4pro_epd.c
+@@ -45,7 +45,6 @@ static void epd_apply_busy(X4ProEpdState *s)
+     if (c->busy_request_us) {
+         uint32_t us = s->fast_epd ? 2000 : c->busy_request_us;
+         c->busy_request_us = 0;
+-        s->busy_intervals++;
+         timer_mod(s->busy_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (int64_t)us * 1000);
+     }
+     /* SSD1677: busy = HIGH. UC81xx: BUSY_N idle HIGH, busy LOW. */
+@@ -111,7 +110,6 @@ static uint32_t epd_transfer(SSIPeripheral *dev, uint32_t val)
+         }
+         c->cmd_len++;
+         c->bytes_in++;
+-        s->spi_probe_bytes++;
+         return r;
+     }
+     epd_core_byte(c, val & 0xFF);
+diff --git a/hw/gpio/esp32s3_gpio_full.c b/hw/gpio/esp32s3_gpio_full.c
+index 11f0613..26b56f5 100644
+--- a/hw/gpio/esp32s3_gpio_full.c
++++ b/hw/gpio/esp32s3_gpio_full.c
+@@ -153,19 +153,6 @@ static void gpio_refresh(ESP32S3GpioFullState *s)
+     gpio_update_irq(s);
+ }
+ 
+-void esp32s3_gpio_full_set_idle(ESP32S3GpioFullState *s, int pin, int level)
+-{
+-    if (pin < 0 || pin >= ESP32S3_GPIO_PINS) {
+-        return;
+-    }
+-    if (level) {
+-        s->idle |= 1ULL << pin;
+-    } else {
+-        s->idle &= ~(1ULL << pin);
+-    }
+-    gpio_refresh(s);
+-}
+-
+ int esp32s3_gpio_full_get_level(ESP32S3GpioFullState *s, int pin)
+ {
+     return (s->level >> pin) & 1;
+diff --git a/hw/misc/x4pro_i2c_devs.c b/hw/misc/x4pro_i2c_devs.c
+index 8f91786..4ce5a08 100644
+--- a/hw/misc/x4pro_i2c_devs.c
++++ b/hw/misc/x4pro_i2c_devs.c
+@@ -141,7 +141,6 @@ static uint8_t gt911_recv(I2CSlave *i2c)
+ {
+     X4ProGt911State *s = X4PRO_GT911(i2c);
+     uint16_t r = s->ptr++;
+-    s->reads++;
+     if (r == 0x814E) {
+         return (s->frame_ready ? 0x80 : 0) | (s->frame_home ? 0x10 : 0) | (s->frame_count & 0x0F);
+     }
+@@ -383,7 +382,6 @@ static int cw_send(I2CSlave *i2c, uint8_t data)
+             } else {
+                 s->regs[r] = data;
+             }
+-            s->writes++;
+         }
+     }
+     s->byte_index++;
+@@ -394,7 +392,6 @@ static uint8_t cw_recv(I2CSlave *i2c)
+ {
+     X4ProCw2017State *s = X4PRO_CW2017(i2c);
+     uint8_t r = s->ptr++;
+-    s->reads++;
+     return r < sizeof(s->regs) ? s->regs[r] : 0;
+ }
+ 
+diff --git a/hw/misc/x4pro_sleep.c b/hw/misc/x4pro_sleep.c
+index 908e5b3..9ea06e2 100644
+--- a/hw/misc/x4pro_sleep.c
++++ b/hw/misc/x4pro_sleep.c
+@@ -60,7 +60,7 @@ static bool x4pro_sleep_ext1_condition(X4ProSleepState *s)
+     return any_high ? (lv != 0) : ((lv ^ sel) != 0);   /* any selected pin low */
+ }
+ 
+-void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io)
++static void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io)
+ {
+     if (!s->sleeping) {
+         return;
+diff --git a/include/hw/display/x4pro_epd.h b/include/hw/display/x4pro_epd.h
+index e0c734e..8d66dfa 100644
+--- a/include/hw/display/x4pro_epd.h
++++ b/include/hw/display/x4pro_epd.h
+@@ -45,8 +45,6 @@ struct X4ProEpdState {
+     uint32_t gray_k;      /* its reflectance step per driven frame; 0 = the core's default */
+ 
+     FILE *trace;
+-    uint64_t busy_intervals;
+-    uint64_t spi_probe_bytes;
+     int64_t last_refresh_ns;
+ };
+ 
+diff --git a/include/hw/gpio/esp32s3_gpio_full.h b/include/hw/gpio/esp32s3_gpio_full.h
+index 32ba847..f31ca81 100644
+--- a/include/hw/gpio/esp32s3_gpio_full.h
++++ b/include/hw/gpio/esp32s3_gpio_full.h
+@@ -61,6 +61,5 @@ struct ESP32S3GpioFullState {
+ uint32_t esp32s3_gpio_full_samples(ESP32S3GpioFullState *s, int pin);
+ 
+ /* Board helpers */
+-void esp32s3_gpio_full_set_idle(ESP32S3GpioFullState *s, int pin, int level);
+ int  esp32s3_gpio_full_get_level(ESP32S3GpioFullState *s, int pin);
+ bool esp32s3_gpio_full_is_output(ESP32S3GpioFullState *s, int pin);
+diff --git a/include/hw/misc/x4pro_i2c_devs.h b/include/hw/misc/x4pro_i2c_devs.h
+index 7072fa2..e98b6b1 100644
+--- a/include/hw/misc/x4pro_i2c_devs.h
++++ b/include/hw/misc/x4pro_i2c_devs.h
+@@ -36,7 +36,7 @@ struct X4ProGt911State {
+     bool frame_home;
+     bool frame_ready;
+     bool pending;                   /* the input changed while a frame was waiting: report it next */
+-    uint64_t frames, reads, clears, start_nacks;
++    uint64_t frames, clears, start_nacks;
+     uint64_t key_reads;             /* key-value byte read while the Home pad is down */
+     uint64_t input_seq;             /* bumped by every x4pro_gt911_set_touch */
+     uint64_t frame_seq;             /* input_seq the current frame was taken from */
+@@ -75,7 +75,7 @@ struct X4ProCw2017State {
+     int byte_index;
+     uint32_t soc;                 /* percent */
+     uint32_t mv;                  /* millivolts */
+-    uint64_t reads, writes, batinfo_writes;
++    uint64_t batinfo_writes;
+ };
+ 
+ void x4pro_cw2017_set_battery(X4ProCw2017State *s, int soc, int mv);
+diff --git a/include/hw/misc/x4pro_sleep.h b/include/hw/misc/x4pro_sleep.h
+index 1f56811..52799fb 100644
+--- a/include/hw/misc/x4pro_sleep.h
++++ b/include/hw/misc/x4pro_sleep.h
+@@ -33,5 +33,3 @@ struct X4ProSleepState {
+     int64_t sleep_entered_us;
+     uint32_t gpio_levels;         /* pins 0..21 as last reported on "gpio-in" */
+ };
+-
+-void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io);
+-- 
+2.54.0 (Apple Git-157)
+

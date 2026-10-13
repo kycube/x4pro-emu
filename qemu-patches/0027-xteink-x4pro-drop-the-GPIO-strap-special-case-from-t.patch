@@ -1,0 +1,65 @@
+From b98936aebec00089b6ed73adab9fb87e4189f3d4 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 21:56:44 -0500
+Subject: [PATCH 27/35] xteink-x4pro: drop the GPIO strap special case from the
+ access logger
+
+iolog_read() answered GPIO_STRAP_REG for a logger region at
+DR_REG_GPIO_BASE, a leftover from patch 0001, when the GPIO block was
+still one of the logged holes. Since patch 0002 the full GPIO model sits
+there and no logger region has that base, so the branch never ran; the
+file-scope x4pro_strap_mode it read only carried the stub's strap_mode to
+the GPIO model's property, which the machine init now does directly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/xtensa/xteink_x4pro.c | 19 +++++--------------
+ 1 file changed, 5 insertions(+), 14 deletions(-)
+
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 6e30de5..f54d26a 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -100,14 +100,9 @@ static IoLogRegion iolog_regions[] = {
+     { "p42",       0x60042000,                  0x3E000 },  /* 0x60042000..0x60080000 */
+ };
+ 
+-static uint32_t x4pro_strap_mode = 0x4;   /* SPI flash boot; copied from /machine/soc/gpio */
+-
+ static uint64_t iolog_read(void *opaque, hwaddr addr, unsigned size)
+ {
+     IoLogRegion *r = opaque;
+-    if (r->base == DR_REG_GPIO_BASE && addr == 0x38) {
+-        return x4pro_strap_mode;   /* GPIO_STRAP_REG: keep the SoC stub's answer */
+-    }
+     x4pro_hotlog_hit(&r->hot, r->base + addr, false, 0, size);
+     return 0;
+ }
+@@ -567,19 +562,15 @@ static void x4pro_machine_init(MachineState *machine)
+                            qdev_get_gpio_in(intmatrix, ETS_USB_SERIAL_JTAG_INTR_SOURCE));
+     }
+ 
+-    {
+-        Object *gpio = object_resolve_path("/machine/soc/gpio", NULL);
+-        if (gpio) {
+-            x4pro_strap_mode = object_property_get_int(gpio, "strap_mode", &error_abort);
+-        }
+-    }
+-
+-    /* Full GPIO block, shadowing the SoC's strap-only stub. */
++    /* Full GPIO block, shadowing the SoC's strap-only stub (whose strap_mode it takes over). */
+     ESP32S3GpioFullState *gpio;
+     {
++        Object *stub = object_resolve_path("/machine/soc/gpio", NULL);
+         DeviceState *dev = qdev_new(TYPE_ESP32S3_GPIO_FULL);
+         object_property_add_child(OBJECT(machine), "x4pro-gpio", OBJECT(dev));
+-        qdev_prop_set_uint32(dev, "strap_mode", x4pro_strap_mode);
++        if (stub) {
++            qdev_prop_set_uint32(dev, "strap_mode", object_property_get_int(stub, "strap_mode", &error_abort));
++        }
+         /* idle (undriven) levels: pull-ups on the buttons, the released MOSI line and RST */
+         uint64_t idle = (1ULL << PIN_BTN_LEFT) | (1ULL << PIN_BTN_RIGHT) | (1ULL << PIN_BTN_POWER) |
+                         (1ULL << PIN_EPD_MOSI) | (1ULL << PIN_EPD_RST) | (1ULL << PIN_TP_RST) |
+-- 
+2.54.0 (Apple Git-157)
+

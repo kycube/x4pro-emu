@@ -1,0 +1,69 @@
+From 3d9ad84639cbc72fe35b5783fd955f8e72a6814a Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 22:04:49 -0500
+Subject: [PATCH 33/35] xteink-x4pro: three dead branches in the CW2017, SENS
+ and GPIO models
+
+- x4pro.cw2017: the MODE write had its own branch doing what the default
+  branch does (store); one condition for the read-only registers is left.
+- esp32s3.saradc: reset set SAR_PERI_CLK_GATE_CONF to 0 right after the
+  memset that already cleared it; the comment moves to the memset.
+- esp32s3.gpio-full: STATUS_NEXT/NEXT1 had a second "r = 0" case beside
+  the write-only registers'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/gpio/esp32s3_gpio_full.c | 1 -
+ hw/misc/esp32s3_saradc.c    | 3 +--
+ hw/misc/x4pro_i2c_devs.c    | 9 +++------
+ 3 files changed, 4 insertions(+), 9 deletions(-)
+
+diff --git a/hw/gpio/esp32s3_gpio_full.c b/hw/gpio/esp32s3_gpio_full.c
+index af81991..8d3e97c 100644
+--- a/hw/gpio/esp32s3_gpio_full.c
++++ b/hw/gpio/esp32s3_gpio_full.c
+@@ -212,7 +212,6 @@ static uint64_t gpio_read(void *opaque, hwaddr addr, unsigned int size)
+     case R_OUT_W1TS: case R_OUT_W1TC: case R_OUT1_W1TS: case R_OUT1_W1TC:
+     case R_ENABLE_W1TS: case R_ENABLE_W1TC: case R_ENABLE1_W1TS: case R_ENABLE1_W1TC:
+     case R_STATUS_W1TS: case R_STATUS_W1TC: case R_STATUS1_W1TS: case R_STATUS1_W1TC:
+-        r = 0; break;
+     case R_STATUS_NEXT: case R_STATUS_NEXT1:
+         r = 0; break;
+     case R_CLOCK_GATE: r = s->clock_gate; break;
+diff --git a/hw/misc/esp32s3_saradc.c b/hw/misc/esp32s3_saradc.c
+index 2a71299..aecc22c 100644
+--- a/hw/misc/esp32s3_saradc.c
++++ b/hw/misc/esp32s3_saradc.c
+@@ -114,8 +114,7 @@ static const MemoryRegionOps esp32s3_saradc_ops = {
+ static void esp32s3_saradc_reset_hold(Object *obj, ResetType type)
+ {
+     ESP32S3SarAdcState *s = ESP32S3_SARADC(obj);
+-    memset(s->reg, 0, sizeof(s->reg));
+-    s->reg[0x104 / 4] = 0;   /* SAR_PERI_CLK_GATE_CONF: gates closed until the firmware opens them */
++    memset(s->reg, 0, sizeof(s->reg));   /* SAR_PERI_CLK_GATE_CONF too: gates closed until the firmware opens them */
+ }
+ 
+ static void esp32s3_saradc_init(Object *obj)
+diff --git a/hw/misc/x4pro_i2c_devs.c b/hw/misc/x4pro_i2c_devs.c
+index 4ce5a08..5bec7d8 100644
+--- a/hw/misc/x4pro_i2c_devs.c
++++ b/hw/misc/x4pro_i2c_devs.c
+@@ -374,12 +374,9 @@ static int cw_send(I2CSlave *i2c, uint8_t data)
+         uint8_t r = s->ptr++;
+         if (r < sizeof(s->regs)) {
+             if (r >= 0x10) s->batinfo_writes++;
+-            if (r == 0x08) {
+-                /* MODE: restart dance F0 -> 30 -> 00; stay "running" throughout */
+-                s->regs[r] = data;
+-            } else if (r == 0x00 || r == 0x02 || r == 0x03 || r == 0x04 || r == 0x05) {
+-                /* read-only */
+-            } else {
++            /* VERSION and VCELL/SOC are read-only; MODE (0x08) takes the firmware's restart
++             * dance F0 -> 30 -> 00 as plain writes, VERSION stays "running" throughout */
++            if (r != 0x00 && !(r >= 0x02 && r <= 0x05)) {
+                 s->regs[r] = data;
+             }
+         }
+-- 
+2.54.0 (Apple Git-157)
+

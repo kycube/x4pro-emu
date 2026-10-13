@@ -1,0 +1,65 @@
+From 491f27700dd8122de9db6e1f5d27f7d163b8053a Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Mon, 12 Oct 2026 22:15:15 -0500
+Subject: [PATCH 35/35] x4pro.epd: drive BUSY only when its level changes
+
+epd_apply_busy() runs after every SPI byte and set the BUSY output each
+time, so every byte of a 48 KB plane went on through the GPIO model's pad
+refresh and the interrupt matrix with an unchanged level. Drive the line
+on a change only, as epd_set_line() already does for the shared data
+line.
+
+A repeated assertion's only other effect was to re-latch level-type GPIO
+interrupts at that moment; neither firmware configures one (GPIO PINn read
+over QMP at Home and during a stock refresh: only GPIO10, the GT911 INT,
+has an interrupt, negedge; BUSY's PIN6 is 0 in both).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/display/x4pro_epd.c         | 9 +++++++--
+ include/hw/display/x4pro_epd.h | 1 +
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/hw/display/x4pro_epd.c b/hw/display/x4pro_epd.c
+index 20c9ef3..44a7ac6 100644
+--- a/hw/display/x4pro_epd.c
++++ b/hw/display/x4pro_epd.c
+@@ -47,9 +47,13 @@ static void epd_apply_busy(X4ProEpdState *s)
+         c->busy_request_us = 0;
+         timer_mod(s->busy_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (int64_t)us * 1000);
+     }
+-    /* SSD1677: busy = HIGH. UC81xx: BUSY_N idle HIGH, busy LOW. */
++    /* SSD1677: busy = HIGH. UC81xx: BUSY_N idle HIGH, busy LOW. Called after every byte, so
++     * the line is driven on a change only, as epd_set_line() does for the data line. */
+     int level = (c->variant == EPD_SSD1677) ? (c->busy ? 1 : 0) : (c->busy ? 0 : 1);
+-    qemu_set_irq(s->busy_out, level);
++    if (level != s->busy_driven) {
++        s->busy_driven = level;
++        qemu_set_irq(s->busy_out, level);
++    }
+ }
+ 
+ static void epd_update_display(X4ProEpdState *s)
+@@ -227,6 +231,7 @@ static void epd_realize(SSIPeripheral *dev, Error **errp)
+     }
+     s->busy_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, epd_busy_timeout, s);
+     s->line_driven = 2;
++    s->busy_driven = -1;
+     s->mosi_level = 1;
+     s->con = graphic_console_init(DEVICE(dev), 0, &epd_gfx_ops, s);
+     qemu_console_resize(s->con, EPD_W, EPD_H);
+diff --git a/include/hw/display/x4pro_epd.h b/include/hw/display/x4pro_epd.h
+index 8d66dfa..3b12bef 100644
+--- a/include/hw/display/x4pro_epd.h
++++ b/include/hw/display/x4pro_epd.h
+@@ -35,6 +35,7 @@ struct X4ProEpdState {
+     qemu_irq line_out;
+     int mosi_level;
+     int line_driven;      /* last value sent on line_out */
++    int busy_driven;      /* last value sent on busy_out, -1 before the first */
+ 
+     /* properties */
+     char *panel;          /* "ssd1677" | "uc8179" | "uc8279" */
+-- 
+2.54.0 (Apple Git-157)
+
