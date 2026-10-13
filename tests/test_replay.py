@@ -17,9 +17,9 @@ pixels), so nothing has to be masked out of the comparison.
 import json
 import os
 import pytest
-from conftest import x4emu, instance_name
+from conftest import (x4emu, instance_name, emu_state, BROWSE_FILES, boot_crosspoint, copy_images,
+                      count_pixels, wait_log)
 
-BROWSE_FILES = (345, 350)      # the Home menu entry, in landscape panel pixels (test_touch_reader)
 BOOT_S = 300                   # host seconds for a boot / a replay subprocess (a loaded host is slow)
 
 
@@ -33,13 +33,7 @@ ICOUNT = 'shift=3,sleep=off'
 def boot(name, images):
     """A deterministic CrossPoint on `name`, at Home. Nothing else: the journal's first step waits
     for its own guest time, and the recorded `--quiet 2` waits for the panel."""
-    x4emu(name, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd',
-          '--deterministic', '--icount', ICOUNT, timeout=BOOT_S)
-    x4emu(name, 'wait-text', 'Entering activity: Home', '--timeout', 180, timeout=BOOT_S)
-
-
-def state(name):
-    return json.loads(x4emu(name, 'state').stdout)
+    boot_crosspoint(name, images, '--deterministic', '--icount', ICOUNT, home_s=180, timeout=BOOT_S)
 
 
 def journal(path):
@@ -51,9 +45,7 @@ def diff_pixels(a, b):
     from PIL import Image, ImageChops
     ia, ib = Image.open(a).convert('L'), Image.open(b).convert('L')
     assert ia.size == ib.size, (ia.size, ib.size)
-    d = ImageChops.difference(ia, ib)
-    data = d.get_flattened_data() if hasattr(d, 'get_flattened_data') else d.getdata()
-    return sum(1 for v in data if v)
+    return count_pixels(ImageChops.difference(ia, ib))
 
 
 @pytest.fixture
@@ -68,7 +60,7 @@ def replay_emus():
         x4emu(n, 'stop', check=False)
 
 
-def test_record_replay_same_screen(images, emu, replay_emus, tmp_path):
+def test_record_replay_same_screen(images_base, images, emu, replay_emus, tmp_path):
     flow = str(tmp_path / 'flow.jsonl')
     shots = []
 
@@ -90,6 +82,7 @@ def test_record_replay_same_screen(images, emu, replay_emus, tmp_path):
     # 2. the journal: one line per input command, in guest-time order, with the arguments a replay
     #    needs to call the same function again
     steps = journal(flow)
+    # only the inputs: the wait-quiet/wait-text/screenshot above are not recorded
     assert [s['cmd'] for s in steps] == ['tap', 'home'], steps
     ts = [s['t_ms'] for s in steps]
     assert all(a < b for a, b in zip(ts, ts[1:])), ts
@@ -97,23 +90,23 @@ def test_record_replay_same_screen(images, emu, replay_emus, tmp_path):
     tap_args = steps[0]['args']
     assert tap_args['x'] == BROWSE_FILES[0] and tap_args['y'] == BROWSE_FILES[1], tap_args
     assert tap_args['ms'] == 120 and tap_args['quiet'] == 2 and tap_args['wait'] == 30, tap_args
-    # non-input commands are not recorded (the wait-quiet/wait-text/screenshot above are gone)
-    assert len(steps) == 2, steps
 
     # 3. the virtual-clock wait: guest time, not host time (this instance is idle at Home)
-    before = state(emu)['uptime_us']
+    before = emu_state(emu)['uptime_us']
     r = x4emu(emu, 'wait-guest-ms', 500, '--timeout', 60)
     assert r.stdout.startswith('guest '), r.stdout
-    assert state(emu)['uptime_us'] - before >= 500_000
+    assert emu_state(emu)['uptime_us'] - before >= 500_000
     js = json.loads(x4emu(emu, '--json', 'wait-guest-ms', 200, '--timeout', 60).stdout)
     assert js['ok'] and js['advanced_ms'] >= 200 and js['guest_ms'] >= js['target_ms'], js
 
     # 4. replay the journal onto two fresh instances, human mode and --json mode. Each replayed step
     #    is delivered once: `x4emu` holds an input in guest time until the firmware has consumed it
     #    and its release (docs/x4emu.md "Input delivery"), so the replay no longer re-runs the journal
-    #    when the host is loaded.
+    #    when the host is loaded. Each boots its own copy of the images the recording booted from, and
+    #    no finished instance keeps running: with sleep=off an idle guest spins a host core.
+    x4emu(emu, 'stop')
     for i, name in enumerate(replay_emus):
-        boot(name, images)
+        boot(name, copy_images(images_base, tmp_path / name))
         if i:
             js = json.loads(x4emu(name, '--json', 'replay', flow, timeout=BOOT_S).stdout)
             assert js['steps'] == 2 and js['guest_ms_end'] >= ts[-1], js
@@ -122,11 +115,13 @@ def test_record_replay_same_screen(images, emu, replay_emus, tmp_path):
             r = x4emu(name, 'replay', flow, timeout=BOOT_S)
             assert f't={ts[0]} ms tap {BROWSE_FILES[0]} {BROWSE_FILES[1]}' in r.stdout, r.stdout
             assert 'replayed 2 steps' in r.stdout, r.stdout
-        # the firmware took the same path: FileBrowser and back to Home
+        # the firmware took the same path: FileBrowser and back to Home (the boot's Home is the first)
         x4emu(name, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
+        wait_log(name, 'Entering activity: Home', count=2)
         x4emu(name, 'wait-quiet', '--seconds', 2, '--timeout', 60)
         shots.append(str(tmp_path / f'{name}.png'))
         x4emu(name, 'screenshot', shots[-1])
+        x4emu(name, 'stop')
 
     # 5. the acceptance: three runs, one screen
     for other in shots[1:]:

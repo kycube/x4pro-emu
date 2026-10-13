@@ -1,15 +1,14 @@
 """Oracle: the screenshot the real X4 Pro wrote to its card (CrossPoint 1.6.0, home screen,
 100% and charging, docs/device/screenshots/screenshot-3824.bmp) must be reproduced pixel for
 pixel by the emulator once the battery state matches."""
-import os, subprocess
-from conftest import x4emu, x4emu_input, ROOT
+import os
+from conftest import x4emu, ROOT, BROWSE_FILES, boot_crosspoint, count_pixels, open_test_book
 
 DEVICE_BMP = os.path.join(ROOT, 'tests', 'golden', 'device-home-screenshot-3824.bmp')
 
+
 def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
-    x4emu(emu, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd')
-    x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 90)
-    x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
+    boot_crosspoint(emu, images, quiet_s=2)
     # as booted: default gauge 63%, not charging -> only the status bar differs
     r = x4emu(emu, 'screenshot', str(tmp_path / 'home-63.png'), '--diff', DEVICE_BMP, check=False)
     pct = float(r.stdout.split('%')[0].split()[-1])
@@ -17,10 +16,9 @@ def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
     # match the device: 100%, USB power -> repaint via a Browse Files round trip
     x4emu(emu, 'battery', '--soc', 100, '--charging', 'on')
     # the percentage change repaints the status bar within ~1.5 s; do not tap into that paint
-    x4emu_input(emu, 'tap', 345, 350, '--quiet', 3, '--wait', 20)
+    x4emu(emu, 'tap', *BROWSE_FILES, '--quiet', 3, '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    # the Home pad is polled: press it into an idle panel and hold it (default 250 ms)
-    x4emu_input(emu, 'home', '--quiet', 1.5, '--wait', 20)
+    x4emu(emu, 'home', '--wait', 20)         # the Home pad, into the idle file list
     x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
     r = x4emu(emu, 'screenshot', str(tmp_path / 'home-100.png'), '--diff', DEVICE_BMP, check=False)
     assert r.returncode == 0 and '0.000%' in r.stdout, r.stdout
@@ -32,7 +30,8 @@ def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
 # BMP is the firmware's 1-bit base frame (every anti-aliased glyph pixel black), so the emulator's
 # page is compared as its base frame too: any ink -> black. The only pixels that then differ are
 # the footer clock digits (the device's time against the emulator's): landscape x 780..792,
-# y 404..461 in the first comparison (307 pixels); that box is masked.
+# y 404..461 in the first comparison (307 pixels); that box is masked. The walk to page 1 is
+# test_touch_reader's, which also covers it when a golden here drifts (--golden-drift, conftest.py).
 DEVICE_PAGE1 = os.path.join(ROOT, 'tests', 'golden', 'device-reader-page1-16905.bmp')
 DEVICE_PAGE2 = os.path.join(ROOT, 'tests', 'golden', 'device-reader-page2-47729.bmp')
 CLOCK_BOX = (770, 396, 800, 470)     # landscape box around the portrait footer clock
@@ -50,25 +49,17 @@ def base_frame_diff(emu_png, device_bmp, mask=CLOCK_BOX):
     d = ImageChops.difference(emu, dev)
     if mask:
         ImageDraw.Draw(d).rectangle(mask, fill=0)
-    data = d.get_flattened_data() if hasattr(d, 'get_flattened_data') else d.getdata()
-    return sum(1 for v in data if v)
+    return count_pixels(d)
 
 
 def test_reader_pages_match_device_screenshots(images, emu, tmp_path):
-    x4emu(emu, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd')
-    x4emu(emu, 'wait-text', 'Entering activity: Home', '--timeout', 90)
-    x4emu(emu, 'wait-quiet', '--seconds', 2, '--timeout', 60)
-    x4emu_input(emu, 'tap', 345, 350, '--quiet', 2, '--wait', 20)      # Browse Files
-    x4emu(emu, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
-    x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    x4emu_input(emu, 'tap', 140, 240, '--quiet', 1.5, '--wait', 20)    # the book
-    x4emu(emu, 'wait-text', 'Loaded ePub: /Test Book.epub', '--timeout', 90)
-    x4emu(emu, 'wait-quiet', '--seconds', 3, '--timeout', 120)
+    boot_crosspoint(emu, images)
+    open_test_book(emu, tmp_path)
     p1 = tmp_path / 'page1.png'
     x4emu(emu, 'screenshot', str(p1))
     n1 = base_frame_diff(p1, DEVICE_PAGE1)
     assert n1 == 0, f'page 1 differs from the device screenshot in {n1} pixels outside the clock'
-    x4emu_input(emu, 'press', 'right', '--wait', 20)
+    x4emu(emu, 'press', 'right', '--wait', 20)
     x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
     p2 = tmp_path / 'page2.png'
     x4emu(emu, 'screenshot', str(p2))

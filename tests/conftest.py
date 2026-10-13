@@ -1,10 +1,21 @@
-import hashlib, os, subprocess, sys, time, pytest
+import hashlib, json, os, re, shutil, subprocess, sys, time
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
-X4EMU = os.path.join(ROOT, 'tools', 'x4emu')
+TOOLS = os.path.join(ROOT, 'tools')
+X4EMU = os.path.join(TOOLS, 'x4emu')
 BUILD = os.path.join(ROOT, 'firmware', '.pio', 'build', 'x4pro')
 QEMU = os.environ.get('X4EMU_QEMU', os.path.join(ROOT, 'qemu', 'build', 'qemu-system-xtensa'))
+
+# tools/ on the import path once, for every test module (upstream_check, nvsedit, stockver, ...).
+# This directory is there already: pytest puts a conftest's directory first when it has no __init__.py,
+# which is what makes `from conftest import ...` and `from mkepub import ...` work.
+if TOOLS not in sys.path:
+    sys.path.insert(0, TOOLS)
+
+from mkepub import make_epub                                     # noqa: E402  (the test book)
+
 
 def x4emu(name, *args, check=True, timeout=120):
     r = subprocess.run([PY, X4EMU, '--name', name, *map(str, args)], capture_output=True, text=True, timeout=timeout)
@@ -12,8 +23,56 @@ def x4emu(name, *args, check=True, timeout=120):
         raise AssertionError(f'x4emu {args} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
     return r
 
+
+def _x4emu_dir():
+    return os.path.join(os.environ.get('X4EMU_ROOT') or ROOT, '.x4emu')    # docs/x4emu.md
+
+
+def instance_dir(name):
+    """`.x4emu/NAME/`: the instance's sockets, run.json and logs."""
+    return os.path.join(_x4emu_dir(), name)
+
+
+def emu_log(name, file='console.log'):
+    """The text of one of the instance's logs: console.log (USB Serial/JTAG), uart0.log, qemu.log."""
+    with open(os.path.join(instance_dir(name), file), errors='replace') as f:
+        return f.read()
+
+
+def emu_state(name):
+    """`x4emu state` as a dict."""
+    return json.loads(x4emu(name, 'state').stdout)
+
+
+def wait_for(fn, timeout, what, every=0.5):
+    """Call `fn` every `every` host seconds until it returns something true, and return that; after
+    `timeout` host seconds raise AssertionError naming `what`."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        v = fn()
+        if v:
+            return v
+        time.sleep(every)
+    raise AssertionError(f'timeout waiting for {what}')
+
+
+def wait_log(name, text, count=1, timeout=30, file='console.log'):
+    """Wait until `text` has appeared `count` times in the instance's log. `x4emu wait-text` finds the
+    first one, and the console holds the whole run, reset and deep-sleep wake included: a second
+    visit to a screen ("Entering activity: Home" after the Home pad, or after a wake) needs a count."""
+    wait_for(lambda: emu_log(name, file).count(text) >= count, timeout,
+             f'{text!r} {count} time(s) in {file}', every=0.2)
+
+
+def count_pixels(im, lo=1, hi=255):
+    """How many pixels of a mode 'L' or '1' image have a value in lo..hi: the default counts the
+    non-zero pixels of a difference image, (0, 127) the dark ones of a screenshot. A histogram, so no
+    Python loop over 384,000 pixels and no `getdata()` (deprecated from Pillow 12 on)."""
+    return sum(im.histogram()[lo:hi + 1])
+
+
 # `x4emu --name NAME` becomes .x4emu/NAME/ and part of two UNIX socket paths, and sun_path holds
-# 104 bytes on macOS, 108 on Linux (CLAUDE.md, "Lessons"). pytest node names are long and the CI
+# 104 bytes on macOS, 108 on Linux (docs/NEXT_PHASE.md §7). pytest node names are long and the CI
 # checkout (/home/runner/work/x4pro-emu/x4pro-emu) is 20 bytes longer than the desk Mac's, so
 # `pytest-test_mcp_module_imports_and_calls_in_process` measured 93 bytes here and 109 on CI -- one
 # over the limit, which is why that job was red from 2026-09-07 while the same suite passed on the
@@ -42,12 +101,14 @@ def instance_name(node_name, node_id=None):
     two agents, or two workers -- never share an instance (each test stops its own name first)."""
     name = 'pytest-' + os.environ.get('X4EMU_TEST_PREFIX', '') + \
         node_name.replace('[', '-').replace(']', '').replace('=', '-')
-    x4root = os.environ.get('X4EMU_ROOT') or ROOT           # where x4emu puts .x4emu/ (docs/x4emu.md)
-    room = SOCK_MAX - len(os.path.join(x4root, '.x4emu')) - len('/console.sock') - 2   # '/' + NUL
+    room = SOCK_MAX - len(_x4emu_dir()) - len('/console.sock') - 2   # '/' + NUL
     if len(name) > room or node_id:
         h = hashlib.sha1((node_id or node_name).encode()).hexdigest()[:8]
         name = name[:min(len(name), room - 9)] + '-' + h
     return name
+
+
+_clonefile = None       # libSystem's clonefile(2), looked up on first use
 
 
 def copy_image(src, dst):
@@ -56,40 +117,34 @@ def copy_image(src, dst):
     copies about 8 GB of 16 MB flash and 64/256 MB card images, and a parallel run starts with every
     worker copying at once, while the other workers' emulators read their cards. Elsewhere, or when
     the clone fails (another volume), a plain copy. Returns `dst` as a string."""
+    global _clonefile
     src, dst = str(src), str(dst)
     if sys.platform == 'darwin':
         try:
-            import ctypes
-            libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+            if _clonefile is None:
+                import ctypes
+                _clonefile = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True).clonefile
             if os.path.lexists(dst):
                 os.remove(dst)
-            if libc.clonefile(src.encode(), dst.encode(), 0) == 0:
+            if _clonefile(src.encode(), dst.encode(), 0) == 0:
                 os.chmod(dst, 0o644)                # a clone keeps the source's mode
                 return dst
         except (OSError, AttributeError):
             pass
-    import shutil
     shutil.copyfile(src, dst)
     return dst
 
 
-def x4emu_input(name, *args, **kw):
-    """An input command (`tap`, `home`, `press`, ... usually with `--wait`), delivered once.
-
-    This used to repeat an input that drew nothing ("no refresh within Ns" although the firmware had
-    read the GT911 frame): every full run lost about one input, in a different test each time. The
-    cause was the GT911 model overwriting an unread frame -- a release landing between the firmware's
-    status read and its clear was wiped unseen -- and button holds measured in host milliseconds; the
-    model now latches frames and `x4emu` holds every input until the firmware has seen it and its
-    release (docs/x4emu.md "Input delivery", tests/test_input_delivery.py). A test that still needs a
-    retry must say why next to it."""
-    return x4emu(name, *args, **kw)
+def copy_images(src, d):
+    """`copy_image` of an images dict's flash and card into directory `d`, as a new dict."""
+    os.makedirs(d, exist_ok=True)
+    return {k: copy_image(src[k], os.path.join(str(d), os.path.basename(src[k]))) for k in ('flash', 'sd')}
 
 
 @pytest.fixture(scope='session')
 def images_base(tmp_path_factory):
-    """Built once per session: the flash image from the firmware build and an MBR/FAT32 SD image
-    with the test book. Tests never boot these directly (see `images`)."""
+    """Built once per session (per worker): the flash image from the firmware build and an MBR/FAT32
+    SD image with the test book. Tests never boot these directly (see `images`)."""
     if not os.path.exists(os.path.join(BUILD, 'firmware.bin')):
         pytest.skip('firmware not built (cd firmware && pio run -e x4pro)')
     if not os.path.exists(QEMU):
@@ -97,31 +152,58 @@ def images_base(tmp_path_factory):
     d = tmp_path_factory.mktemp('images')
     flash = d / 'flash.bin'
     sd = d / 'sd.img'
-    subprocess.run([PY, os.path.join(ROOT, 'tools', 'mkflash.py'), str(flash), '--build', BUILD], check=True, stdout=subprocess.DEVNULL)
-    empty = d / 'sdroot'; empty.mkdir()
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from mkepub import make_epub
-    make_epub(str(empty / 'Test Book.epub'))
-    subprocess.run([PY, os.path.join(ROOT, 'tools', 'mksd.py'), str(sd), '--size', '64M', '--src', str(empty)], check=True, stdout=subprocess.DEVNULL)
-    return {'flash': str(flash), 'sd': str(sd), 'dir': d}
+    subprocess.run([PY, os.path.join(TOOLS, 'mkflash.py'), str(flash), '--build', BUILD], check=True, stdout=subprocess.DEVNULL)
+    books = d / 'sdroot'; books.mkdir()
+    make_epub(str(books / 'Test Book.epub'))
+    subprocess.run([PY, os.path.join(TOOLS, 'mksd.py'), str(sd), '--size', '64M', '--src', str(books)], check=True, stdout=subprocess.DEVNULL)
+    return {'flash': str(flash), 'sd': str(sd)}
+
 
 @pytest.fixture
 def images(images_base, tmp_path):
-    """A private copy of the flash and card images for one test. CrossPoint writes to both (NVS
-    settings in the flash, reading positions and recent books on the card), so a shared image let one
-    test's state leak into the next: a Home screen with a "recent book" card, a reader that opened on
-    page 3 (2026-09-07). Copying 16 + 64 MB takes well under a second."""
-    import shutil
-    flash = tmp_path / 'flash.bin'; sd = tmp_path / 'sd.img'
-    copy_image(images_base['flash'], flash); copy_image(images_base['sd'], sd)
-    return {'flash': str(flash), 'sd': str(sd), 'dir': images_base['dir']}
+    """A private copy (`copy_image`) of the flash and card images for one test, `tmp_path/flash.bin`
+    and `tmp_path/sd.img`. CrossPoint writes to both (NVS settings in the flash, reading positions and
+    recent books on the card), so a shared image let one test's state leak into the next: a Home
+    screen with a "recent book" card, a reader that opened on page 3 (2026-09-07)."""
+    return copy_images(images_base, tmp_path)
+
 
 @pytest.fixture
 def emu(images, request):
+    """This test's instance name, stopped before and after the test. It asks for `images` so that a
+    test using it skips when the firmware or QEMU is not built."""
     name = instance_name(request.node.name, request.node.nodeid)
     x4emu(name, 'stop', check=False)
     yield name
     x4emu(name, 'stop', check=False)
+
+
+# --- CrossPoint on the test images: the walks several tests share ------------------------------
+BROWSE_FILES = (345, 350)      # CrossPoint's Home menu entry "Browse Files", landscape panel pixels
+BOOK_ROW = (140, 240)          # the first row of its file list: the test book, the card's only file
+
+
+def boot_crosspoint(name, images, *run_args, home_s=90, quiet_s=0, timeout=120):
+    """`x4emu run` CrossPoint from `images` (`--fast-epd` plus `run_args`) and wait up to `home_s`
+    for its Home activity; with `quiet_s`, also until the panel has been idle that long (the Home
+    paint done, ready for a screenshot or an input). `timeout`: host seconds for the run command."""
+    x4emu(name, 'run', '--flash', images['flash'], '--sd', images['sd'], '--fast-epd', *run_args, timeout=timeout)
+    x4emu(name, 'wait-text', 'Entering activity: Home', '--timeout', home_s, timeout=home_s + 30)
+    if quiet_s:
+        x4emu(name, 'wait-quiet', '--seconds', quiet_s, '--timeout', 60)
+
+
+def open_test_book(name, shots):
+    """From CrossPoint's Home to page 1 of the test book, painted and idle: Browse Files, then the
+    book's row. `shots/browser.png` is the file list (for the artifacts when the second tap fails)."""
+    x4emu(name, 'wait-quiet', '--seconds', 2, '--timeout', 60)
+    x4emu(name, 'tap', *BROWSE_FILES, '--wait', 20)
+    x4emu(name, 'wait-text', 'Entering activity: FileBrowser', '--timeout', 30)
+    x4emu(name, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
+    x4emu(name, 'screenshot', os.path.join(str(shots), 'browser.png'))
+    x4emu(name, 'tap', *BOOK_ROW, '--wait', 20)
+    x4emu(name, 'wait-text', 'Loaded ePub: /Test Book.epub', '--timeout', 90)
+    x4emu(name, 'wait-quiet', '--seconds', 3, '--timeout', 120)
 
 
 # --- --golden-drift FILE: the upstream watch's CrossPoint-latest job (docs/upstream.md) ----------
@@ -167,7 +249,6 @@ UNKNOWN_DURATION_S = 30.0
 
 
 def load_durations(path=DURATIONS):
-    import json
     try:
         with open(path) as f:
             return {k: float(v) for k, v in json.load(f).items()}
@@ -193,21 +274,27 @@ def pytest_collection_modifyitems(session, config, items):
     items[:] = schedule_order(items, load_durations(), workers)
 
 
-_durations = {}
+# --record-durations FILE: summed per node id in the process that sees every report (a serial run,
+# or xdist's controller, which gets the workers' reports), merged into FILE at the end.
+_durations = None
+
+
+def pytest_configure(config):
+    global _durations
+    if config.getoption('--record-durations') and not _WORKER:
+        _durations = {}
 
 
 def pytest_runtest_logreport(report):
-    # under xdist this runs in the controller too, with every worker's reports
-    if not _WORKER:
+    if _durations is not None:
         _durations[report.nodeid] = _durations.get(report.nodeid, 0.0) + report.duration
 
 
 def pytest_sessionfinish(session, exitstatus):
-    path = session.config.getoption('--record-durations')
-    if not path or _WORKER or not _durations:
+    if not _durations:
         return
-    import json
-    old = load_durations(path) if os.path.exists(path) else {}
+    path = session.config.getoption('--record-durations')
+    old = load_durations(path)
     old.update({k: round(v, 1) for k, v in _durations.items()})
     with open(path, 'w') as f:
         json.dump(dict(sorted(old.items())), f, indent=0)
@@ -216,11 +303,8 @@ def pytest_sessionfinish(session, exitstatus):
 
 def _emu_health(name):
     """(problems, running) of one instance: crash markers in its console, unknown panel commands."""
-    import importlib.util, json
-    spec = importlib.util.spec_from_file_location('upstream_check', os.path.join(ROOT, 'tools', 'upstream_check.py'))
-    uc = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(uc)
-    problems = uc.crash_markers(os.path.join(ROOT, '.x4emu', name, 'console.log'))
+    import upstream_check                                       # tools/, on sys.path above
+    problems = upstream_check.crash_markers(os.path.join(instance_dir(name), 'console.log'))
     r = x4emu(name, 'state', check=False, timeout=30)
     try:
         st = json.loads(r.stdout) if r.returncode == 0 else None
@@ -235,10 +319,11 @@ def _emu_health(name):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     path = item.config.getoption('--golden-drift')
-    rep = outcome.get_result()
-    if not path or rep.when != 'call' or rep.skipped or 'emu' not in getattr(item, 'funcargs', {}):
+    if not path:
         return
-    import json, re
+    rep = outcome.get_result()
+    if rep.when != 'call' or rep.skipped or 'emu' not in getattr(item, 'funcargs', {}):
+        return
     problems, running = _emu_health(item.funcargs['emu'])
     record = None
     if rep.passed and problems:
