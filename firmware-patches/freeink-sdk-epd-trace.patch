@@ -1,16 +1,16 @@
 diff --git a/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp b/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp
-index db1252c..6498cb2 100644
+index db1252c..0aac301 100644
 --- a/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp
 +++ b/libs/display/FreeInkDisplay/src/bus/EpdBus.cpp
 @@ -43,6 +43,50 @@ void boardEpdReset(bool high) {
  }
  }  // namespace
  
-+
 +// ---- x4pro-emu: optional panel command trace (build with -DFREEINK_EPD_TRACE=1) ----
-+// One line per command, printed when the next command starts (so the data length
-+// is known): "[EPD] c=XX len=N d=b0 b1 .. b7". Used to record fixtures for the
-+// emulator's panel model. Not for production builds.
++// One line per command, printed when the next command starts or a BUSY wait ends
++// (so the data length is known): "[millis] [EPD] c=XX len=N b0 b1 .. b7" (at most
++// the first 8 data bytes). Used to record fixtures for the emulator's panel model
++// (models/tests/replay.c reads them). Not for production builds.
 +#if defined(FREEINK_EPD_TRACE) && FREEINK_EPD_TRACE
 +namespace {
 +struct EpdTrace {

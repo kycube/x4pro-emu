@@ -5,17 +5,12 @@
  *   (3) UC8279 PTL windows at the edges,
  *   (4) the RED / DTM1 "old plane" resync after a refresh,
  *   (5) writes outside a window leave the visible image alone.
- *   (6) findings: the SSD1677 gate-scan (0x01) byte.
+ *   (6) the SSD1677 gate-scan (0x01) byte.
  *
- * Same harness style as test_epd.c (no framework: asserts + counters), with one
- * addition: an expectation that comes from the datasheet or from the firmware
- * driver but that the model does not meet yet is checked with XCHECK(): it is
- * reported and counted separately instead of failing the build, and every such
- * check carries the finding in its comment. XCHECK() that passes prints XPASS
- * (the model caught up) and does not fail either. No XCHECK() is in use right
- * now -- the three findings this file recorded (X-decrement windows, the AM bit
- * of 0x11, the gate-scan mirror byte) are all fixed in epd_core.c and are
- * checked as ordinary assertions; the harness stays for the next gap.
+ * Same harness as test_epd.c (tests/wire.h). An expectation the model does not
+ * meet is an ordinary failure: the three gaps this file once recorded as
+ * expected failures (X-decrement windows, the AM bit of 0x11, the gate-scan
+ * byte of 0x01) are fixed in epd_core.c.
  *
  * Sources used for the expectations, per test:
  *   SSD16xx datasheet semantics for 0x11 / 0x44 / 0x45 / 0x4E / 0x4F / 0x24,
@@ -26,68 +21,11 @@
  *
  * x4pro-emu, GPL-2.0-or-later.
  */
-#include "epd_core.h"
-#include <stdio.h>
+#include "wire.h"
 #include <stdlib.h>
 #include <string.h>
 
-static int fails = 0;
-static int xfails = 0;
-static int xpasses = 0;
-static int checks = 0;
-
-#define MAX_XMSG 32
-static char xmsg[MAX_XMSG][256];
-static int nxmsg = 0;
-
-static void expect(int ok, int known_gap, int line, const char *msg)
-{
-    checks++;
-    if (ok) {
-        if (known_gap) {
-            xpasses++;
-            printf("XPASS %s:%d: the model now meets this expectation: %s\n", __FILE__, line, msg);
-        }
-        return;
-    }
-    if (known_gap) {
-        xfails++;
-        printf("XFAIL %s:%d: %s\n", __FILE__, line, msg);
-        if (nxmsg < MAX_XMSG) {
-            snprintf(xmsg[nxmsg], sizeof(xmsg[0]), "%s:%d: %s", __FILE__, line, msg);
-            nxmsg++;
-        }
-        return;
-    }
-    fails++;
-    printf("FAIL %s:%d: %s\n", __FILE__, line, msg);
-}
-
-#define CHECK(cond, ...) do { char _m[240]; snprintf(_m, sizeof(_m), __VA_ARGS__); expect(!!(cond), 0, __LINE__, _m); } while (0)
-/* Datasheet/driver expectation the model is known to miss: reported, not fatal. */
-#define XCHECK(cond, ...) do { char _m[240]; snprintf(_m, sizeof(_m), __VA_ARGS__); expect(!!(cond), 1, __LINE__, _m); } while (0)
-
-/* ---- wire helpers (identical to test_epd.c) ------------------------------- */
-static void cmd(EpdCore *c, uint8_t b) { epd_core_set_dc(c, false); epd_core_set_cs(c, true); epd_core_byte(c, b); epd_core_set_cs(c, false); }
-static void dat(EpdCore *c, uint8_t b) { epd_core_set_dc(c, true); epd_core_set_cs(c, true); epd_core_byte(c, b); epd_core_set_cs(c, false); }
-static void datn(EpdCore *c, const uint8_t *d, size_t n) { epd_core_set_dc(c, true); epd_core_set_cs(c, true); for (size_t i = 0; i < n; i++) epd_core_byte(c, d[i]); epd_core_set_cs(c, false); }
-
-/* ---- SSD1677 helpers ------------------------------------------------------ */
-/* 0x44/0x45/0x4E/0x4F carry 16-bit values low byte first (Ssd1677Driver::setRamArea:
- * bus.data(v % 256); bus.data(v / 256)). */
-static void w16(EpdCore *c, int v) { dat(c, (uint8_t)(v & 0xFF)); dat(c, (uint8_t)((v >> 8) & 0xFF)); }
-
-/* setRamArea() as the driver issues it: data entry, X window (start, end),
- * Y window (start, end), then both counters at the window's start. */
-static void ssd_window(EpdCore *c, int mode, int xs, int xe, int ys, int ye)
-{
-    cmd(c, 0x11); dat(c, (uint8_t)mode);
-    cmd(c, 0x44); w16(c, xs); w16(c, xe);
-    cmd(c, 0x45); w16(c, ys); w16(c, ye);
-    cmd(c, 0x4E); w16(c, xs);
-    cmd(c, 0x4F); w16(c, ys);
-}
-
+/* ---- SSD1677 helpers (ssd_window, w16: tests/wire.h) --------------------- */
 /* The driver's fast (0x21 0x00, 0x22 0xFC) and full (0x21 0x40, 0x22 0xF7) triggers. */
 static void ssd_refresh(EpdCore *c, int full)
 {
@@ -270,15 +208,9 @@ static void test_data_entry_modes(void)
             walk_next(&w);
         }
         int d = first_diff(shadow, c->plane0, EPD_PLANE_BYTES);
-        {
-            char msg[240];
-            snprintf(msg, sizeof(msg),
-                     "data-entry mode %d (x %s, y %s, AM=%d): plane0 differs at row %d byte %d "
-                     "(want %02x, got %02x)", mode, x_inc ? "inc" : "dec", y_inc ? "inc" : "dec",
-                     (mode & 4) ? 1 : 0, d < 0 ? -1 : d / EPD_WB, d < 0 ? -1 : d % EPD_WB,
-                     d < 0 ? 0 : shadow[d], d < 0 ? 0 : c->plane0[d]);
-            expect(d < 0, 0, __LINE__, msg);
-        }
+        CHECK(d < 0, "data-entry mode %d (x %s, y %s, AM=%d): plane0 differs at row %d byte %d (want %02x, got %02x)",
+              mode, x_inc ? "inc" : "dec", y_inc ? "inc" : "dec", (mode & 4) ? 1 : 0,
+              d < 0 ? -1 : d / EPD_WB, d < 0 ? -1 : d % EPD_WB, d < 0 ? 0 : shadow[d], d < 0 ? 0 : c->plane0[d]);
 
         /* The glass: RAM row 479 is the top of the panel, so the window's first
          * cell must appear at glass row 479 - ys. (The first byte written always
@@ -293,12 +225,7 @@ static void test_data_entry_modes(void)
         for (int b = 0; b < 8; b++) {
             if (c->image[(EPD_H - 1 - ys) * EPD_W + x0 + b] != pixel_of(want, x0 + b)) { bad = b; break; }
         }
-        {
-            char msg[240];
-            snprintf(msg, sizeof(msg), "mode %d: glass row %d, pixel %d of byte %02x wrong",
-                     mode, EPD_H - 1 - ys, bad, want);
-            expect(bad < 0, 0, __LINE__, msg);
-        }
+        CHECK(bad < 0, "mode %d: glass row %d, pixel %d of byte %02x wrong", mode, EPD_H - 1 - ys, bad, want);
         CHECK(c->unknown_cmds == 0, "mode %d: unknown commands %llu", mode, (unsigned long long)c->unknown_cmds);
     }
     free(c);
@@ -680,10 +607,10 @@ static void test_writes_outside_window(void)
 }
 
 /* ==========================================================================
- * (6) Findings: the SSD1677 gate-scan byte
+ * (6) The SSD1677 gate-scan byte
  * The third byte of 0x01 (driver output control) carries the gate scan
- * direction. Two readings exist and the model honours both (epd_core.c keeps the
- * bit and epd_core_compose() reverses the RAM row -> glass row mapping for it):
+ * direction. Two readings exist and the model honours both (the core keeps it
+ * as gate_rev, and a refresh reverses the RAM row -> glass row mapping for it):
  *   - the driver's: Ssd1677Driver writes cfg.driverOutputScan (0x02) and ORs
  *     SCAN_TB_FLIP (0x01) for a mirrorY mount, "flips the gate scan order (TB
  *     bit) for an upside-down mount";
@@ -730,14 +657,7 @@ int main(void)
     test_old_plane_resync();
     test_writes_outside_window();
     test_gate_scan_flip();
-
-    if (xfails) {
-        printf("\nWARNING: %d datasheet/driver expectation(s) the model does not meet "
-               "(not counted as failures):\n", xfails);
-        for (int i = 0; i < nxmsg; i++) printf("  - %s\n", xmsg[i]);
-        printf("\n");
-    }
     if (fails) { printf("%d failure(s) in %d checks\n", fails, checks); return 1; }
-    printf("window tests: OK (%d checks, %d known model gap(s), %d newly met)\n", checks, xfails, xpasses);
+    printf("window tests: OK (%d checks)\n", checks);
     return 0;
 }

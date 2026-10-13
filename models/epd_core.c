@@ -39,40 +39,36 @@
 /* ---- UC81xx commands ------------------------------------------------------ */
 #define U_PSR   0x00
 #define U_PWR   0x01
-#define U_BTST  0x06
-#define U_TCON  0x60
-#define U_PWS   0xE3
-#define U_VDCS  0x82
-#define U_TSC   0x40
-#define U_TSE   0x41
-#define U_LPD   0x51
-#define U_AUTO  0x17
-#define U_FLG2  0x71
 #define U_POF   0x02
 #define U_PFS   0x03
 #define U_PON   0x04
+#define U_BTST  0x06
 #define U_DSLP  0x07
 #define U_DTM1  0x10
 #define U_DRF   0x12
 #define U_DTM2  0x13
-#define U_LUT0  0x20
+#define U_AUTO  0x17
+#define U_LUT0  0x20            /* 0x20 VCOM, 0x21 WW, 0x22 BW, 0x23 WB, 0x24 BB */
 #define U_LUT4  0x24
 #define U_PLL   0x30
+#define U_TSC   0x40
+#define U_TSE   0x41
 #define U_CDI   0x50
+#define U_LPD   0x51
+#define U_TCON  0x60
 #define U_TRES  0x61
 #define U_GSST  0x65
-#define U_VER   0x70
+#define U_VER   0x70            /* the boot probe's three read-outs (also seen by an SSD part) */
 #define U_FLG   0x71
+#define U_RMTP  0xA2
+#define U_VDCS  0x82
 #define U_PTL   0x90
 #define U_PTIN  0x91
 #define U_PTOUT 0x92
-#define U_RMTP  0xA2
 #define U_CCSET 0xE0
 #define U_GSCAN 0xE1
+#define U_PWS   0xE3
 #define U_TSSET 0xE5
-
-static void trace_cmd(EpdCore *c);
-static void request_busy(EpdCore *c, uint32_t us);
 
 const char *epd_variant_name(EpdVariant v)
 {
@@ -97,117 +93,24 @@ const char *epd_mode_name(EpdRefreshMode m)
     return "?";
 }
 
-static void ssd_reset_regs(EpdCore *c)
+/* ---- shared plumbing ------------------------------------------------------ */
+static void request_busy(EpdCore *c, uint32_t us)
 {
-    c->data_entry = 0x03;   /* 0x11 reset default (X inc, Y inc, AM = 0); also
-                             * clears the private gate-scan bit, since a SW reset
-                             * restores 0x01's default scan too */
-    c->x_start = 0; c->x_end = EPD_W - 1;
-    c->y_start = 0; c->y_end = EPD_H - 1;
-    c->x_cnt = 0; c->y_cnt = 0;
-    c->ctrl1 = 0; c->ctrl2 = 0;
-    c->border = 0;
-    c->custom_lut = false;
-    c->deep_sleep = false;
+    c->busy = true;
+    c->busy_request_us = us;
 }
 
-static void uc_reset_regs(EpdCore *c)
+static uint32_t mode_us(const EpdCore *c, EpdRefreshMode m)
 {
-    c->uc_ptr = 0;
-    c->psr[0] = 0x0F; c->psr[1] = 0x00;
-    c->tres_w = EPD_W; c->tres_h = EPD_UC_GATES;
-    c->partial_in = false;
-    memset(c->ptl, 0, sizeof(c->ptl));
-    c->power_on = false;
-    c->uc_lut_loaded = false;
-    c->uc_cdi = 0x97;               /* MTP "Command Default Setting" byte 8 (docs/grayscale.md) */
-    c->deep_sleep = false;
-}
-
-void epd_core_init(EpdCore *c, EpdVariant v)
-{
-    memset(c, 0, sizeof(*c));
-    c->variant = v;
-    c->cmd = -1;
-    /* Desk unit (UC8279, CrossPoint 1.6.0): DRF full 1326 ms, DRF DU 483 ms, PON 40 ms.
-     * SSD1677 units: support doc says full ~1800 ms, partial ~500 ms. */
-    if (v == EPD_SSD1677) {
-        c->timing.full_us = 1800000;
-        c->timing.fast_us = 500000;
-        c->timing.half_us = 1800000;
-        c->timing.gray_us = 600000;
-        c->timing.power_us = 20000;
-    } else {
-        c->timing.full_us = 1326000;
-        c->timing.fast_us = 483000;
-        c->timing.half_us = 1326000;
-        c->timing.gray_us = 600000;
-        c->timing.power_us = 40000;
-    }
-    memset(c->plane0, 0xFF, sizeof(c->plane0));
-    memset(c->plane1, 0xFF, sizeof(c->plane1));
-    memset(c->image, 0xFF, sizeof(c->image));
-    c->waveform_gray = true;        /* default since the device photo of 2026-09-07 (docs/grayscale.md) */
-    c->gray_k = EPD_GRAY_K_DEFAULT;
-    c->frame_us = EPD_FRAME_US_DEFAULT;
-    ssd_reset_regs(c);
-    uc_reset_regs(c);
-    c->busy = false;
-    c->image_dirty = true;
-}
-
-void epd_core_reset(EpdCore *c)
-{
-    trace_cmd(c);
-    c->cmd = -1;
-    c->cmd_len = 0;
-    ssd_reset_regs(c);
-    uc_reset_regs(c);
-    c->probe_read_active = false;
-    c->bb_nbits = 0;
-    c->busy = false;
-    c->busy_request_us = 0;
-    c->resets++;
-    /* RAM contents survive a reset on both controller families (not a DSLP) */
-}
-
-void epd_core_set_rst(EpdCore *c, bool line_high)
-{
-    bool was = c->in_reset;
-    c->in_reset = !line_high;
-    if (!was && c->in_reset) {
-        epd_core_reset(c);
-        c->busy = true;            /* BUSY asserted while in reset (SSD: HIGH, UC: BUSY_N LOW) */
-    } else if (was && !c->in_reset) {
-        /* after the reset pulse the controller stays busy for its power-up time,
-         * which gives firmware that waits for the BUSY edge something to see */
-        request_busy(c, c->timing.power_us);
+    switch (m) {
+    case EPD_MODE_FAST: return c->timing.fast_us;
+    case EPD_MODE_HALF: return c->timing.half_us;
+    case EPD_MODE_GRAY: return c->timing.gray_us;
+    default: return c->timing.full_us;
     }
 }
 
-void epd_core_set_cs(EpdCore *c, bool selected)
-{
-    if (c->cs && !selected) {
-        /* end of a transaction: a multi-byte command's data is complete */
-        c->probe_read_active = false;
-        c->bb_nbits = 0;
-    }
-    c->cs = selected;
-}
-
-void epd_core_set_dc(EpdCore *c, bool data)
-{
-    c->dc = data;
-    if (data && c->cs && c->variant != EPD_SSD1677) {
-        /* A UC part starts driving the read-out right after the command byte
-         * when the master switches DC high and releases the line. */
-        if (c->cmd == U_VER || c->cmd == U_FLG || c->cmd == U_RMTP) {
-            c->probe_read_active = true;
-            c->probe_bit = 0;
-        }
-    }
-}
-
+/* Emit the current command to the trace once its data is complete. */
 static void trace_cmd(EpdCore *c)
 {
     if (c->trace && c->cmd >= 0 && !c->cmd_traced) {
@@ -217,10 +120,19 @@ static void trace_cmd(EpdCore *c)
     }
 }
 
-void epd_core_flush_trace(EpdCore *c)
+/* 10-bit register values from two data bytes: SSD1677 sends them low byte
+ * first, the UC81xx high byte first. */
+static uint16_t arg_le10(const EpdCore *c, int i)
 {
-    trace_cmd(c);
+    return (uint16_t)((c->arg[i] | (c->arg[i + 1] << 8)) & 0x3FF);
 }
+
+static uint16_t arg_be10(const EpdCore *c, int i)
+{
+    return (uint16_t)(((c->arg[i] << 8) | c->arg[i + 1]) & 0x3FF);
+}
+
+static void compose(EpdCore *c);
 
 /* ---- SSD1677 RAM addressing ------------------------------------------------
  * Datasheet (SSD16xx family) semantics of 0x11 / 0x44 / 0x45 / 0x4E / 0x4F:
@@ -240,13 +152,19 @@ void epd_core_flush_trace(EpdCore *c)
  * A RAM write (0x24 BW / 0x26 RED) stores the byte at the counter and then
  * advances it along the fast axis until its terminus, where the fast axis
  * returns to its start and the slow axis steps one; at the slow axis' terminus
- * the counter wraps back to its start as well.
- *
- * The gate scan direction (third byte of 0x01, see ssd_byte) lives in a spare
- * high bit of data_entry: it shares that register's reset lifetime (hardware
- * reset and 0x12 SW reset restore both), and epd_core.h is out of scope here. */
-#define SSD_DE_MASK      0x07       /* the three bits 0x11 actually carries */
-#define SSD_DE_GATE_REV  0x80       /* private: 0x01 TB, gate scan reversed */
+ * the counter wraps back to its start as well. */
+static void ssd_reset_regs(EpdCore *c)
+{
+    c->data_entry = 0x03;   /* 0x11 reset default: X inc, Y inc, AM = 0 */
+    c->gate_rev = false;    /* 0x01's default scan (a SW reset restores it too) */
+    c->x_start = 0; c->x_end = EPD_W - 1;
+    c->y_start = 0; c->y_end = EPD_H - 1;
+    c->x_cnt = 0; c->y_cnt = 0;
+    c->ctrl1 = 0; c->ctrl2 = 0;
+    c->border = 0;
+    c->custom_lut = false;
+    c->deep_sleep = false;
+}
 
 static uint16_t ssd_step_x(const EpdCore *c, bool inc)
 {
@@ -289,6 +207,7 @@ static void ssd_ram_write(EpdCore *c, uint8_t *plane, uint8_t b)
     }
 }
 
+/* Only called for a 0x22 value with the DISPLAY bit (0x04) set. */
 static EpdRefreshMode ssd_mode_for_ctrl2(uint8_t v, bool custom_lut)
 {
     if (custom_lut) return EPD_MODE_GRAY;
@@ -297,93 +216,59 @@ static EpdRefreshMode ssd_mode_for_ctrl2(uint8_t v, bool custom_lut)
     case 0xFC: case 0xC7: case 0xFF: case 0x1C: case 0xDC: return EPD_MODE_FAST;
     case 0xD7: return EPD_MODE_HALF;
     case 0xCC: return EPD_MODE_GRAY;
-    case 0xC0: case 0x03: return EPD_MODE_NONE;   /* power on / off only */
     default: return EPD_MODE_OTHER;
     }
 }
 
-static uint32_t mode_us(const EpdCore *c, EpdRefreshMode m)
-{
-    switch (m) {
-    case EPD_MODE_FULL: return c->timing.full_us;
-    case EPD_MODE_FAST: return c->timing.fast_us;
-    case EPD_MODE_HALF: return c->timing.half_us;
-    case EPD_MODE_GRAY: return c->timing.gray_us;
-    case EPD_MODE_NONE: return c->timing.power_us;
-    default: return c->timing.full_us;
-    }
-}
-
-static void request_busy(EpdCore *c, uint32_t us)
-{
-    c->busy = true;
-    c->busy_request_us = us;
-}
-
 static void ssd_master_activation(EpdCore *c)
 {
-    if (c->ctrl2 & 0x04) {   /* DISPLAY bit: run the waveform */
-        EpdRefreshMode m = ssd_mode_for_ctrl2(c->ctrl2, c->custom_lut);
-        if (m == EPD_MODE_NONE) m = EPD_MODE_OTHER;
-        c->last_mode = m;
-        c->last_ctrl2 = c->ctrl2;
-        c->refresh_count++;
-        epd_core_compose(c);
-        request_busy(c, mode_us(c, m));
-        if (c->ctrl2 & 0x20 || c->ctrl2 & 0x10) {
-            /* load LUT from OTP (0x20) or load temperature (0x10): back to OTP waveform */
-            if ((c->ctrl2 & 0x20)) c->custom_lut = false;
-        }
-    } else {
-        /* power / clock only */
-        request_busy(c, c->timing.power_us);
+    if (!(c->ctrl2 & 0x04)) {
+        request_busy(c, c->timing.power_us);   /* no DISPLAY bit: clock / analog power only */
+        return;
+    }
+    EpdRefreshMode m = ssd_mode_for_ctrl2(c->ctrl2, c->custom_lut);
+    c->last_mode = m;
+    c->last_ctrl2 = c->ctrl2;
+    c->refresh_count++;
+    compose(c);
+    request_busy(c, mode_us(c, m));
+    if (c->ctrl2 & 0x20) {
+        c->custom_lut = false;                 /* LOAD LUT from OTP: back to the OTP waveform */
     }
 }
 
-static void ssd_byte(EpdCore *c, uint8_t b)
+static void ssd_command(EpdCore *c, uint8_t b)
 {
-    if (!c->dc) {
-        /* new command */
-        trace_cmd(c);
-        c->cmd = b;
-        c->cmd_len = 0;
-        c->cmd_traced = false;
-        c->cmds_in++;
-        switch (b) {
-        case S_SW_RESET:
-            ssd_reset_regs(c);
-            request_busy(c, c->timing.power_us);
-            break;
-        case S_MASTER_ACT:
-            ssd_master_activation(c);
-            break;
-        case S_WRITE_RAM_BW: case S_WRITE_RAM_RED:
-            break;
-        case U_VER: case U_FLG: case U_RMTP:
-            c->probe_reads++;   /* not answered: line floats */
-            break;
-        case S_DRIVER_OUTPUT: case S_GATE_VOLTAGE: case S_SOURCE_VOLTAGE: case S_BOOSTER:
-        case S_DEEP_SLEEP: case S_DATA_ENTRY: case S_TEMP_SENSOR: case S_WRITE_TEMP:
-        case S_UPDATE_CTRL1: case S_UPDATE_CTRL2: case S_WRITE_VCOM: case S_WRITE_LUT:
-        case S_BORDER: case S_RAM_X_RANGE: case S_RAM_Y_RANGE: case S_AUTO_WRITE_BW:
-        case S_AUTO_WRITE_RED: case S_RAM_X_CNT: case S_RAM_Y_CNT:
-            break;
-        default:
-            c->unknown_cmds++;
-            c->last_unknown_cmd = b;
-            break;
-        }
-        return;
+    switch (b) {
+    case S_SW_RESET:
+        ssd_reset_regs(c);
+        request_busy(c, c->timing.power_us);
+        break;
+    case S_MASTER_ACT:
+        ssd_master_activation(c);
+        break;
+    case U_VER: case U_FLG: case U_RMTP:
+        c->probe_reads++;   /* not answered: line floats */
+        break;
+    case S_DRIVER_OUTPUT: case S_GATE_VOLTAGE: case S_SOURCE_VOLTAGE: case S_BOOSTER:
+    case S_DEEP_SLEEP: case S_DATA_ENTRY: case S_TEMP_SENSOR: case S_WRITE_TEMP:
+    case S_UPDATE_CTRL1: case S_UPDATE_CTRL2: case S_WRITE_RAM_BW: case S_WRITE_RAM_RED:
+    case S_WRITE_VCOM: case S_WRITE_LUT: case S_BORDER: case S_RAM_X_RANGE: case S_RAM_Y_RANGE:
+    case S_AUTO_WRITE_BW: case S_AUTO_WRITE_RED: case S_RAM_X_CNT: case S_RAM_Y_CNT:
+        break;
+    default:
+        c->unknown_cmds++;
+        c->last_unknown_cmd = b;
+        break;
     }
-    /* data byte */
-    if (c->cmd_len < sizeof(c->arg)) c->arg[c->cmd_len] = b;
-    c->cmd_len++;
+}
+
+static void ssd_data(EpdCore *c, uint8_t b)
+{
     switch (c->cmd) {
     case S_WRITE_RAM_BW: ssd_ram_write(c, c->plane0, b); break;
     case S_WRITE_RAM_RED: ssd_ram_write(c, c->plane1, b); break;
-    case S_DATA_ENTRY:
-        c->data_entry = (uint8_t)((c->data_entry & SSD_DE_GATE_REV) | (b & SSD_DE_MASK));
-        break;
+    case S_DATA_ENTRY: c->data_entry = b & 0x07; break;
     case S_DRIVER_OUTPUT:
         /* Bytes 1..2 are MUX (gate lines - 1); byte 3 carries the scan control.
          * The SSD16xx datasheet numbers it B[0] GD, B[1] SM, B[2] TB, with TB = 1
@@ -391,40 +276,30 @@ static void ssd_byte(EpdCore *c, uint8_t b)
          * into the same byte for a mirrorY mount. Either bit means "reverse the
          * gate scan", and the X4-class NO_FLIP profiles send 0x02 (SM only, both
          * bits clear), so honour both readings. */
-        if (c->cmd_len == 3) {
-            if (b & 0x05) c->data_entry |= SSD_DE_GATE_REV;
-            else c->data_entry &= (uint8_t)~SSD_DE_GATE_REV;
-        }
+        if (c->cmd_len == 3) c->gate_rev = (b & 0x05) != 0;
         break;
     case S_RAM_X_RANGE:
-        if (c->cmd_len == 2) c->x_start = (c->arg[0] | (c->arg[1] << 8)) & 0x3FF;
-        if (c->cmd_len == 4) c->x_end = (c->arg[2] | (c->arg[3] << 8)) & 0x3FF;
+        if (c->cmd_len == 2) c->x_start = arg_le10(c, 0);
+        if (c->cmd_len == 4) c->x_end = arg_le10(c, 2);
         break;
     case S_RAM_Y_RANGE:
-        if (c->cmd_len == 2) c->y_start = (c->arg[0] | (c->arg[1] << 8)) & 0x3FF;
-        if (c->cmd_len == 4) c->y_end = (c->arg[2] | (c->arg[3] << 8)) & 0x3FF;
+        if (c->cmd_len == 2) c->y_start = arg_le10(c, 0);
+        if (c->cmd_len == 4) c->y_end = arg_le10(c, 2);
         break;
-    case S_RAM_X_CNT: if (c->cmd_len == 2) c->x_cnt = (c->arg[0] | (c->arg[1] << 8)) & 0x3FF; break;
-    case S_RAM_Y_CNT: if (c->cmd_len == 2) c->y_cnt = (c->arg[0] | (c->arg[1] << 8)) & 0x3FF; break;
+    case S_RAM_X_CNT: if (c->cmd_len == 2) c->x_cnt = arg_le10(c, 0); break;
+    case S_RAM_Y_CNT: if (c->cmd_len == 2) c->y_cnt = arg_le10(c, 0); break;
     case S_UPDATE_CTRL1: c->ctrl1 = b; break;
     case S_UPDATE_CTRL2: c->ctrl2 = b; break;
     case S_BORDER: c->border = b; break;
     case S_WRITE_LUT: c->custom_lut = true; break;
-    case S_AUTO_WRITE_BW:
-        /* auto write: pattern in the byte, 0xF7 = fill 0xFF? datasheet: bits select the
-         * pattern; the firmware uses 0xF7 to clear to white. Fill the plane white. */
-        memset(c->plane0, (b & 0x80) ? 0xFF : 0x00, EPD_PLANE_BYTES);
+    case S_AUTO_WRITE_BW: case S_AUTO_WRITE_RED:
+        /* auto write: the whole plane at once; the firmware sends 0xF7 to clear
+         * to white, so bit 7 picks white (0xFF) or black (0x00) */
+        memset(c->cmd == S_AUTO_WRITE_BW ? c->plane0 : c->plane1, (b & 0x80) ? 0xFF : 0x00, EPD_PLANE_BYTES);
         request_busy(c, c->timing.power_us);
         break;
-    case S_AUTO_WRITE_RED:
-        memset(c->plane1, (b & 0x80) ? 0xFF : 0x00, EPD_PLANE_BYTES);
-        request_busy(c, c->timing.power_us);
-        break;
-    case S_DEEP_SLEEP:
-        c->deep_sleep = (b & 3) != 0;
-        break;
-    default:
-        break;
+    case S_DEEP_SLEEP: c->deep_sleep = (b & 3) != 0; break;
+    default: break;
     }
 }
 
@@ -443,6 +318,19 @@ static const uint8_t uc8279_mtp[48] = {
 static const uint8_t uc8179_ver[5] = {0x00, 0x00, 0x01, 0xFF, 0xFF};
 static const uint8_t uc_flg = 0x13;
 
+static void uc_reset_regs(EpdCore *c)
+{
+    c->uc_ptr = 0;
+    c->psr[0] = 0x0F; c->psr[1] = 0x00;
+    c->tres_w = EPD_W; c->tres_h = EPD_UC_GATES;
+    c->partial_in = false;
+    memset(c->ptl, 0, sizeof(c->ptl));
+    c->power_on = false;
+    c->uc_lut_loaded = false;
+    c->uc_cdi = 0x97;               /* MTP "Command Default Setting" byte 8 (docs/grayscale.md) */
+    c->deep_sleep = false;
+}
+
 static void uc_prepare_probe(EpdCore *c, uint8_t cmd)
 {
     c->probe_reads++;
@@ -460,7 +348,6 @@ static void uc_prepare_probe(EpdCore *c, uint8_t cmd)
         /* dummy byte, then MTP[0..47] (the desk unit's dump for UC8279; a UC8179
          * gets the same block with LUT_VER 0x01 at 0x1A) */
         memset(c->probe_buf, 0, sizeof(c->probe_buf));
-        c->probe_buf[0] = 0x00;
         memcpy(c->probe_buf + 1, uc8279_mtp, 48);
         if (c->variant == EPD_UC8179) c->probe_buf[1 + 0x1A] = 0x01;
         c->probe_len = 49;
@@ -493,81 +380,75 @@ static void uc_plane_write(EpdCore *c, uint8_t *plane, uint8_t b)
     c->uc_ptr++;
 }
 
-static void uc_byte(EpdCore *c, uint8_t b)
+static void uc_command(EpdCore *c, uint8_t b)
 {
-    if (!c->dc) {
-        trace_cmd(c);
-        c->cmd = b;
-        c->cmd_len = 0;
-        c->cmd_traced = false;
-        c->cmds_in++;
-        switch (b) {
-        case U_DTM1: case U_DTM2:
-            c->uc_ptr = 0;
-            break;
-        case U_PON:
-            c->power_on = true;
-            request_busy(c, c->timing.power_us);
-            break;
-        case U_POF:
-            c->power_on = false;
-            request_busy(c, c->timing.power_us);
-            break;
-        case U_DRF: {
-            EpdRefreshMode m;
-            if (c->uc_lut_loaded && (c->psr[0] & 0x20)) {
-                m = EPD_MODE_GRAY;
-            } else if (c->partial_in) {
-                m = EPD_MODE_FAST;
-            } else {
-                m = (c->last_ctrl2 == 0x5A) ? EPD_MODE_FAST : EPD_MODE_FULL;
-            }
-            c->last_mode = m;
-            c->refresh_count++;
-            epd_core_compose(c);
-            request_busy(c, mode_us(c, m));
-            break;
+    switch (b) {
+    case U_DTM1: case U_DTM2:
+        c->uc_ptr = 0;
+        break;
+    case U_PON:
+        c->power_on = true;
+        request_busy(c, c->timing.power_us);
+        break;
+    case U_POF:
+        c->power_on = false;
+        request_busy(c, c->timing.power_us);
+        break;
+    case U_DRF: {
+        EpdRefreshMode m;
+        if (c->uc_lut_loaded && (c->psr[0] & 0x20)) {
+            m = EPD_MODE_GRAY;
+        } else if (c->partial_in) {
+            m = EPD_MODE_FAST;
+        } else {
+            m = (c->last_ctrl2 == 0x5A) ? EPD_MODE_FAST : EPD_MODE_FULL;
         }
-        case U_PTIN: c->partial_in = true; break;
-        case U_PTOUT: c->partial_in = false; break;
-        case U_VER: case U_FLG: case U_RMTP:
-            uc_prepare_probe(c, b);
-            break;
-        case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4:
-            /* a new table replaces the old one; bytes not sent read as zero */
-            memset(c->uc_lut[b - U_LUT0], 0, EPD_UC_LUT_BYTES);
-            c->uc_lut_len[b - U_LUT0] = 0;
-            break;
-        case U_PSR: case U_PWR: case U_PFS: case U_DSLP: case U_PLL: case U_CDI:
-        case U_TRES: case U_GSST: case U_PTL: case U_CCSET: case U_GSCAN: case U_TSSET:
-        case U_BTST: case U_TCON: case U_PWS: case U_VDCS: case U_TSC: case U_TSE: case U_LPD: case U_AUTO:
-            break;
-        default:
-            c->unknown_cmds++;
-            c->last_unknown_cmd = b;
-            break;
-        }
-        return;
+        c->last_mode = m;
+        c->refresh_count++;
+        compose(c);
+        request_busy(c, mode_us(c, m));
+        break;
     }
-    if (c->cmd_len < sizeof(c->arg)) c->arg[c->cmd_len] = b;
-    c->cmd_len++;
+    case U_PTIN: c->partial_in = true; break;
+    case U_PTOUT: c->partial_in = false; break;
+    case U_VER: case U_FLG: case U_RMTP:
+        uc_prepare_probe(c, b);
+        break;
+    case U_LUT0: case U_LUT0 + 1: case U_LUT0 + 2: case U_LUT0 + 3: case U_LUT4:
+        /* a new table replaces the old one; bytes not sent read as zero */
+        memset(c->uc_lut[b - U_LUT0], 0, EPD_UC_LUT_BYTES);
+        c->uc_lut_len[b - U_LUT0] = 0;
+        break;
+    case U_PSR: case U_PWR: case U_PFS: case U_DSLP: case U_PLL: case U_CDI:
+    case U_TRES: case U_GSST: case U_PTL: case U_CCSET: case U_GSCAN: case U_TSSET:
+    case U_BTST: case U_TCON: case U_PWS: case U_VDCS: case U_TSC: case U_TSE: case U_LPD: case U_AUTO:
+        break;
+    default:
+        c->unknown_cmds++;
+        c->last_unknown_cmd = b;
+        break;
+    }
+}
+
+static void uc_data(EpdCore *c, uint8_t b)
+{
     switch (c->cmd) {
     case U_DTM1: uc_plane_write(c, c->plane0, b); break;
     case U_DTM2: uc_plane_write(c, c->plane1, b); break;
     case U_PSR: if (c->cmd_len <= 2) c->psr[c->cmd_len - 1] = b; break;
     case U_TRES:
-        if (c->cmd_len == 2) c->tres_w = ((c->arg[0] << 8) | c->arg[1]) & 0x3FF;
-        if (c->cmd_len == 4) c->tres_h = ((c->arg[2] << 8) | c->arg[3]) & 0x3FF;
+        if (c->cmd_len == 2) c->tres_w = arg_be10(c, 0);
+        if (c->cmd_len == 4) c->tres_h = arg_be10(c, 2);
         break;
     case U_PTL:
-        if (c->cmd_len == 2) c->ptl[0] = ((c->arg[0] << 8) | c->arg[1]) & 0x3FF & ~7;
-        if (c->cmd_len == 4) c->ptl[1] = ((c->arg[2] << 8) | c->arg[3]) & 0x3FF;
-        if (c->cmd_len == 6) c->ptl[2] = ((c->arg[4] << 8) | c->arg[5]) & 0x3FF;
-        if (c->cmd_len == 8) c->ptl[3] = ((c->arg[6] << 8) | c->arg[7]) & 0x3FF;
+        if (c->cmd_len == 2) c->ptl[0] = arg_be10(c, 0) & ~7;
+        if (c->cmd_len == 4) c->ptl[1] = arg_be10(c, 2);
+        if (c->cmd_len == 6) c->ptl[2] = arg_be10(c, 4);
+        if (c->cmd_len == 8) c->ptl[3] = arg_be10(c, 6);
         break;
     case U_TSSET: c->last_ctrl2 = b; break;
     case U_CDI: if (c->cmd_len == 1) c->uc_cdi = b; break;
-    case U_LUT0: case 0x21: case 0x22: case 0x23: case U_LUT4: {
+    case U_LUT0: case U_LUT0 + 1: case U_LUT0 + 2: case U_LUT0 + 3: case U_LUT4: {
         int t = c->cmd - U_LUT0;
         if (c->cmd_len <= EPD_UC_LUT_BYTES) {
             c->uc_lut[t][c->cmd_len - 1] = b;
@@ -581,17 +462,102 @@ static void uc_byte(EpdCore *c, uint8_t b)
     }
 }
 
+/* ---- wires ---------------------------------------------------------------- */
+void epd_core_init(EpdCore *c, EpdVariant v)
+{
+    memset(c, 0, sizeof(*c));
+    c->variant = v;
+    c->cmd = -1;
+    /* Desk unit (UC8279, CrossPoint 1.6.0): DRF full 1326 ms, DRF DU 483 ms, PON 40 ms.
+     * SSD1677 units: support doc says full ~1800 ms, partial ~500 ms. */
+    bool ssd = v == EPD_SSD1677;
+    c->timing.full_us = ssd ? 1800000 : 1326000;
+    c->timing.fast_us = ssd ? 500000 : 483000;
+    c->timing.half_us = c->timing.full_us;
+    c->timing.gray_us = 600000;
+    c->timing.power_us = ssd ? 20000 : 40000;
+    memset(c->plane0, 0xFF, sizeof(c->plane0));
+    memset(c->plane1, 0xFF, sizeof(c->plane1));
+    memset(c->image, 0xFF, sizeof(c->image));
+    c->waveform_gray = true;        /* default since the device photo of 2026-09-07 (docs/grayscale.md) */
+    c->gray_k = EPD_GRAY_K_DEFAULT;
+    c->frame_us = EPD_FRAME_US_DEFAULT;
+    ssd_reset_regs(c);
+    uc_reset_regs(c);
+    c->image_dirty = true;
+}
+
+/* Hardware reset (RST pulled low). RAM contents survive on both families (not a DSLP). */
+static void core_reset(EpdCore *c)
+{
+    trace_cmd(c);
+    c->cmd = -1;
+    c->cmd_len = 0;
+    ssd_reset_regs(c);
+    uc_reset_regs(c);
+    c->probe_read_active = false;
+    c->bb_nbits = 0;
+    c->busy = false;
+    c->busy_request_us = 0;
+    c->resets++;
+}
+
+void epd_core_set_rst(EpdCore *c, bool line_high)
+{
+    bool was = c->in_reset;
+    c->in_reset = !line_high;
+    if (!was && c->in_reset) {
+        core_reset(c);
+        c->busy = true;            /* BUSY asserted while in reset (SSD: HIGH, UC: BUSY_N LOW) */
+    } else if (was && !c->in_reset) {
+        /* after the reset pulse the controller stays busy for its power-up time,
+         * which gives firmware that waits for the BUSY edge something to see */
+        request_busy(c, c->timing.power_us);
+    }
+}
+
+void epd_core_set_cs(EpdCore *c, bool selected)
+{
+    if (c->cs && !selected) {
+        /* deselect ends a probe read-out and drops a partial bit-banged byte */
+        c->probe_read_active = false;
+        c->bb_nbits = 0;
+    }
+    c->cs = selected;
+}
+
+void epd_core_set_dc(EpdCore *c, bool data)
+{
+    c->dc = data;
+    if (data && c->cs && c->variant != EPD_SSD1677) {
+        /* A UC part starts driving the read-out right after the command byte
+         * when the master switches DC high and releases the line. */
+        if (c->cmd == U_VER || c->cmd == U_FLG || c->cmd == U_RMTP) {
+            c->probe_read_active = true;
+            c->probe_bit = 0;
+        }
+    }
+}
+
 void epd_core_byte(EpdCore *c, uint8_t b)
 {
     if (!c->cs || c->in_reset) {
         return;
     }
     c->bytes_in++;
-    if (c->variant == EPD_SSD1677) {
-        ssd_byte(c, b);
-    } else {
-        uc_byte(c, b);
+    bool ssd = c->variant == EPD_SSD1677;
+    if (!c->dc) {
+        trace_cmd(c);               /* a new command: the previous one is complete */
+        c->cmd = b;
+        c->cmd_len = 0;
+        c->cmd_traced = false;
+        c->cmds_in++;
+        if (ssd) ssd_command(c, b); else uc_command(c, b);
+        return;
     }
+    if (c->cmd_len < sizeof(c->arg)) c->arg[c->cmd_len] = b;
+    c->cmd_len++;
+    if (ssd) ssd_data(c, b); else uc_data(c, b);
 }
 
 void epd_core_busy_done(EpdCore *c)
@@ -607,12 +573,10 @@ int epd_core_line_level(const EpdCore *c)
     if (!c->probe_read_active || c->variant == EPD_SSD1677 || !c->cs) {
         return -1;
     }
-    int total = c->probe_len * 8;
-    if (c->probe_bit >= total) {
+    if (c->probe_bit >= c->probe_len * 8) {
         return -1;
     }
-    uint8_t byte = c->probe_buf[c->probe_bit / 8];
-    return (byte >> (7 - (c->probe_bit % 8))) & 1;
+    return (c->probe_buf[c->probe_bit / 8] >> (7 - (c->probe_bit % 8))) & 1;
 }
 
 int epd_core_sclk_rise(EpdCore *c, int mosi)
@@ -623,11 +587,9 @@ int epd_core_sclk_rise(EpdCore *c, int mosi)
         return epd_core_line_level(c);
     }
     c->bb_shift = (uint8_t)((c->bb_shift << 1) | (mosi & 1));
-    c->bb_nbits++;
-    if (c->bb_nbits == 8) {
-        uint8_t b = c->bb_shift;
+    if (++c->bb_nbits == 8) {
         c->bb_nbits = 0;
-        epd_core_byte(c, b);
+        epd_core_byte(c, c->bb_shift);
     }
     return -1;
 }
@@ -638,73 +600,6 @@ int epd_core_sclk_fall(EpdCore *c)
     /* the controller shifts the next bit out on the falling edge */
     c->probe_bit++;
     return epd_core_line_level(c);
-}
-
-/* ---- compose -------------------------------------------------------------- */
-void epd_core_compose(EpdCore *c)
-{
-    if (c->variant == EPD_SSD1677) {
-        bool gray = c->custom_lut && !(c->ctrl1 & 0x40);
-        c->image_gray_approx = gray;
-        /* Gate scan direction (0x01 third byte, TB). Clear -- the X4-class
-         * NO_FLIP profile, the only thing CrossPoint or the stock ever send --
-         * means the gates are physically reversed against the RAM rows: RAM row
-         * 479 is the top of the glass. TB set reverses the scan, so the same RAM
-         * appears mirrored vertically (the driver's mirrorY mount). */
-        bool gate_rev = (c->data_entry & SSD_DE_GATE_REV) != 0;
-        for (int r = 0; r < EPD_H; r++) {
-            int ram_row = gate_rev ? r : (EPD_H - 1 - r);
-            const uint8_t *bw = &c->plane0[ram_row * EPD_WB];
-            const uint8_t *red = &c->plane1[ram_row * EPD_WB];
-            uint8_t *dst = &c->image[r * EPD_W];
-            for (int x = 0; x < EPD_W; x++) {
-                int bit = 7 - (x & 7);
-                int b = (bw[x >> 3] >> bit) & 1;
-                if (gray) {
-                    int rr = (red[x >> 3] >> bit) & 1;
-                    /* two planes -> four levels (approximation): bw=1,red=1 white ... bw=0,red=0 black */
-                    static const uint8_t lv[4] = {0, 85, 170, 255};
-                    dst[x] = lv[(b << 1) | rr];
-                } else {
-                    dst[x] = b ? 255 : 0;
-                }
-            }
-        }
-    } else {
-        /* UC: the NEW plane (DTM2) is what the panel shows after DRF, 1 = white.
-         * Visible gates are 120..599 of the 600-gate scan (Uc8279X4Driver gateOffset). */
-        bool gray = c->uc_lut_loaded && (c->psr[0] & 0x20);
-        bool wave = gray && c->waveform_gray;
-        c->image_gray_approx = gray && !wave;
-        c->image_gray_waveform = wave;
-        if (wave) {
-            epd_core_build_gray_map(c);
-        }
-        int off = (c->tres_h > EPD_H) ? (c->tres_h - EPD_H) : 0;   /* 120 for 600 gates */
-        for (int r = 0; r < EPD_H; r++) {
-            const uint8_t *nw = &c->plane1[(off + r) * EPD_WB];
-            const uint8_t *od = &c->plane0[(off + r) * EPD_WB];
-            uint8_t *dst = &c->image[r * EPD_W];
-            for (int x = 0; x < EPD_W; x++) {
-                int bit = 7 - (x & 7);
-                int n = (nw[x >> 3] >> bit) & 1;
-                if (wave) {
-                    /* the pixel keeps its reflectance; this refresh's transition class moves it */
-                    int o = (od[x >> 3] >> bit) & 1;
-                    dst[x] = c->gray_map[(o << 1) | n][dst[x]];
-                } else if (gray) {
-                    /* AA planes are streamed inverted: plane0 = ~(base|lsb), plane1 = ~(plane0 ^ msb).
-                     * Approximate: both 0 -> white(ish)?? keep it simple: level from the two bits. */
-                    int o = (od[x >> 3] >> bit) & 1;
-                    static const uint8_t lv[4] = {255, 170, 85, 0};
-                    dst[x] = lv[(o << 1) | n];
-                } else {
-                    dst[x] = n ? 255 : 0;
-                }
-            }
-        }
-    }
-    c->image_dirty = true;
 }
 
 /* ---- UC81xx LUT interpreter and grey model (docs/grayscale.md) ----------- */
@@ -775,7 +670,8 @@ int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit)
     return 4;                   /* BB */
 }
 
-void epd_core_build_gray_map(EpdCore *c)
+/* gray_map[] and the frame count from the loaded bank, once per LUT refresh. */
+static void build_gray_map(EpdCore *c)
 {
     EpdLutSeq seq;
     for (int cls = 0; cls < 4; cls++) {
@@ -788,4 +684,65 @@ void epd_core_build_gray_map(EpdCore *c)
     epd_core_lut_phases(c->uc_lut[0], c->uc_lut_len[0], &seq);
     c->last_lut_frames = seq.frames;
     c->last_lut_us = seq.frames * c->frame_us;
+}
+
+/* ---- compose: the visible image after a refresh ---------------------------
+ * Both families hold two planes, and a pixel's level is a function of its two
+ * RAM bits, idx = plane0 bit << 1 | plane1 bit (RAM bit 1 = white):
+ *   SSD1677  plane0 = BW, plane1 = RED. Mono shows BW; a 0x32 LUT (unless 0x21
+ *            bypasses RED) is approximated as four levels.
+ *   UC81xx   plane0 = OLD (DTM1), plane1 = NEW (DTM2). Mono (OTP waveform) shows
+ *            NEW; an external LUT bank either moves each pixel's reflectance by
+ *            its transition class (waveform model, gray_map) or is approximated
+ *            as four levels from the two planes (the fixed table).
+ * Row mapping: SSD1677 with the X4-class NO_FLIP scan (the only one CrossPoint or
+ * the stock send) has the gates reversed against the RAM rows, so RAM row 479 is
+ * the top of the glass; 0x01 TB reverses that. A UC part shows gates 120..599 of
+ * its 600-gate scan (Uc8279X4Driver gateOffset), i.e. the last 480 TRES rows. */
+static const uint8_t lv_ssd_mono[4] = {0, 0, 255, 255};
+static const uint8_t lv_ssd_approx[4] = {0, 85, 170, 255};
+static const uint8_t lv_uc_mono[4] = {0, 255, 0, 255};
+static const uint8_t lv_uc_approx[4] = {255, 170, 85, 0};
+
+static void compose(EpdCore *c)
+{
+    const uint8_t *lv;
+    bool wave = false;
+    int row0, row_step;
+    if (c->variant == EPD_SSD1677) {
+        bool gray = c->custom_lut && !(c->ctrl1 & 0x40);
+        c->image_gray_approx = gray;
+        lv = gray ? lv_ssd_approx : lv_ssd_mono;
+        row0 = c->gate_rev ? 0 : EPD_H - 1;
+        row_step = c->gate_rev ? 1 : -1;
+    } else {
+        bool gray = c->uc_lut_loaded && (c->psr[0] & 0x20);
+        wave = gray && c->waveform_gray;
+        c->image_gray_approx = gray && !wave;
+        c->image_gray_waveform = wave;
+        if (wave) {
+            build_gray_map(c);
+        }
+        lv = gray ? lv_uc_approx : lv_uc_mono;
+        int gates = c->tres_h < EPD_UC_GATES ? c->tres_h : EPD_UC_GATES;
+        row0 = gates > EPD_H ? gates - EPD_H : 0;   /* 120 for 600 gates */
+        row_step = 1;
+    }
+    for (int r = 0; r < EPD_H; r++) {
+        int row = row0 + r * row_step;
+        const uint8_t *p0 = &c->plane0[row * EPD_WB];
+        const uint8_t *p1 = &c->plane1[row * EPD_WB];
+        uint8_t *dst = &c->image[r * EPD_W];
+        for (int xb = 0; xb < EPD_WB; xb++, dst += 8) {
+            unsigned a = p0[xb], b = p1[xb];
+            for (int i = 0; i < 8; i++) {
+                unsigned s = 7 - i;
+                unsigned idx = ((a >> s) & 1) << 1 | ((b >> s) & 1);
+                /* waveform: the pixel keeps its reflectance and this refresh's
+                 * transition class moves it; otherwise a fixed level */
+                dst[i] = wave ? c->gray_map[idx][dst[i]] : lv[idx];
+            }
+        }
+    }
+    c->image_dirty = true;
 }

@@ -1,25 +1,10 @@
-/* Host unit tests for the panel cores (no framework: asserts + counters). */
-#include "epd_core.h"
-#include <stdio.h>
+/* Host unit tests for the panel cores. */
+#include "wire.h"
 #include <stdlib.h>
 #include <string.h>
 
-static int fails = 0;
-#define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
-
-static void cmd(EpdCore *c, uint8_t b) { epd_core_set_dc(c, false); epd_core_set_cs(c, true); epd_core_byte(c, b); epd_core_set_cs(c, false); }
-static void dat(EpdCore *c, uint8_t b) { epd_core_set_dc(c, true); epd_core_set_cs(c, true); epd_core_byte(c, b); epd_core_set_cs(c, false); }
-static void datn(EpdCore *c, const uint8_t *d, size_t n) { epd_core_set_dc(c, true); epd_core_set_cs(c, true); for (size_t i = 0; i < n; i++) epd_core_byte(c, d[i]); epd_core_set_cs(c, false); }
-
 /* The SSD1677 driver's setRamArea(0,0,800,480): X inc, Y dec, Y range 479..0, counters (0,479). */
-static void ssd_full_window(EpdCore *c)
-{
-    cmd(c, 0x11); dat(c, 0x01);
-    cmd(c, 0x44); dat(c, 0); dat(c, 0); dat(c, 0x1F); dat(c, 0x03);
-    cmd(c, 0x45); dat(c, 0xDF); dat(c, 0x01); dat(c, 0); dat(c, 0);
-    cmd(c, 0x4E); dat(c, 0); dat(c, 0);
-    cmd(c, 0x4F); dat(c, 0xDF); dat(c, 0x01);
-}
+static void ssd_full_window(EpdCore *c) { ssd_window(c, 0x01, 0, 799, 479, 0); }
 
 static void test_ssd1677_basic(void)
 {
@@ -72,11 +57,7 @@ static void test_ssd1677_window(void)
     EpdCore *c = malloc(sizeof(*c));
     epd_core_init(c, EPD_SSD1677);
     /* setRamArea(x=16, y=8, w=16, h=2): y' = 480-8-2 = 470; X range 16..31, Y range 471..470 */
-    cmd(c, 0x11); dat(c, 0x01);
-    cmd(c, 0x44); dat(c, 16); dat(c, 0); dat(c, 31); dat(c, 0);
-    cmd(c, 0x45); dat(c, 471 & 0xFF); dat(c, 471 >> 8); dat(c, 470 & 0xFF); dat(c, 470 >> 8);
-    cmd(c, 0x4E); dat(c, 16); dat(c, 0);
-    cmd(c, 0x4F); dat(c, 471 & 0xFF); dat(c, 471 >> 8);
+    ssd_window(c, 0x01, 16, 31, 471, 470);
     uint8_t win[4] = {0x00, 0xFF, 0xFF, 0x00};
     cmd(c, 0x24); datn(c, win, 4);
     cmd(c, 0x21); dat(c, 0x00); cmd(c, 0x22); dat(c, 0xFC); cmd(c, 0x20);
@@ -511,7 +492,7 @@ int main(void)
     test_waveform_four_levels();
     test_waveform_off_and_otp_unchanged();
     test_ssd1677_gray_unchanged_by_flag();
-    if (fails) { printf("%d failure(s)\n", fails); return 1; }
-    printf("epd core tests: OK\n");
+    if (fails) { printf("%d failure(s) in %d checks\n", fails, checks); return 1; }
+    printf("epd core tests: OK (%d checks)\n", checks);
     return 0;
 }

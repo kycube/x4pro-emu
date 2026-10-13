@@ -3,7 +3,7 @@
  * SSD1677, UC8179 and UC8279 (X4 variant). Pure C, no QEMU headers.
  *
  * Feed the core what the wires carry: chip-select and data/command levels,
- * SPI bytes, a reset pulse, and the bit-banged probe clock. Read back the
+ * SPI bytes, the reset line, and the bit-banged probe clock. Read back the
  * visible image, the BUSY request, and statistics. The host decides what
  * "time" means: after epd_core_byte() the core may set busy_request_us > 0,
  * and the host is expected to drive BUSY for that long (guest time) and
@@ -71,7 +71,7 @@ typedef enum {
 } EpdVariant;
 
 typedef enum {
-    EPD_MODE_NONE = 0,
+    EPD_MODE_NONE = 0,  /* no refresh yet */
     EPD_MODE_FULL,
     EPD_MODE_FAST,
     EPD_MODE_HALF,
@@ -79,18 +79,19 @@ typedef enum {
     EPD_MODE_OTHER,
 } EpdRefreshMode;
 
-/* Refresh durations in microseconds; the host fills these (device defaults). */
+/* BUSY durations in microseconds: epd_core_init() sets the device defaults, the host may override. */
 typedef struct {
     uint32_t full_us;
     uint32_t fast_us;
     uint32_t half_us;
     uint32_t gray_us;
-    uint32_t power_us;   /* power on/off, soft reset, auto-fill */
+    uint32_t power_us;   /* power on/off, soft reset, auto-fill, the reset pulse */
 } EpdTiming;
 
 typedef struct EpdCore EpdCore;
 
-/* Optional trace callback: one panel command with its data. */
+/* Optional trace callback: one panel command with its data, emitted when the next
+ * command starts, at a reset, or when the BUSY interval it started ends. */
 typedef void (*EpdTraceFn)(void *opaque, uint8_t cmd, const uint8_t *data, size_t len, bool truncated);
 
 struct EpdCore {
@@ -101,7 +102,7 @@ struct EpdCore {
     bool cs;            /* true = selected (line LOW) */
     bool dc;            /* true = data (line HIGH) */
     bool in_reset;      /* RST line LOW */
-    bool busy;          /* BUSY output as the SSD1677 drives it (busy = HIGH); UC: idle HIGH */
+    bool busy;          /* the controller is busy (the host drives the pin: SSD1677 HIGH, UC81xx BUSY_N LOW) */
     uint32_t busy_request_us;   /* set by the core, consumed by the host */
 
     /* command state */
@@ -111,7 +112,8 @@ struct EpdCore {
     uint8_t arg[256];   /* first bytes of the current command's data */
 
     /* SSD1677 RAM addressing */
-    uint8_t data_entry;             /* 0x11 */
+    uint8_t data_entry;             /* 0x11: bit0 X inc, bit1 Y inc, bit2 AM (Y first) */
+    bool gate_rev;                  /* 0x01 third byte: gate scan reversed (TB) */
     uint16_t x_start, x_end, y_start, y_end;   /* 0x44 / 0x45 (pixel / row units) */
     uint16_t x_cnt, y_cnt;          /* 0x4E / 0x4F */
     uint8_t ctrl1, ctrl2;           /* 0x21 / 0x22 */
@@ -140,12 +142,12 @@ struct EpdCore {
     bool image_dirty;
     bool image_gray_approx;         /* last refresh composed 4 levels from two planes (fixed table) */
 
-    /* Waveform-level grey model (docs/grayscale.md), off by default. When on, a
-     * refresh that runs the external LUT bank moves each pixel's reflectance
-     * (image[] itself, 0..255) by its transition class: every frame at VDH takes
-     * gray_k off, every frame at VDL adds gray_k, GND/VCOM/floating frames hold,
-     * saturating at 0 and 255. OTP refreshes (no LUT, or PSR REG=0) drive the
-     * new bit fully, as the approximation does. */
+    /* Waveform-level grey model (docs/grayscale.md), on by default (QOM waveform-gray;
+     * off = the fixed table above). A UC refresh that runs the external LUT bank moves
+     * each pixel's reflectance (image[] itself, 0..255) by its transition class: every
+     * frame at VDH takes gray_k off, every frame at VDL adds gray_k, GND/VCOM/floating
+     * frames hold, saturating at 0 and 255. OTP refreshes (no LUT, or PSR REG=0) drive
+     * the new bit fully. The SSD1677's 0x32 LUT always uses the fixed table. */
     bool waveform_gray;
     int gray_k;                     /* EPD_GRAY_K_DEFAULT */
     uint32_t frame_us;              /* EPD_FRAME_US_DEFAULT; only used for last_lut_us */
@@ -178,13 +180,11 @@ struct EpdCore {
 };
 
 void epd_core_init(EpdCore *c, EpdVariant v);
-void epd_core_reset(EpdCore *c);                 /* hardware reset (RST low) */
 void epd_core_set_cs(EpdCore *c, bool selected);
 void epd_core_set_dc(EpdCore *c, bool data);
-void epd_core_set_rst(EpdCore *c, bool line_high);
+void epd_core_set_rst(EpdCore *c, bool line_high);   /* a falling edge resets the controller */
 void epd_core_byte(EpdCore *c, uint8_t b);       /* one SPI byte from the master */
 void epd_core_busy_done(EpdCore *c);             /* host: the BUSY interval elapsed */
-void epd_core_flush_trace(EpdCore *c);           /* emit the pending command to the trace */
 
 /* Bit-banged probe: call on each SCLK rising edge with the MOSI level, and on
  * each falling edge. Returns the level the controller drives on the shared
@@ -192,9 +192,6 @@ void epd_core_flush_trace(EpdCore *c);           /* emit the pending command to 
 int epd_core_sclk_rise(EpdCore *c, int mosi);
 int epd_core_sclk_fall(EpdCore *c);
 int epd_core_line_level(const EpdCore *c);       /* current driven level or -1 */
-
-/* Compose the visible image from the planes (called by refresh; also usable by tests). */
-void epd_core_compose(EpdCore *c);
 
 /* ---- UC81xx LUT interpreter and grey model (docs/grayscale.md) ---- */
 /* Parse one 0x20..0x24 table of len <= EPD_UC_LUT_BYTES bytes (a shorter table
@@ -206,8 +203,6 @@ uint8_t epd_core_lut_apply(const EpdLutSeq *seq, uint8_t reflectance, int k);
 /* Which table a pixel's (old, new) RAM bits select under the current CDI DDX:
  * 1 = WW (0x21), 2 = BW (0x22), 3 = WB (0x23), 4 = BB (0x24). */
 int epd_core_lut_index(const EpdCore *c, int old_bit, int new_bit);
-/* Rebuild gray_map[] from the loaded bank (called by compose; usable by tests). */
-void epd_core_build_gray_map(EpdCore *c);
 const char *epd_variant_name(EpdVariant v);
 const char *epd_mode_name(EpdRefreshMode m);
 
