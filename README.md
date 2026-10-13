@@ -17,8 +17,8 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
 - **Run the real firmware.** The stock app boots to Home, opens and pages books, runs its menu,
   light panel and settings, fades its front light, and its WiFi start comes up and stops itself
   cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. The stock's rewrite, XTOS Licorice 261013,
-  reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes; its USB disk mode
-  and app installs are not emulated yet ([docs/stock-licorice.md](docs/stock-licorice.md)).
+  reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes, and enters its USB
+  disk mode; installing apps on it is not mapped yet ([docs/stock-licorice.md](docs/stock-licorice.md)).
   A raw 16 MB flash dump runs as it comes off the device; so does a fresh build.
 - **Drive it like a device.** `x4emu tap`, `swipe`, `press`, `hold`, `chord`, `home`, `battery`,
   `light`, `screenshot --diff`, `wait-text`, `wait-refresh`, `state` — every command can print JSON.
@@ -94,6 +94,17 @@ The models are checked against the desk unit, not just against datasheets:
   the firmware encrypts it with the SoC's AES accelerator through DMA, and the AES block is checked
   against a host AES in every block mode (`tests/test_aes.py`, `tests/test_lua_state.py`).
 
+## XTOS Licorice, the stock's new generation
+
+![XTOS Licorice in the emulator: its Bookshelf, the side drawer, a book page and the light panel](docs/images/licorice.png)
+
+In October 2026 Xteink replaced the 7.x firmware with a rewrite, **XTOS Licorice**. The emulator runs it
+from the device's own dump: the Bookshelf, the side drawer, the Desktop, All files and the reader, the
+side buttons, the front light, Dark mode, Wi-Fi and Bluetooth toggles, sleep and wake, auto power-off
+and USB mode (`tests/test_licorice.py`, `tests/test_usb_otg.py`). One panel-model fix was needed:
+Licorice scans the panel the other way up from every earlier firmware. What changed, what runs and
+what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
+
 ## Lua apps and a gamebook
 
 The stock firmware (7.5.4 to 7.6.8) shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app
@@ -112,9 +123,10 @@ real reader, where it keeps your place between visits. Write your own with
 
 ## What is not emulated
 
-USB mass storage, WiFi and Bluetooth traffic (the radio comes up, finds no air and stops), cycle
-timing (refresh times are the device's measured ones; CPU speed is not), the electrical side of the
-GPIO matrix, RMT, I2S and USB OTG. Deep sleep is a paused VM followed by a modelled reset. The details,
+USB mass-storage traffic (the USB OTG core comes up and waits for a computer, but no computer sees the
+disk), WiFi and Bluetooth traffic (the radio comes up, finds no air and stops), cycle timing (refresh
+times are the device's measured ones; CPU speed is not), the electrical side of the GPIO matrix, RMT and
+I2S. Deep sleep is a paused VM followed by a modelled reset. The details,
 with what a firmware sees, are in [docs/hardware.md](docs/hardware.md#what-is-not-emulated-how-it-shows-up-for-a-firmware-developer).
 
 ## Documentation

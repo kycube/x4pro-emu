@@ -1,7 +1,7 @@
 From 728d1660ea13f07bf05c3c50ef6849086abc3899 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 18:56:35 -0500
-Subject: [PATCH 23/35] xteink-x4pro: GT911 frames latch until the clear; a
+Subject: [PATCH 23/36] xteink-x4pro: GT911 frames latch until the clear; a
  change meanwhile is the next frame
 
 The model made every input change a new frame at once, overwriting the

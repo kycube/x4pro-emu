@@ -15,7 +15,7 @@ recorded under `docs/device/`. When the doc and the struct disagree, the struct 
 | PSRAM | 8 MB embedded octal (AP vendor id 0x0d, 64 Mbit, "AP_3v3"), 80 MHz | device boot log, efuse `PSRAM_CAP=8M`, `PSRAM_VENDOR=AP_3v3` |
 | MAC | 98:c3:77:be:ea:30 | device |
 | eFuse | no secure boot, no flash encryption, all key purposes USER, USB Serial/JTAG enabled | `docs/device/efuse-summary.txt`; raw words in `efuse-dump.txt` (replayed by `tools/mkefuse.py`) |
-| USB | native USB on GPIO19 (D-) / GPIO20 (D+); console is the USB Serial/JTAG peripheral; TinyUSB MSC only from the file-transfer screen | doc; device enumerates 0x303A:0x1001 "USB JTAG_serial debug unit" |
+| USB | native USB on GPIO19 (D-) / GPIO20 (D+); console is the USB Serial/JTAG peripheral; TinyUSB MSC on the USB OTG (DWC2) core only in USB mode | doc; device enumerates 0x303A:0x1001 "USB JTAG_serial debug unit", in USB mode 0x303A:0x4002 (the emulator's built-in host reads the same ID, `docs/usb-otg.md`) |
 
 Peripheral bases (ESP-IDF v5.5 `reg_base.h`): GPIO 0x60004000, RTC_CNTL 0x60008000, RTC_IO 0x60008400,
 IO_MUX 0x60009000, I2C0 0x60013000, LEDC 0x60019000, SPI2 0x60024000, SPI3 0x60025000, SDMMC 0x60028000,
@@ -279,9 +279,11 @@ in `x4emu state` without reading the log.
 
 The short list is in the README; this is the full one, with what a firmware sees.
 
-- **USB mass storage / TinyUSB / USB OTG**: absent. CrossPoint's "File Transfer" screen does nothing, and
-  the host never sees a disk from either firmware. The console is the USB Serial/JTAG peripheral, which is
-  modelled.
+- **USB mass storage traffic**: the USB OTG core is modelled in device mode (`docs/usb-otg.md`), so the
+  stock's USB mode comes up and waits for a computer as on the device (Licorice and 7.6.8 show "On"), and a
+  built-in host can enumerate it as far as the device descriptor. Nothing beyond that crosses the bus: no
+  SET_ADDRESS, no configuration, no mass-storage traffic, so no computer ever sees the disk. CrossPoint's
+  "File Transfer" screen does nothing. The console is the USB Serial/JTAG peripheral, which is modelled.
 - **WiFi / BLE**: no radio. The blocks a WiFi start touches are answered (the analog-master I2C block, SENS
   temperature sensor and SAR oneshot, the FE/RX/BB/MAC register stub with status bits that read as set, the
   RF PLL lock flag and the DC-offset comparator the full PHY calibration polls; section "Analog master"
@@ -330,6 +332,7 @@ One JSON object from the board, read over QMP (`docs/x4emu.md`). The top-level k
 | `gpio`, `gpio_irqs`, `gpio_in` | GPIO model | `gpio_in`: per-pin firmware samples (`samples`, `changes`, `sample_gap_us`) |
 | `buttons`, `touch`, `gt911` | input devices | `gt911`: `frames`, `clears`, `input_seq` / `read_seq`, `pending`, `deferred`, `key_reads` |
 | `usj`, `spi2`, `i2c0` | USB Serial/JTAG, GP-SPI, I2C counters | `spi2`: `busy`, `transfer_ms`, DMA byte counts |
+| `usb_otg` | the USB OTG core (`docs/usb-otg.md`) | PHY selected, soft-connect, pull-up, reset/flush/connect counters, `host` (the built-in host's descriptor bytes) |
 | `battery`, `rtc` | CW2017, BM8563 | |
 | `ledc` | LEDC | per channel `duty_permille`, `fading`, `target_permille`; `fades` |
 | `sleep` | RTC_CNTL sleep overlay | `sleeping`, `wakes`, `light_sleeps`, `wakeup_cause`, `ext1_status` |

@@ -1,7 +1,7 @@
 From 491f27700dd8122de9db6e1f5d27f7d163b8053a Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 22:15:15 -0500
-Subject: [PATCH 35/35] x4pro.epd: drive BUSY only when its level changes
+Subject: [PATCH 35/36] x4pro.epd: drive BUSY only when its level changes
 
 epd_apply_busy() runs after every SPI byte and set the BUSY output each
 time, so every byte of a 48 KB plane went on through the GPIO model's pad

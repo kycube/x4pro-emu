@@ -5,7 +5,7 @@ buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots t
 opens books, pages, sleeps and wakes in it; the stock `xteink_app` (7.2.4, 7.5.4, 7.6.8) boots to its home
 screen, paints, lights the frontlight, takes touch, runs its Lua apps, and its WiFi start comes up and
 stops itself (no radio). The stock's new generation, **XTOS Licorice 261013** (the device's since
-2026-10-13), reads, lights, sleeps and wakes; USB mode and app installs not yet (`docs/stock-licorice.md`). `README.md` is the public overview, `docs/README.md` the index of every document.
+2026-10-13), reads, lights, sleeps, wakes and enters USB mode; app installs not yet (`docs/stock-licorice.md`). `README.md` is the public overview, `docs/README.md` the index of every document.
 Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`**, §0 (resume) and §10 (the
 work runs as squads: the coordinator forms agents per milestone, and since 2026-10-12 **Opus 5.5 does all of
 it** — coordination, well-specified tasks, symbol-less firmware reading and new models alike; Fable 5.1 only
@@ -96,8 +96,9 @@ Debugging a firmware in the emulator (hot-poll lists, TCB walks, register dumps,
 
 ## What is NOT emulated (full list: `docs/hardware.md`)
 
-USB mass storage / OTG (the host never sees a disk); WiFi and BLE traffic (the blocks a WiFi start touches are
-answered, the driver finds no air and stops itself about 8 s after `wifi:mode : sta`; BLE untested); RMT, I2S,
+USB mass-storage traffic (the OTG core is modelled in device mode, USB mode comes up and waits; no host sees a
+disk, `docs/usb-otg.md`); WiFi and BLE traffic (the blocks a WiFi start touches are answered, the driver finds
+no air and stops itself about 8 s after `wifi:mode : sta`; Licorice's Bluetooth toggle comes up); RMT, I2S,
 APB_SARADC DMA mode; the GPIO matrix and IO_MUX pulls electrically. Deep sleep is a paused VM and a reset with
 cause 5 (DSLEEP); light sleep returns at once; timing is the device's measured BUSY durations, not cycles; the
 two cores keep TSO on any host (`docs/smp.md`).

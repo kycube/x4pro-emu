@@ -1,7 +1,7 @@
 From 20f07b26402f105816beaa89ec224abc9ccdbe37 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 18:56:42 -0500
-Subject: [PATCH 24/35] esp32s3.gpio: count how often the firmware samples each
+Subject: [PATCH 24/36] esp32s3.gpio: count how often the firmware samples each
  pin's current level
 
 Tooling that drives a button needs to know whether the firmware has seen

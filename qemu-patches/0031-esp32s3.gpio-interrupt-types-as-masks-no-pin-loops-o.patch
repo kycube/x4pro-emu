@@ -1,7 +1,7 @@
 From 88aafc0fcb2b56aee0c5a5e82d6d0f483c1cc395 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:58:34 -0500
-Subject: [PATCH 31/35] esp32s3.gpio: interrupt types as masks, no pin loops on
+Subject: [PATCH 31/36] esp32s3.gpio: interrupt types as masks, no pin loops on
  a pad refresh
 
 gpio_refresh() decoded all 49 PINn registers on every call (interrupt

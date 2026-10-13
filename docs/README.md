@@ -12,6 +12,7 @@ the [project README](../README.md) is the overview.
 | [grayscale.md](grayscale.md) | the waveform-level grey model of the UC8279 and how it was calibrated |
 | [upstream-qemu.md](upstream-qemu.md) | contributing the generic ESP32-S3 work to Espressif's QEMU: the split, the PR drafts, QEMU's AI-content policy |
 | [heap.md](heap.md) | the stock 7.2.4 `CORRUPT HEAP`: a race between two of its own tasks over a font file, not the emulator's |
+| [usb-otg.md](usb-otg.md) | the USB OTG (DWC2) core in device mode: why the stock's USB mode needs it, the register values, the built-in host that reads the device descriptor |
 | [smp.md](smp.md) | the two emulated cores and the memory order: the `spinlock.h:141` assert, TSO, the cache bits |
 | [parity.md](parity.md) | the device-parity harness (`tools/parity.py`): step scripts, the owner's runbook, the capture comparison |
 | [audit.md](audit.md) | every claim of the original build brief, confirmed or corrected, with evidence |

@@ -1,7 +1,7 @@
 From d6018ebb9ae1ebbe8c9688a71aba8cfe9df17ece Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:56:29 -0500
-Subject: [PATCH 26/35] xteink-x4pro: drop the cache DONE overlay, the cache
+Subject: [PATCH 26/36] xteink-x4pro: drop the cache DONE overlay, the cache
  model answers it
 
 The overlay on EXTMEM_DCACHE_LOCK_CTRL / OCCUPY_CTRL (priority 2, added in

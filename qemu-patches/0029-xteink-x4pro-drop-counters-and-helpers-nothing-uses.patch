@@ -1,7 +1,7 @@
 From cbf1711fd31292a45e8197aa3ee487c723bb5cbb Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:57:32 -0500
-Subject: [PATCH 29/35] xteink-x4pro: drop counters and helpers nothing uses
+Subject: [PATCH 29/36] xteink-x4pro: drop counters and helpers nothing uses
 
 - esp32s3_gpio_full_set_idle(): never called; the board sets the idle
   levels through the "idle" property.

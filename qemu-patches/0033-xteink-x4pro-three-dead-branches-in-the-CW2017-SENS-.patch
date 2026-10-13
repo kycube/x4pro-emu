@@ -1,7 +1,7 @@
 From 3d9ad84639cbc72fe35b5783fd955f8e72a6814a Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 22:04:49 -0500
-Subject: [PATCH 33/35] xteink-x4pro: three dead branches in the CW2017, SENS
+Subject: [PATCH 33/36] xteink-x4pro: three dead branches in the CW2017, SENS
  and GPIO models
 
 - x4pro.cw2017: the MODE write had its own branch doing what the default

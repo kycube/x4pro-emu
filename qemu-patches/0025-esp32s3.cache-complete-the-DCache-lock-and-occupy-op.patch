@@ -1,7 +1,7 @@
 From 64621592b5577cb501eb018781e973fe70d705c8 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:56:18 -0500
-Subject: [PATCH 25/35] esp32s3.cache: complete the DCache lock and occupy
+Subject: [PATCH 25/36] esp32s3.cache: complete the DCache lock and occupy
  operations
 
 The model did not implement EXTMEM_DCACHE_LOCK_CTRL and

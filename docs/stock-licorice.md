@@ -70,7 +70,7 @@ The walk (2026-10-13, by hand, then `test_licorice_walk`, 20 s):
 | Wi-Fi on | the full PHY calibration runs (168 calibration starts, 7 PLL calibrations in 2 s), then the radio idles: no networks to scan, nothing to join, the UI stays responsive |
 | Bluetooth on | on in 0.3 s, a BT glyph in the status bar; the radio stub sees no access |
 | Settings | all seven subpages open (Account, General, Display, Network with OPDS / Calibre wireless / KOReader sync, Buttons, Reading, About); About reads "X4 Pro-EA30", the MAC and serial from the emulated efuses and "XT Licorice 261013" |
-| USB mode | **not yet**: TinyUSB asserts (`check_dwc2 177: ASSERT FAILED` … `tusb_rhport_init`), the USB OTG controller is not modelled, the screen ends at "Could not start USB disk mode" |
+| USB mode | comes up and waits for a computer ("USB mode — On"), since the USB OTG core is modelled (`docs/usb-otg.md`); before that TinyUSB asserted (`check_dwc2 177: ASSERT FAILED` … `tusb_rhport_init`) and the screen ended at "Could not start USB disk mode". Licorice restarts the CPU into the mode (two `RTC_SW_CPU_RST` banners). The built-in host reads its device descriptor, 0x303A:0x4002; no disk crosses the bus |
 | Installing a `.xtapp` | **not yet**: the prompt appears as on the device, OK gives "Install failed" for the 7.x-style `app.xtapp` (below) |
 
 Licorice prints nothing through ESP-IDF's log on the console, but plain `printf` does reach it (the
@@ -105,7 +105,8 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 - Whether an unsigned package installs at all (the `.xtapp` format Licorice expects, and whether it
   checks a signature or only unwraps a key when one is present), and where Mini Apps lives in the UI.
-- The rest of the walk: reader, light panel, sleep and wake, the WiFi start with `net_en` 1, USB mode.
+- USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no
+  computer sees the disk.
 - What the RTC segments hold (the bootloader loads them; the emulator boots, so they are at least not
   in the way).
 - A Ghidra pass over the new image (`tools/ghidra_stock.py` assumes the 7.x layout and needs teaching).

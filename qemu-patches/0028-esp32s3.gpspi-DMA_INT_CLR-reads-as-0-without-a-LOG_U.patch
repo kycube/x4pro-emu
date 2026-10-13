@@ -1,7 +1,7 @@
 From 05085a22e420b0b8ddadc4b009cb7084c8b166b8 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:57:01 -0500
-Subject: [PATCH 28/35] esp32s3.gpspi: DMA_INT_CLR reads as 0 without a
+Subject: [PATCH 28/36] esp32s3.gpspi: DMA_INT_CLR reads as 0 without a
  LOG_UNIMP line
 
 DMA_INT_CLR is write-only and read as 0 already, but through the default

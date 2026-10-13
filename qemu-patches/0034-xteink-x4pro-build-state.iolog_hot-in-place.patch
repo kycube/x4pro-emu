@@ -1,7 +1,7 @@
 From c338a10975c4ada2938ec78bf18ba9f8054519de Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 22:05:16 -0500
-Subject: [PATCH 34/35] xteink-x4pro: build state.iolog_hot in place
+Subject: [PATCH 34/36] xteink-x4pro: build state.iolog_hot in place
 
 The board state built "iolog_hot" through a GString per logger region
 (30 of them) plus one for the whole object, on every `state` query, and

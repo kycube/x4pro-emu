@@ -1,7 +1,7 @@
 From b98936aebec00089b6ed73adab9fb87e4189f3d4 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:56:44 -0500
-Subject: [PATCH 27/35] xteink-x4pro: drop the GPIO strap special case from the
+Subject: [PATCH 27/36] xteink-x4pro: drop the GPIO strap special case from the
  access logger
 
 iolog_read() answered GPIO_STRAP_REG for a logger region at

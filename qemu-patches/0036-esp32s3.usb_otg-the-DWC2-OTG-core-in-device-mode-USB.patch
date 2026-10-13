@@ -1,0 +1,1064 @@
+From b28e5dc6e44ef4bed1a2a9e5a87ebbfa13972d85 Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Tue, 13 Oct 2026 10:39:29 -0500
+Subject: [PATCH 36/36] esp32s3.usb_otg: the DWC2 OTG core in device mode,
+ USB_WRAP, RTC_CNTL_USB_CONF
+
+Both stock generations' USB mode (XTOS Licorice "USB mode", 7.x "USB
+Mode") starts TinyUSB's dcd_dwc2 on the S3's USB OTG core at 0x60080000.
+With the region answered by the board's zero logger, check_dwc2() found
+no Synopsys ID (`check_dwc2 177: ASSERT FAILED`, four more), 7.6.8 said
+"Init TinyUSB stack failed" and both screens showed "Error".
+
+hw/misc/esp32s3_usb_otg.c models the core as a register file with the
+behaviour TinyUSB polls: GSNPSID 0x4F54400A and GHWCFG1..4 from ESP-IDF's
+usb_reg.h defaults (4.00a, so CSFTRST self-clears), GRSTCTL AHBIDLE and
+self-clearing soft reset / FIFO flushes, GINTSTS write-1-to-clear with
+CURMOD/OTGINT/RXFLVL/IEPINT/OEPINT computed, DCTL soft disconnect and
+global NAKs, the EP0..6 banks (SNAK/CNAK -> NAKSTS, EPDIS -> EPDISBLD),
+DAINT, DTXFSTS. The interrupt goes to ETS_USB_INTR_SOURCE. USB_WRAP
+(OTG_CONF reset 0x001C0000) and the one RTC_CNTL word that muxes the
+internal PHY between the USB Serial/JTAG and OTG (USB_CONF bits 20/19)
+are stored, the latter as a 4-byte overlay above the sleep overlay. The
+console keeps working after the switch. The usb_otg and usb_wrap loggers
+go.
+
+Licorice and 7.6.8 now initialise the core (one soft reset, one flush of
+each FIFO, disconnect then connect, GAHBCFG 0x27: buffer DMA), show "On"
+and wait on an idle bus without one interrupt, as a reader does with no
+computer attached. state.usb_otg reports the PHY, pad, soft-connect,
+pull-up, counters and the masks.
+
+A built-in host (QOM "host" = "enumerate" on /machine/x4pro-usb-otg)
+resets the bus, sends GET_DESCRIPTOR(Device) and runs the status stage,
+in buffer DMA through DOEPDMA0/DIEPDMA0 or in slave mode through the RX
+queue and FIFO 0. Both firmwares return 12 01 00 02 00 00 00 40 3a 30
+02 40 00 01 01 02 03 01: 0x303A:0x4002, the personality the desk unit
+showed a Mac in USB mode, and on 7.6.8 the fields of its own console
+table. No other transfer is modelled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/esp32s3_usb_otg.c         | 840 ++++++++++++++++++++++++++++++
+ hw/misc/meson.build               |   1 +
+ hw/xtensa/xteink_x4pro.c          |  27 +-
+ include/hw/misc/esp32s3_usb_otg.h |  68 +++
+ 4 files changed, 934 insertions(+), 2 deletions(-)
+ create mode 100644 hw/misc/esp32s3_usb_otg.c
+ create mode 100644 include/hw/misc/esp32s3_usb_otg.h
+
+diff --git a/hw/misc/esp32s3_usb_otg.c b/hw/misc/esp32s3_usb_otg.c
+new file mode 100644
+index 0000000..5c5976e
+--- /dev/null
++++ b/hw/misc/esp32s3_usb_otg.c
+@@ -0,0 +1,840 @@
++/*
++ * ESP32-S3 USB OTG in device mode: the Synopsys DWC2 full-speed core at 0x60080000
++ * (DR_REG_USB_BASE), USB_WRAP at 0x60039000 and RTC_CNTL_USB_CONF (0x60008120).
++ *
++ * Why: the stock firmware's USB mode (XTOS Licorice "USB mode", 7.x's USB disk) starts
++ * TinyUSB's dcd_dwc2 on this core. With the region reading as zero, TinyUSB's check_dwc2()
++ * finds no Synopsys ID (`check_dwc2 177: ASSERT FAILED`): Licorice shows "Could not start USB
++ * disk mode", 7.6.8 "Error". On the device the core initialises and the reader waits for a
++ * host; that idle state is what this models.
++ *
++ * Register values (ESP-IDF soc/esp32s3/register/soc/usb_reg.h, the per-field defaults):
++ *   GSNPSID 0x4F54400A (an OTG core, release 4.00a: GRSTCTL.CSFTRST self-clears, there is
++ *   no CSFTRST_DONE), GHWCFG1 0, GHWCFG2 0x224DD930 (OTG_ARCH 2 internal DMA, FS PHY 1,
++ *   NUMDEVEPS 6, no HS PHY), GHWCFG3 0x010004B5 (DFIFO 256 words), GHWCFG4 0xD3F0A030
++ *   (dedicated TX FIFOs, 4 IN EPs + EP0), GUSBCFG 0x00001440 (PHYSEL 1 read-only, TRDT 5),
++ *   GRXFSIZ 0x100, GNPTXFSIZ 0x01000100, GNPTXSTS 0x00040100, DIEPTXFn 0x10000200,
++ *   DCFG 0x08100000, DCTL 0x00002000, DSTS 0x00000002, DxEPCTL 0x00008000 (USBACTEP).
++ *   USB_WRAP (usb_wrap_reg.h): OTG_CONF 0x001C0000 (PAD_ENABLE, AHB/PHY clock force-on),
++ *   DATE 0x02102010. RTC_CNTL_USB_CONF (rtc_cntl_reg.h) 0: bit 20 SW_HW_USB_PHY_SEL hands
++ *   the internal PHY's mux to software, bit 19 SW_USB_PHY_SEL then picks OTG (1) or the
++ *   USB Serial/JTAG (0); ESP-IDF's usb_wrap_ll_phy_enable_external(false) sets both.
++ *
++ * Model: a register file with the behaviour TinyUSB's dwc2_common.c / dcd_dwc2.c poll:
++ *   GRSTCTL: AHBIDLE always set; CSFTRST, HSFTRST, RXFFLSH, TXFFLSH self-clear at once
++ *     (a core soft reset clears the interrupt state, NAK state, DSTS and the RX queue).
++ *   GOTGCTL: CONID_B and BSESVLD set, ASESVLD clear: the ID / B-valid / A-valid inputs that
++ *     ESP-IDF's usb_phy ties to constants for a device (B-device, VBUS valid); the
++ *     BVALOEN/AVALOEN overrides replace the valid bits when set (neither stock firmware does).
++ *   GINTSTS: write-1-to-clear bits stored; CURMOD (forced host only), OTGINT (GOTGINT),
++ *     RXFLVL (the RX queue), GINNAKEFF/GOUTNAKEFF (DCTL's global NAKs), IEPINT/OEPINT (DAINT
++ *     under DAINTMSK) computed. GINTMSK, GAHBCFG stored; the interrupt line (ETS_USB_INTR_SOURCE)
++ *     is GAHBCFG.GLBLINTRMSK && (GINTSTS & GINTMSK).
++ *   DCTL: SFTDISCON = soft disconnect (counted), SG/CG(NP)IN/OUTNAK set the NAK status bits.
++ *   DxEPCTLn: SNAK/CNAK drive NAKSTS, EPDIS on an enabled EP disables it with EPDISBLD,
++ *     EPENA can only be set by software. DxEPINTn write-1-to-clear; DIEPINT.TXFEMP reads 1
++ *     (the TX FIFO is always empty: what is written to it is taken at once). DTXFSTSn = the
++ *     FIFO's whole depth. The FIFO windows (0x1000 + n * 0x1000) take writes and read the RX
++ *     queue's data.
++ *   USB_WRAP OTG_CONF/TEST_CONF and RTC_CNTL_USB_CONF are stored; nothing electrical follows,
++ *   and the USB Serial/JTAG console keeps working when the PHY is switched to OTG (on the
++ *   device the host then loses the serial port and sees the OTG device instead).
++ *
++ * With no host nothing more happens: no bus reset, no SOF, no SETUP, which is the state of a
++ * reader that waits in USB mode for a computer. The built-in host (QOM property "host" =
++ * "enumerate") then plays one control transfer in guest time: a bus reset (GINTSTS.USBRST),
++ * its end 10 ms later (ENUMDNE, DSTS full speed 48 MHz), GET_DESCRIPTOR(Device, wLength 64)
++ * once EP0 OUT is armed for SETUP, the IN data stage until a short packet, and the zero-length
++ * OUT status stage once EP0 OUT is enabled without NAK. Both of TinyUSB's modes are served: in
++ * buffer DMA (GAHBCFG.DMAEN, what both stock generations use) the SETUP bytes go to DOEPDMA0
++ * and the IN data come from DIEPDMA0 through the system address space; in slave mode they pass
++ * through the RX queue / FIFO 0. The descriptor bytes the firmware returned are in the state
++ * ("usb_otg.host.descriptor"). Nothing else crosses the bus: no SET_ADDRESS or configuration,
++ * no other endpoint, no SOF, suspend or resume, so no mass-storage traffic.
++ *
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "exec/address-spaces.h"
++#include "hw/usb/dwc2-regs.h"
++#include "hw/misc/esp32s3_usb_otg.h"
++
++#define R(off) ((off) / 4)
++
++/* GOTGCTL overrides (DWC2 databook; not in dwc2-regs.h) */
++#define OTGCTL_AVALOEN      BIT(4)
++#define OTGCTL_AVALOVAL     BIT(5)
++#define OTGCTL_BVALOEN      BIT(6)
++#define OTGCTL_BVALOVAL     BIT(7)
++#define OTGCTL_RO           (GOTGCTL_SESREQSCS | GOTGCTL_HSTNEGSCS | GOTGCTL_CONID_B | GOTGCTL_DBNC_SHORT | \
++                             GOTGCTL_ASESVLD | GOTGCTL_BSESVLD | BIT(21))
++#define GINTSTS_W1C         (GINTSTS_MODEMIS | GINTSTS_SOF | GINTSTS_ERLYSUSP | GINTSTS_USBSUSP | GINTSTS_USBRST | \
++                             GINTSTS_ENUMDONE | GINTSTS_ISOUTDROP | GINTSTS_EOPF | GINTSTS_EPMIS | \
++                             GINTSTS_INCOMPL_SOIN | GINTSTS_INCOMPL_SOOUT | GINTSTS_FET_SUSP | GINTSTS_RESETDET | \
++                             GINTSTS_CONIDSTSCHNG | GINTSTS_DISCONNINT | GINTSTS_SESSREQINT | GINTSTS_WKUPINT)
++#define DCTL_WO             (DCTL_SGNPINNAK | DCTL_CGNPINNAK | DCTL_SGOUTNAK | DCTL_CGOUTNAK)
++#define DCTL_RO             (DCTL_GNPINNAKSTS | DCTL_GOUTNAKSTS)
++#define EPCTL_WO            (DXEPCTL_SNAK | DXEPCTL_CNAK | DXEPCTL_SETD0PID | DXEPCTL_SETD1PID | DXEPCTL_EPDIS)
++#define GAHBCFG_GINT        GAHBCFG_GLBL_INTR_EN
++
++/* USB_WRAP_OTG_CONF_REG (usb_wrap_reg.h) */
++#define WRAP_OTG_CONF       0x000
++#define WRAP_TEST_CONF      0x004
++#define WRAP_DATE           0x3FC
++#define WRAP_PHY_SEL        BIT(2)
++#define WRAP_PULL_OVERRIDE  BIT(12)
++#define WRAP_DP_PULLUP      BIT(13)
++#define WRAP_PAD_ENABLE     BIT(18)
++/* RTC_CNTL_USB_CONF_REG (rtc_cntl_reg.h) */
++#define RTC_SW_HW_USB_PHY_SEL BIT(20)
++#define RTC_SW_USB_PHY_SEL    BIT(19)
++
++/* GRXSTSP fields (device mode) */
++#define RXSTS(ep, bcnt, dpid, pktsts) ((ep) | ((bcnt) << GRXSTS_BYTECNT_SHIFT) | ((dpid) << GRXSTS_DPID_SHIFT) | \
++                                       ((pktsts) << GRXSTS_PKTSTS_SHIFT))
++
++enum { HOST_IDLE, HOST_RESET, HOST_ENUMDONE, HOST_SETUP, HOST_DATA_IN, HOST_STATUS_OUT, HOST_DONE, HOST_ERROR };
++static const char *host_step_name[] = { "idle", "reset", "enumdone", "setup", "data-in", "status-out", "done", "error" };
++#define HOST_STEP_NS   (1 * SCALE_MS)      /* the host re-checks the device every millisecond */
++#define HOST_RESET_NS  (10 * SCALE_MS)     /* USB 2.0 7.1.7.5: a bus reset lasts at least 10 ms */
++#define HOST_GIVE_UP_NS (2000 * SCALE_MS)
++
++static bool otg_force_host(ESP32S3UsbOtgState *s)
++{
++    return s->reg[R(GUSBCFG)] & GUSBCFG_FORCEHOSTMODE;
++}
++
++static bool otg_phy_is_otg(ESP32S3UsbOtgState *s)
++{
++    /* without the software mux the eFuse USB_PHY_SEL (0 on this unit) gives the PHY to the USJ */
++    return (s->rtc_usb_conf & RTC_SW_HW_USB_PHY_SEL) && (s->rtc_usb_conf & RTC_SW_USB_PHY_SEL) &&
++           !(s->wrap_otg_conf & WRAP_PHY_SEL);
++}
++
++static bool otg_soft_connected(ESP32S3UsbOtgState *s)
++{
++    return !(s->reg[R(DCTL)] & DCTL_SFTDISCON);
++}
++
++/* D+ pulled up toward a host: the pad on, the PHY on OTG, and either the override's DP_PULLUP or
++ * the core's own pull-up (device mode, soft-connected) */
++static bool otg_dp_pullup(ESP32S3UsbOtgState *s)
++{
++    if (!otg_phy_is_otg(s) || !(s->wrap_otg_conf & WRAP_PAD_ENABLE)) {
++        return false;
++    }
++    if (s->wrap_otg_conf & WRAP_PULL_OVERRIDE) {
++        return s->wrap_otg_conf & WRAP_DP_PULLUP;
++    }
++    return !otg_force_host(s) && otg_soft_connected(s);
++}
++
++static uint32_t otg_diepint(ESP32S3UsbOtgState *s, int n)
++{
++    return s->reg[R(DIEPINT(n))] | DXEPINT_TXFEMP;
++}
++
++static uint32_t otg_daint(ESP32S3UsbOtgState *s)
++{
++    uint32_t daint = 0;
++    for (int n = 0; n < ESP32S3_USB_OTG_EPS; n++) {
++        uint32_t inmask = (s->reg[R(DIEPMSK)] & ~DXEPINT_TXFEMP) |
++                          ((s->reg[R(DIEPEMPMSK)] >> n & 1) ? DXEPINT_TXFEMP : 0);
++        if (otg_diepint(s, n) & inmask) {
++            daint |= DAINT_INEP(n);
++        }
++        if (s->reg[R(DOEPINT(n))] & s->reg[R(DOEPMSK)]) {
++            daint |= DAINT_OUTEP(n);
++        }
++    }
++    return daint;
++}
++
++static uint32_t otg_gintsts(ESP32S3UsbOtgState *s)
++{
++    uint32_t v = s->reg[R(GINTSTS)] & GINTSTS_W1C;
++    uint32_t daint = otg_daint(s) & s->reg[R(DAINTMSK)];
++    if (otg_force_host(s)) {
++        v |= GINTSTS_CURMODE_HOST;
++    }
++    if (s->reg[R(GOTGINT)]) {
++        v |= GINTSTS_OTGINT;
++    }
++    if (s->rxq_len) {
++        v |= GINTSTS_RXFLVL;
++    }
++    if (s->in_nak) {
++        v |= GINTSTS_GINNAKEFF;
++    }
++    if (s->out_nak) {
++        v |= GINTSTS_GOUTNAKEFF;
++    }
++    if (daint & 0xFFFF) {
++        v |= GINTSTS_IEPINT;
++    }
++    if (daint >> 16) {
++        v |= GINTSTS_OEPINT;
++    }
++    return v;
++}
++
++static void otg_update_irq(ESP32S3UsbOtgState *s)
++{
++    bool level = (s->reg[R(GAHBCFG)] & GAHBCFG_GINT) && (otg_gintsts(s) & s->reg[R(GINTMSK)]);
++    if (level && !s->irq_level) {
++        s->irq_raises++;
++    }
++    s->irq_level = level;
++    qemu_set_irq(s->irq, level);
++}
++
++/* ---- the RX FIFO as the host fills it ------------------------------------- */
++static void rxq_push(ESP32S3UsbOtgState *s, uint32_t sts, const uint32_t *data, int words)
++{
++    if (s->rxq_len == ESP32S3_USB_OTG_RXQ) {
++        return;
++    }
++    ESP32S3UsbOtgRxEntry *e = &s->rxq[(s->rxq_head + s->rxq_len) % ESP32S3_USB_OTG_RXQ];
++    e->sts = sts;
++    e->words = words;
++    e->popped = 0;
++    for (int i = 0; i < words && i < 2; i++) {
++        e->data[i] = data[i];
++    }
++    s->rxq_len++;
++}
++
++static uint32_t rxq_pop(ESP32S3UsbOtgState *s)
++{
++    if (!s->rxq_len) {
++        return 0;
++    }
++    ESP32S3UsbOtgRxEntry *e = &s->rxq[s->rxq_head];
++    s->rxq_head = (s->rxq_head + 1) % ESP32S3_USB_OTG_RXQ;
++    s->rxq_len--;
++    s->rx_cur = *e;                    /* its data words are what the FIFO reads return next */
++    int ep = e->sts & GRXSTS_EPNUM_MASK;
++    switch ((e->sts & GRXSTS_PKTSTS_MASK) >> GRXSTS_PKTSTS_SHIFT) {
++    case GRXSTS_PKTSTS_SETUPDONE:
++        /* the core raises STUP once the SETUP-done entry is popped */
++        s->reg[R(DOEPINT(ep))] |= DXEPINT_SETUP;
++        break;
++    case GRXSTS_PKTSTS_OUTDONE:
++        s->reg[R(DOEPINT(ep))] |= DXEPINT_XFERCOMPL;
++        s->reg[R(DOEPCTL(ep))] &= ~DXEPCTL_EPENA;
++        break;
++    }
++    return e->sts;
++}
++
++static uint32_t fifo_read(ESP32S3UsbOtgState *s)
++{
++    s->fifo_words_out++;
++    if (s->rx_cur.popped < s->rx_cur.words) {
++        return s->rx_cur.data[s->rx_cur.popped++];
++    }
++    return 0;
++}
++
++/* ---- the IN side: FIFO n takes the packet the firmware writes ------------- */
++static int ep_mps(ESP32S3UsbOtgState *s, int n)
++{
++    uint32_t ctl = s->reg[R(DIEPCTL(n))];
++    if (n == 0) {
++        static const int mps0[4] = { 64, 32, 16, 8 };
++        return mps0[ctl & D0EPCTL_MPS_MASK];
++    }
++    return ctl & 0x7FF;
++}
++
++static void otg_in_packet_sent(ESP32S3UsbOtgState *s, int n, int len)
++{
++    uint32_t tsiz = s->reg[R(DIEPTSIZ(n))];
++    uint32_t pktcnt = DXEPTSIZ_PKTCNT_GET(tsiz), xfer = DXEPTSIZ_XFERSIZE_GET(tsiz);
++    pktcnt = pktcnt ? pktcnt - 1 : 0;
++    xfer = xfer > (uint32_t)len ? xfer - len : 0;
++    s->reg[R(DIEPTSIZ(n))] = (tsiz & ~(DXEPTSIZ_PKTCNT_MASK | DXEPTSIZ_XFERSIZE_MASK)) |
++                             DXEPTSIZ_PKTCNT(pktcnt) | DXEPTSIZ_XFERSIZE(xfer);
++    if (len < ep_mps(s, n)) {
++        s->host_short = true;              /* a short packet (or a ZLP) ends the data stage */
++    }
++    if (!pktcnt) {
++        s->reg[R(DIEPCTL(n))] &= ~DXEPCTL_EPENA;
++        s->reg[R(DIEPINT(n))] |= DXEPINT_XFERCOMPL;
++    }
++}
++
++static void fifo_write(ESP32S3UsbOtgState *s, int n, uint32_t v)
++{
++    s->fifo_words_in++;
++    /* only EP0's data stage reaches the built-in host; anything else is taken and dropped */
++    if (n != 0 || s->host_step != HOST_DATA_IN || !(s->reg[R(DIEPCTL(0))] & DXEPCTL_EPENA)) {
++        return;
++    }
++    int want = MIN(ep_mps(s, 0), (int)DXEPTSIZ_XFERSIZE_GET(s->reg[R(DIEPTSIZ(0))]));
++    for (int i = 0; i < 4 && s->pkt_len < (int)sizeof(s->pkt); i++) {
++        s->pkt[s->pkt_len++] = v >> (8 * i);
++    }
++    if (s->pkt_len >= want) {
++        int len = MIN(want, (int)sizeof(s->desc) - s->desc_len);
++        memcpy(s->desc + s->desc_len, s->pkt, len);
++        s->desc_len += len;
++        s->pkt_len = 0;
++        otg_in_packet_sent(s, 0, want);
++    }
++}
++
++/* ---- the built-in host ------------------------------------------------------ */
++static void host_fail(ESP32S3UsbOtgState *s, const char *why)
++{
++    snprintf(s->host_error, sizeof(s->host_error), "%s", why);
++    s->host_step = HOST_ERROR;
++    qemu_log_mask(LOG_GUEST_ERROR, "esp32s3.usb_otg: host: %s\n", why);
++}
++
++static void host_next(ESP32S3UsbOtgState *s, int step, int64_t delay_ns)
++{
++    s->host_step = step;
++    s->host_t0_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    timer_mod(&s->host_timer, s->host_t0_ns + delay_ns);
++}
++
++static void host_poll(ESP32S3UsbOtgState *s)
++{
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    if (now - s->host_t0_ns > HOST_GIVE_UP_NS) {
++        char why[64];
++        snprintf(why, sizeof(why), "no answer from the device in step %s", host_step_name[s->host_step]);
++        host_fail(s, why);
++        return;
++    }
++    timer_mod(&s->host_timer, now + HOST_STEP_NS);
++}
++
++static bool otg_dma(ESP32S3UsbOtgState *s)
++{
++    return s->reg[R(GAHBCFG)] & GAHBCFG_DMA_EN;
++}
++
++/* the core's AHB master: `len` bytes between `buf` and the address in the DMA register `dmareg`,
++ * which advances past them as on the chip */
++static bool host_dma(ESP32S3UsbOtgState *s, hwaddr dmareg, void *buf, int len, bool to_guest)
++{
++    uint32_t addr = s->reg[R(dmareg)];
++    MemTxResult r = to_guest
++        ? address_space_write(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED, buf, len)
++        : address_space_read(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
++    if (r != MEMTX_OK) {
++        char why[64];
++        snprintf(why, sizeof(why), "DMA %s 0x%08x failed", to_guest ? "write to" : "read from", addr);
++        host_fail(s, why);
++        return false;
++    }
++    s->reg[R(dmareg)] = addr + len;
++    return true;
++}
++
++static void host_tick(void *opaque)
++{
++    ESP32S3UsbOtgState *s = opaque;
++    switch (s->host_step) {
++    case HOST_RESET:            /* SE0 for 10 ms; the core reports the start at once */
++        s->host_resets++;
++        s->reg[R(GINTSTS)] |= GINTSTS_USBRST;
++        s->reg[R(DSTS)] &= ~DSTS_SUSPSTS;
++        host_next(s, HOST_ENUMDONE, HOST_RESET_NS);
++        break;
++    case HOST_ENUMDONE:         /* the reset ends: full speed, the 48 MHz PHY clock */
++        s->reg[R(DSTS)] = (s->reg[R(DSTS)] & ~DSTS_ENUMSPD_MASK) | (DSTS_ENUMSPD_FS48 << DSTS_ENUMSPD_SHIFT);
++        s->reg[R(GINTSTS)] |= GINTSTS_ENUMDONE;
++        host_next(s, HOST_SETUP, HOST_STEP_NS);
++        break;
++    case HOST_SETUP:            /* once EP0 OUT takes SETUP packets (DOEPTSIZ0.SUPCNT, set on the reset) */
++        if (!(s->reg[R(DOEPTSIZ(0))] & DOEPTSIZ0_SUPCNT_MASK) ||
++            (otg_dma(s) && !(s->reg[R(DOEPCTL(0))] & DXEPCTL_EPENA))) {
++            host_poll(s);
++            break;
++        }
++        s->host_setups++;
++        s->desc_len = 0;
++        s->pkt_len = 0;
++        s->host_short = false;
++        {
++            /* GET_DESCRIPTOR(Device): bmRequestType 0x80, bRequest 6, wValue 0x0100, wIndex 0 */
++            uint32_t setup[2] = { 0x80 | 6 << 8 | 0x0100u << 16, (uint32_t)s->host_wlength << 16 };
++            if (otg_dma(s)) {
++                if (!host_dma(s, DOEPDMA(0), setup, 8, true)) {
++                    break;
++                }
++                uint32_t tsiz = s->reg[R(DOEPTSIZ(0))];
++                uint32_t supcnt = ((tsiz & DOEPTSIZ0_SUPCNT_MASK) >> DOEPTSIZ0_SUPCNT_SHIFT) - 1;
++                uint32_t xfer = tsiz & DOEPTSIZ0_XFERSIZE_MASK;
++                s->reg[R(DOEPTSIZ(0))] = (tsiz & ~(DOEPTSIZ0_SUPCNT_MASK | DOEPTSIZ0_PKTCNT | DOEPTSIZ0_XFERSIZE_MASK)) |
++                                         DOEPTSIZ0_SUPCNT(supcnt) | (xfer > 8 ? xfer - 8 : 0);
++                s->reg[R(DOEPCTL(0))] &= ~DXEPCTL_EPENA;      /* the setup phase done: EP0 OUT disabled */
++                s->reg[R(DOEPINT(0))] |= DXEPINT_SETUP;
++            } else {
++                rxq_push(s, RXSTS(0, 8, 0, GRXSTS_PKTSTS_SETUPRX), setup, 2);
++                rxq_push(s, RXSTS(0, 0, 0, GRXSTS_PKTSTS_SETUPDONE), NULL, 0);
++            }
++        }
++        host_next(s, HOST_DATA_IN, HOST_STEP_NS);
++        break;
++    case HOST_DATA_IN:          /* IN tokens until a short packet or wLength bytes */
++        if (otg_dma(s) && (s->reg[R(DIEPCTL(0))] & (DXEPCTL_EPENA | DXEPCTL_NAKSTS)) == DXEPCTL_EPENA) {
++            /* buffer DMA: the core fetches each packet from DIEPDMA0 as the host's IN token comes */
++            int len = MIN(ep_mps(s, 0), (int)DXEPTSIZ_XFERSIZE_GET(s->reg[R(DIEPTSIZ(0))]));
++            len = MIN(len, (int)sizeof(s->desc) - s->desc_len);
++            if (len && !host_dma(s, DIEPDMA(0), s->desc + s->desc_len, len, false)) {
++                break;
++            }
++            s->desc_len += len;
++            otg_in_packet_sent(s, 0, len);
++        }
++        if (s->host_short || s->desc_len >= s->host_wlength) {
++            host_next(s, HOST_STATUS_OUT, HOST_STEP_NS);
++            break;
++        }
++        host_poll(s);
++        break;
++    case HOST_STATUS_OUT:       /* a zero-length OUT, once EP0 OUT is enabled and stops NAKing */
++        if ((s->reg[R(DOEPCTL(0))] & (DXEPCTL_EPENA | DXEPCTL_NAKSTS)) != DXEPCTL_EPENA || s->out_nak) {
++            host_poll(s);
++            break;
++        }
++        s->reg[R(DOEPTSIZ(0))] &= ~DOEPTSIZ0_PKTCNT;        /* EP0 OUT's one packet, taken, 0 bytes */
++        if (otg_dma(s)) {
++            s->reg[R(DOEPCTL(0))] &= ~DXEPCTL_EPENA;
++            s->reg[R(DOEPINT(0))] |= DXEPINT_XFERCOMPL;
++        } else {
++            rxq_push(s, RXSTS(0, 0, 2, GRXSTS_PKTSTS_OUTRX), NULL, 0);
++            rxq_push(s, RXSTS(0, 0, 0, GRXSTS_PKTSTS_OUTDONE), NULL, 0);
++        }
++        s->host_step = HOST_DONE;
++        break;
++    default:
++        break;
++    }
++    otg_update_irq(s);
++}
++
++static void host_start(ESP32S3UsbOtgState *s, Error **errp)
++{
++    if (!otg_dp_pullup(s)) {
++        error_setg(errp, "esp32s3.usb_otg: no device on the bus (D+ pull-up off: phy %s, pad %s, %s)",
++                   otg_phy_is_otg(s) ? "otg" : "usj", (s->wrap_otg_conf & WRAP_PAD_ENABLE) ? "on" : "off",
++                   otg_soft_connected(s) ? "soft-connected" : "soft-disconnected");
++        return;
++    }
++    s->host_error[0] = 0;
++    s->desc_len = 0;
++    s->host_wlength = 64;          /* what Linux, macOS and Windows ask for first */
++    host_next(s, HOST_RESET, HOST_STEP_NS);
++}
++
++static void usb_otg_get_host(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(obj);
++    char *val = g_strdup(host_step_name[s->host_step]);
++    visit_type_str(v, name, &val, errp);
++    g_free(val);
++}
++
++static void usb_otg_set_host(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(obj);
++    char *val = NULL;
++    if (!visit_type_str(v, name, &val, errp)) {
++        return;
++    }
++    if (!strcmp(val, "enumerate")) {
++        host_start(s, errp);
++    } else if (!strcmp(val, "detach")) {
++        timer_del(&s->host_timer);
++        s->host_step = HOST_IDLE;
++    } else {
++        error_setg(errp, "esp32s3.usb_otg: host: \"enumerate\" or \"detach\", not \"%s\"", val);
++    }
++    g_free(val);
++}
++
++/* ---- the core's registers --------------------------------------------------- */
++static void otg_core_soft_reset(ESP32S3UsbOtgState *s)
++{
++    s->core_resets++;
++    s->reg[R(GINTSTS)] = 0;
++    s->reg[R(GOTGINT)] = 0;
++    s->reg[R(DSTS)] = DSTS_ENUMSPD_FS << DSTS_ENUMSPD_SHIFT;
++    for (int n = 0; n < ESP32S3_USB_OTG_EPS; n++) {
++        s->reg[R(DIEPINT(n))] = 0;
++        s->reg[R(DOEPINT(n))] = 0;
++    }
++    s->in_nak = s->out_nak = false;
++    s->rxq_len = 0;
++    s->rx_cur.words = 0;
++    s->pkt_len = 0;
++}
++
++static bool is_epctl(hwaddr addr, bool *in, int *n)
++{
++    if (addr >= 0x900 && addr < 0x900 + 0x20 * ESP32S3_USB_OTG_EPS && (addr & 0x1F) == 0) {
++        *in = true;
++    } else if (addr >= 0xB00 && addr < 0xB00 + 0x20 * ESP32S3_USB_OTG_EPS && (addr & 0x1F) == 0) {
++        *in = false;
++    } else {
++        return false;
++    }
++    *n = (addr & 0xFF) >> 5;
++    return true;
++}
++
++static void otg_write_epctl(ESP32S3UsbOtgState *s, bool in, int n, uint32_t v)
++{
++    hwaddr a = in ? DIEPCTL(n) : DOEPCTL(n);
++    uint32_t old = s->reg[R(a)];
++    uint32_t ctl = (v & ~(EPCTL_WO | DXEPCTL_NAKSTS)) | (old & (DXEPCTL_NAKSTS | DXEPCTL_EPENA));
++    if (v & DXEPCTL_SNAK) {
++        ctl |= DXEPCTL_NAKSTS;
++    }
++    if (v & DXEPCTL_CNAK) {
++        ctl &= ~DXEPCTL_NAKSTS;
++    }
++    if ((v & DXEPCTL_EPDIS) && (ctl & DXEPCTL_EPENA)) {
++        ctl &= ~DXEPCTL_EPENA;
++        ctl |= DXEPCTL_NAKSTS;
++        s->reg[R(in ? DIEPINT(n) : DOEPINT(n))] |= DXEPINT_EPDISBLD;
++    }
++    if (n == 0) {
++        ctl |= DXEPCTL_USBACTEP;           /* EP0 is always active */
++    }
++    s->reg[R(a)] = ctl;
++    /* slave mode: a zero-length IN packet needs no FIFO write and goes out at the host's IN token
++     * (in buffer DMA the host's own step takes it, data or not) */
++    if (in && n == 0 && !otg_dma(s) && (ctl & DXEPCTL_EPENA) && !(old & DXEPCTL_EPENA) &&
++        s->host_step == HOST_DATA_IN && DXEPTSIZ_XFERSIZE_GET(s->reg[R(DIEPTSIZ(0))]) == 0) {
++        otg_in_packet_sent(s, 0, 0);
++    }
++}
++
++static uint64_t usb_otg_read(void *opaque, hwaddr addr, unsigned size)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(opaque);
++    s->reads++;
++    if (addr >= ESP32S3_USB_OTG_REGS) {
++        return addr < 0x20000 ? fifo_read(s) : 0;   /* 0x20000..: direct FIFO RAM access (debug) */
++    }
++    switch (addr & ~3) {
++    case GOTGCTL: {
++        uint32_t v = s->reg[R(GOTGCTL)] & ~OTGCTL_RO;
++        if (!otg_force_host(s)) {
++            v |= GOTGCTL_CONID_B;
++        }
++        if ((v & OTGCTL_BVALOEN) ? (v & OTGCTL_BVALOVAL) : !otg_force_host(s)) {
++            v |= GOTGCTL_BSESVLD;
++        }
++        if ((v & OTGCTL_AVALOEN) && (v & OTGCTL_AVALOVAL)) {
++            v |= GOTGCTL_ASESVLD;
++        }
++        return v;
++    }
++    case GUSBCFG:
++        return s->reg[R(GUSBCFG)] | GUSBCFG_PHYSEL;
++    case GRSTCTL:
++        return GRSTCTL_AHBIDLE | (s->reg[R(GRSTCTL)] & GRSTCTL_TXFNUM_MASK);
++    case GINTSTS:
++        return otg_gintsts(s);
++    case GRXSTSR:
++        return s->rxq_len ? s->rxq[s->rxq_head].sts : 0;
++    case GRXSTSP: {
++        uint32_t v = rxq_pop(s);
++        otg_update_irq(s);
++        return v;
++    }
++    case GNPTXSTS:
++        return 0x00040100;                      /* 4 request queue slots, 256 words free */
++    case GSNPSID:
++        return 0x4F54400A;
++    case GHWCFG1:
++        return 0x00000000;
++    case GHWCFG2:
++        return 0x224DD930;
++    case GHWCFG3:
++        return 0x010004B5;
++    case GHWCFG4:
++        return 0xD3F0A030;
++    case DCTL:
++        return (s->reg[R(DCTL)] & ~(DCTL_WO | DCTL_RO)) | (s->in_nak ? DCTL_GNPINNAKSTS : 0) |
++               (s->out_nak ? DCTL_GOUTNAKSTS : 0);
++    case DAINT:
++        return otg_daint(s);
++    default:
++        break;
++    }
++    if (addr >= 0x900 && addr < 0x900 + 0x20 * ESP32S3_USB_OTG_EPS) {
++        int n = (addr - 0x900) >> 5;
++        if ((addr & 0x1F) == 0x08) {
++            return otg_diepint(s, n);
++        }
++        if ((addr & 0x1F) == 0x18) {           /* DTXFSTSn: the FIFO's free words = its depth */
++            return (n == 0 ? s->reg[R(GNPTXFSIZ)] : s->reg[R(DPTXFSIZN(n))]) >> 16;
++        }
++    }
++    return s->reg[R(addr)];
++}
++
++static void usb_otg_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(opaque);
++    uint32_t v = value;
++    bool in;
++    int n;
++    s->writes++;
++    if (addr >= ESP32S3_USB_OTG_REGS) {
++        if (addr < 0x11000) {
++            fifo_write(s, (addr >> 12) - 1, v);
++            otg_update_irq(s);
++        }
++        return;
++    }
++    switch (addr & ~3) {
++    case GOTGINT:
++        s->reg[R(GOTGINT)] &= ~v;
++        break;
++    case GRSTCTL:
++        if (v & GRSTCTL_CSFTRST) {
++            otg_core_soft_reset(s);
++        }
++        if (v & GRSTCTL_RXFFLSH) {
++            s->rx_flushes++;
++            s->rxq_len = 0;
++            s->rx_cur.words = 0;
++        }
++        if (v & GRSTCTL_TXFFLSH) {
++            s->tx_flushes++;
++            s->pkt_len = 0;
++        }
++        s->reg[R(GRSTCTL)] = v & GRSTCTL_TXFNUM_MASK;
++        break;
++    case GINTSTS:
++        s->reg[R(GINTSTS)] &= ~(v & GINTSTS_W1C);
++        break;
++    case GRXSTSR:
++    case GRXSTSP:
++    case GNPTXSTS:
++    case GSNPSID:
++    case GHWCFG1:
++    case GHWCFG2:
++    case GHWCFG3:
++    case GHWCFG4:
++    case DSTS:
++    case DAINT:
++        break;                                  /* read-only */
++    case DCTL: {
++        bool was = otg_soft_connected(s);
++        if (v & DCTL_SGNPINNAK) {
++            s->in_nak = true;
++        }
++        if (v & DCTL_CGNPINNAK) {
++            s->in_nak = false;
++        }
++        if (v & DCTL_SGOUTNAK) {
++            s->out_nak = true;
++        }
++        if (v & DCTL_CGOUTNAK) {
++            s->out_nak = false;
++        }
++        s->reg[R(DCTL)] = v & ~(DCTL_WO | DCTL_RO);
++        if (was != otg_soft_connected(s)) {
++            if (was) {
++                s->disconnects++;
++            } else {
++                s->connects++;
++            }
++        }
++        break;
++    }
++    default:
++        if (is_epctl(addr, &in, &n)) {
++            otg_write_epctl(s, in, n, v);
++        } else if ((addr >= 0x908 && addr < 0x908 + 0x20 * ESP32S3_USB_OTG_EPS && (addr & 0x1F) == 0x08) ||
++                   (addr >= 0xB08 && addr < 0xB08 + 0x20 * ESP32S3_USB_OTG_EPS && (addr & 0x1F) == 0x08)) {
++            s->reg[R(addr)] &= ~v;              /* DIEPINTn / DOEPINTn: write 1 to clear */
++        } else if (addr >= 0x918 && addr < 0x918 + 0x20 * ESP32S3_USB_OTG_EPS && (addr & 0x1F) == 0x18) {
++            break;                              /* DTXFSTSn: read-only */
++        } else {
++            s->reg[R(addr)] = v;
++        }
++        break;
++    }
++    otg_update_irq(s);
++}
++
++static const MemoryRegionOps usb_otg_ops = {
++    .read = usb_otg_read,
++    .write = usb_otg_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++/* ---- USB_WRAP and RTC_CNTL_USB_CONF ------------------------------------------ */
++static uint64_t usb_wrap_read(void *opaque, hwaddr addr, unsigned size)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(opaque);
++    switch (addr) {
++    case WRAP_OTG_CONF:  return s->wrap_otg_conf;
++    case WRAP_TEST_CONF: return s->wrap_test_conf;
++    case WRAP_DATE:      return s->wrap_date;
++    default:
++        qemu_log_mask(LOG_UNIMP, "esp32s3.usb_wrap: read 0x%03" HWADDR_PRIx "\n", addr);
++        return 0;
++    }
++}
++
++static void usb_wrap_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(opaque);
++    switch (addr) {
++    case WRAP_OTG_CONF:  s->wrap_otg_conf = value; break;
++    case WRAP_TEST_CONF: s->wrap_test_conf = value; break;
++    case WRAP_DATE:      s->wrap_date = value; break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "esp32s3.usb_wrap: write 0x%03" HWADDR_PRIx " = 0x%08" PRIx64 "\n", addr, value);
++        break;
++    }
++}
++
++static const MemoryRegionOps usb_wrap_ops = {
++    .read = usb_wrap_read,
++    .write = usb_wrap_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static uint64_t usb_conf_read(void *opaque, hwaddr addr, unsigned size)
++{
++    return ESP32S3_USB_OTG(opaque)->rtc_usb_conf;
++}
++
++static void usb_conf_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++    ESP32S3_USB_OTG(opaque)->rtc_usb_conf = value;
++}
++
++static const MemoryRegionOps usb_conf_ops = {
++    .read = usb_conf_read,
++    .write = usb_conf_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++/* ---- state, reset, type -------------------------------------------------------- */
++void esp32s3_usb_otg_state_json(ESP32S3UsbOtgState *s, GString *j)
++{
++    g_string_append_printf(j, "{\"phy\":\"%s\",\"pad_enable\":%s,\"device_mode\":%s,\"soft_connect\":%s,"
++        "\"dp_pullup\":%s,\"core_resets\":%" PRIu64 ",\"rx_flushes\":%" PRIu64 ",\"tx_flushes\":%" PRIu64 ","
++        "\"connects\":%" PRIu64 ",\"disconnects\":%" PRIu64 ",\"gahbcfg\":\"0x%08x\",\"gintmsk\":\"0x%08x\","
++        "\"gintsts\":\"0x%08x\",\"dcfg\":\"0x%08x\",\"dctl\":\"0x%08x\",\"irq\":%s,\"irq_raises\":%" PRIu64 ","
++        "\"fifo_words_in\":%" PRIu64 ",\"fifo_words_out\":%" PRIu64 ",\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"usb_conf\":\"0x%08x\","
++        "\"wrap_otg_conf\":\"0x%08x\",\"host\":{\"step\":\"%s\",\"error\":\"%s\",\"resets\":%" PRIu64 ","
++        "\"setups\":%" PRIu64 ",\"descriptor\":\"",
++        otg_phy_is_otg(s) ? "otg" : "usj", (s->wrap_otg_conf & WRAP_PAD_ENABLE) ? "true" : "false",
++        otg_force_host(s) ? "false" : "true", otg_soft_connected(s) ? "true" : "false",
++        otg_dp_pullup(s) ? "true" : "false", s->core_resets, s->rx_flushes, s->tx_flushes,
++        s->connects, s->disconnects, s->reg[R(GAHBCFG)], s->reg[R(GINTMSK)], otg_gintsts(s),
++        s->reg[R(DCFG)], s->reg[R(DCTL)], s->irq_level ? "true" : "false", s->irq_raises,
++        s->fifo_words_in, s->fifo_words_out, s->reads, s->writes, s->rtc_usb_conf, s->wrap_otg_conf,
++        host_step_name[s->host_step], s->host_error, s->host_resets, s->host_setups);
++    for (int i = 0; i < s->desc_len; i++) {
++        g_string_append_printf(j, "%s%02x", i ? " " : "", s->desc[i]);
++    }
++    g_string_append(j, "\"}}");
++}
++
++static void usb_otg_reset_regs(ESP32S3UsbOtgState *s)
++{
++    memset(s->reg, 0, sizeof(s->reg));
++    s->reg[R(GUSBCFG)] = 0x00001440;
++    s->reg[R(GRXFSIZ)] = 0x00000100;
++    s->reg[R(GNPTXFSIZ)] = 0x01000100;
++    s->reg[R(HPTXFSIZ)] = 0x10000200;
++    for (int n = 1; n <= 4; n++) {
++        s->reg[R(DPTXFSIZN(n))] = 0x10000200;
++    }
++    s->reg[R(0x404)] = 0x000017D7;              /* HFIR */
++    s->reg[R(0x408)] = 0x00003FFF;              /* HFNUM */
++    s->reg[R(DCFG)] = 0x08100000;
++    s->reg[R(DCTL)] = 0x00002000;
++    s->reg[R(DSTS)] = 0x00000002;
++    s->reg[R(0x828)] = 0x000017D7;              /* DVBUSDIS */
++    s->reg[R(0x82C)] = 0x000005B8;              /* DVBUSPULSE */
++    s->reg[R(0x830)] = 0x08020020;              /* DTHRCTL */
++    for (int n = 0; n < ESP32S3_USB_OTG_EPS; n++) {
++        s->reg[R(DIEPCTL(n))] = DXEPCTL_USBACTEP;
++        s->reg[R(DOEPCTL(n))] = DXEPCTL_USBACTEP;
++    }
++    s->wrap_otg_conf = 0x001C0000;
++    s->wrap_test_conf = 0;
++    s->wrap_date = 0x02102010;
++    s->rtc_usb_conf = 0;
++    s->in_nak = s->out_nak = false;
++    s->rxq_len = s->rxq_head = 0;
++    s->rx_cur.words = 0;
++    s->pkt_len = 0;
++}
++
++static void usb_otg_reset_hold(Object *obj, ResetType type)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(obj);
++    usb_otg_reset_regs(s);
++    timer_del(&s->host_timer);
++    s->host_step = HOST_IDLE;     /* a reset of the chip ends the enumeration; the counters stay */
++    s->irq_level = false;
++    qemu_set_irq(s->irq, 0);
++}
++
++static void usb_otg_init(Object *obj)
++{
++    ESP32S3UsbOtgState *s = ESP32S3_USB_OTG(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    memory_region_init_io(&s->iomem, obj, &usb_otg_ops, s, TYPE_ESP32S3_USB_OTG, ESP32S3_USB_OTG_SIZE);
++    memory_region_init_io(&s->wrap_mem, obj, &usb_wrap_ops, s, "esp32s3.usb_wrap", ESP32S3_USB_WRAP_SIZE);
++    memory_region_init_io(&s->usb_conf_mem, obj, &usb_conf_ops, s, "esp32s3.rtc_usb_conf", 4);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_mmio(sbd, &s->wrap_mem);
++    sysbus_init_mmio(sbd, &s->usb_conf_mem);
++    sysbus_init_irq(sbd, &s->irq);
++    timer_init_ns(&s->host_timer, QEMU_CLOCK_VIRTUAL, host_tick, s);
++    object_property_add(obj, "host", "string", usb_otg_get_host, usb_otg_set_host, NULL, NULL);
++    usb_otg_reset_regs(s);
++}
++
++static void usb_otg_class_init(ObjectClass *klass, void *data)
++{
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++    rc->phases.hold = usb_otg_reset_hold;
++}
++
++static const TypeInfo usb_otg_info = {
++    .name = TYPE_ESP32S3_USB_OTG,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(ESP32S3UsbOtgState),
++    .instance_init = usb_otg_init,
++    .class_init = usb_otg_class_init,
++};
++
++static void usb_otg_register_types(void)
++{
++    type_register_static(&usb_otg_info);
++}
++
++type_init(usb_otg_register_types)
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 346807e..c6c1c07 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -187,6 +187,7 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
+   'esp32s3_saradc.c',
+   'esp32s3_rfstub.c',
+   'x4pro_rtcio.c',
++  'esp32s3_usb_otg.c',
+   'esp32s3_rng.c',
+   'esp32s3_pms.c',
+   'esp_hmac.c',
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 984caf2..14b2ffd 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -34,6 +34,7 @@
+ #include "hw/misc/esp32s3_saradc.h"
+ #include "hw/misc/esp32s3_rfstub.h"
+ #include "hw/misc/x4pro_rtcio.h"
++#include "hw/misc/esp32s3_usb_otg.h"
+ #include "hw/misc/x4pro_hotlog.h"
+ #include "qapi/qmp/qjson.h"
+ #include "qapi/qmp/qdict.h"
+@@ -69,7 +70,6 @@ typedef struct IoLogRegion {
+ static IoLogRegion iolog_regions[] = {
+     { "iomux",     DR_REG_IO_MUX_BASE,          0x1000 },
+     { "spi3",      DR_REG_SPI3_BASE,            0x1000 },
+-    { "usb_wrap",  DR_REG_USB_WRAP_BASE,        0x1000 },
+     { "rmt",       DR_REG_RMT_BASE,             0x1000 },
+     { "apb_saradc",0x60040000,                  0x1000 },
+     { "pcnt",      0x60017000,                  0x1000 },
+@@ -79,7 +79,6 @@ static IoLogRegion iolog_regions[] = {
+     { "i2s0",      0x6000F000,                  0x1000 },
+     { "i2s1",      0x6002D000,                  0x1000 },
+     { "lcd_cam",   0x60041000,                  0x1000 },
+-    { "usb_otg",   0x60080000,                  0x40000 },
+     /* radio side, unmodelled: the stock's WiFi start touches these (docs/NEXT_PHASE.md 3.2) */
+     { "rtc_i2c",   DR_REG_RTC_I2C_BASE,         0x400  },
+     { "hinf",      DR_REG_HINF_BASE,            0x1000 },
+@@ -330,6 +329,7 @@ struct X4ProBoardState {
+     ESP32S3SarAdcState *saradc;
+     ESP32S3RfStubState *rf;
+     X4ProRtcIoState *rtcio;
++    ESP32S3UsbOtgState *usb_otg;
+ };
+ 
+ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+@@ -445,6 +445,11 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+         g_string_append_printf(j, "\"rtcio\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"pad_writes\":%" PRIu64 ",\"hold_mask\":\"0x%x\"},",
+             b->rtcio->reads, b->rtcio->writes, b->rtcio->pad_writes, x4pro_rtcio_hold_mask(b->rtcio));
+     }
++    if (b->usb_otg) {
++        g_string_append(j, "\"usb_otg\":");
++        esp32s3_usb_otg_state_json(b->usb_otg, j);
++        g_string_append_c(j, ',');
++    }
+     if (b->rf) {
+         g_string_append_printf(j, "\"rf\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"sticky\":%d,\"hot\":",
+                                b->rf->reads, b->rf->writes, b->rf->n_sticky);
+@@ -732,6 +737,23 @@ static void x4pro_machine_init(MachineState *machine)
+         rf = ESP32S3_RFSTUB(dev);
+     }
+ 
++    /* USB OTG (DWC2 FS core) at 0x60080000 with USB_WRAP and RTC_CNTL_USB_CONF, which route the
++     * internal PHY to it: the stock firmware's USB mode (TinyUSB device, mass storage) */
++    ESP32S3UsbOtgState *usb_otg;
++    {
++        DeviceState *dev = qdev_new(TYPE_ESP32S3_USB_OTG);
++        object_property_add_child(OBJECT(machine), "x4pro-usb-otg", OBJECT(dev));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
++        memory_region_add_subregion_overlap(sys_mem, ESP32S3_USB_OTG_BASE, sysbus_mmio_get_region(sbd, 0), 2);
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_WRAP_BASE, sysbus_mmio_get_region(sbd, 1), 2);
++        /* one word of RTC_CNTL, above the sleep overlay (priority 2) that answers the rest */
++        memory_region_add_subregion_overlap(sys_mem, DR_REG_RTCCNTL_BASE + ESP32S3_RTC_USB_CONF_OFF,
++                                            sysbus_mmio_get_region(sbd, 2), 3);
++        sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(intmatrix, ETS_USB_INTR_SOURCE));
++        usb_otg = ESP32S3_USB_OTG(dev);
++    }
++
+     /* Board state object: /machine/x4pro-board */
+     {
+         DeviceState *dev = qdev_new(TYPE_X4PRO_BOARD);
+@@ -740,6 +762,7 @@ static void x4pro_machine_init(MachineState *machine)
+         b->gpio = gpio; b->spi2 = spi2; b->epd = epd; b->usj = usj_state; b->input = input;
+         b->i2c0 = i2c0; b->gt911 = gt911; b->cw2017 = cw2017; b->rtc = rtc;
+         b->ledc = ledc; b->sleep = sleep; b->ana = ana; b->saradc = saradc; b->rf = rf; b->rtcio = rtcio;
++        b->usb_otg = usb_otg;
+         qdev_realize_and_unref(dev, NULL, &error_fatal);
+     }
+ 
+diff --git a/include/hw/misc/esp32s3_usb_otg.h b/include/hw/misc/esp32s3_usb_otg.h
+new file mode 100644
+index 0000000..de89057
+--- /dev/null
++++ b/include/hw/misc/esp32s3_usb_otg.h
+@@ -0,0 +1,68 @@
++/*
++ * ESP32-S3 USB OTG (Synopsys DWC2 FS core at 0x60080000) in device mode, with the two
++ * small blocks that route the internal full-speed PHY to it: USB_WRAP (0x60039000) and
++ * RTC_CNTL_USB_CONF (0x60008120). Enough for TinyUSB's dcd_dwc2 to initialise and to sit
++ * on an idle bus (no host: no bus reset, no SOF, no SETUP), and a small built-in host that,
++ * on request, resets the bus and reads the device descriptor the firmware returns
++ * (GET_DESCRIPTOR(Device) on EP0). No other transfer.
++ * x4pro-emu, GPL-2.0-or-later.
++ */
++#pragma once
++
++#include "hw/sysbus.h"
++#include "qemu/timer.h"
++
++#define TYPE_ESP32S3_USB_OTG "esp32s3.usb_otg"
++OBJECT_DECLARE_SIMPLE_TYPE(ESP32S3UsbOtgState, ESP32S3_USB_OTG)
++
++#define ESP32S3_USB_OTG_BASE       0x60080000
++#define ESP32S3_USB_OTG_SIZE       0x40000     /* registers, 16 FIFO windows, direct FIFO RAM access */
++#define ESP32S3_USB_OTG_REGS       0x1000      /* the register file proper */
++#define ESP32S3_USB_WRAP_SIZE      0x1000
++#define ESP32S3_RTC_USB_CONF_OFF   0x120       /* RTC_CNTL_USB_CONF_REG */
++#define ESP32S3_USB_OTG_EPS        7           /* EP0 + GHWCFG2.NUMDEVEPS (6) */
++#define ESP32S3_USB_OTG_RXQ        8           /* host-side RX FIFO entries (status words) */
++#define ESP32S3_USB_OTG_DESC_MAX   64
++
++typedef struct ESP32S3UsbOtgRxEntry {
++    uint32_t sts;                 /* GRXSTSP word */
++    uint32_t data[2];             /* up to 8 bytes (a SETUP packet); OUT data is never more here */
++    uint8_t words, popped;        /* data words in the FIFO behind this entry, words read so far */
++} ESP32S3UsbOtgRxEntry;
++
++struct ESP32S3UsbOtgState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;           /* 0: DWC2 core */
++    MemoryRegion wrap_mem;        /* 1: USB_WRAP */
++    MemoryRegion usb_conf_mem;    /* 2: RTC_CNTL_USB_CONF, one word */
++    qemu_irq irq;
++
++    uint32_t reg[ESP32S3_USB_OTG_REGS / 4];
++    uint32_t wrap_otg_conf, wrap_test_conf, wrap_date;
++    uint32_t rtc_usb_conf;
++    bool in_nak, out_nak;         /* DCTL global IN / OUT NAK in effect */
++    bool irq_level;
++
++    /* counters for the board state */
++    uint64_t reads, writes, core_resets, rx_flushes, tx_flushes, irq_raises;
++    uint64_t connects, disconnects, fifo_words_in, fifo_words_out;
++
++    /* the built-in host: one enumeration (bus reset, GET_DESCRIPTOR(Device), status) */
++    QEMUTimer host_timer;
++    int host_step;                /* 0 idle; see esp32s3_usb_otg.c */
++    char host_error[64];
++    uint64_t host_resets, host_setups;
++    ESP32S3UsbOtgRxEntry rxq[ESP32S3_USB_OTG_RXQ];
++    int rxq_head, rxq_len;
++    ESP32S3UsbOtgRxEntry rx_cur;  /* the entry GRXSTSP popped last: its data words come next */
++    bool host_short;              /* the data stage ended with a short packet */
++    uint16_t host_wlength;
++    uint8_t desc[ESP32S3_USB_OTG_DESC_MAX];
++    int desc_len;
++    uint8_t pkt[ESP32S3_USB_OTG_DESC_MAX];   /* the IN packet being written into FIFO 0 */
++    int pkt_len;
++    int64_t host_t0_ns;
++};
++
++/* the state the board reports as `usb_otg` (one JSON object, appended to j) */
++void esp32s3_usb_otg_state_json(ESP32S3UsbOtgState *s, GString *j);
+-- 
+2.54.0 (Apple Git-157)
+

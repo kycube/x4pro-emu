@@ -1,7 +1,7 @@
 From f0d92bf9dc46b457d0f67c2b6370b0ea7d4dc5ac Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 22:04:49 -0500
-Subject: [PATCH 32/35] esp32s3.ledc: one fade-duty helper, a named timer
+Subject: [PATCH 32/36] esp32s3.ledc: one fade-duty helper, a named timer
  context
 
 ledc_cur_duty() and ledc_fade_target() computed the same clamped

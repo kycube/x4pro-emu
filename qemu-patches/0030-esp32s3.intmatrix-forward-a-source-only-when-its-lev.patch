@@ -1,7 +1,7 @@
 From 212d0634ab8da72b45f9c2ef2214c67d38cbbefb Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 21:58:34 -0500
-Subject: [PATCH 30/35] esp32s3.intmatrix: forward a source only when its level
+Subject: [PATCH 30/36] esp32s3.intmatrix: forward a source only when its level
  changes
 
 Since patch 0006 every qemu_set_irq() on a source walks all 99 sources of

@@ -1,7 +1,7 @@
 From 924b37cd2e40d9975fef78efacf969c0555291c8 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Mon, 12 Oct 2026 15:40:20 -0500
-Subject: [PATCH 19/35] esp32s3: the GDMA reaches PSRAM through the data
+Subject: [PATCH 19/36] esp32s3: the GDMA reaches PSRAM through the data
  cache's MMU
 
 The GDMA's address space was rooted at the internal DRAM region alone, so
