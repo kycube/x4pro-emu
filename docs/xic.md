@@ -1,6 +1,8 @@
-# The stock `.xic` screen-capture format (Settings → Developer → Screen Capture)
+# The stock `.xic` screen-capture format (the light panel's Screen Capture button)
 
-Session 5 (2026-09-06), squad S2. How the stock `xteink_app` 7.2.4 (`images/device/stock-app0-7.2.4.bin`)
+Session 5 (2026-09-06), squad S2. Addresses are 7.2.4's; the developer stub is re-located for 7.5.4 and 7.6.8
+in `docs/stock-7.5.4.md` / `docs/stock-7.6.8.md` §2, and the capture path is the same there
+(`docs/parity.md` runs it on 7.6.8). How the stock `xteink_app` 7.2.4 (`images/device/stock-app0-7.2.4.bin`)
 writes a screen capture, how to reach it in `x4emu`, and the `.xic` layout, decoded and verified
 against a panel screenshot (0 pixels differ). The decoder, the developer-mode patcher and the
 committed capture/panel pair are listed at the end.
@@ -168,9 +170,10 @@ note=full memory dump is emitted to stdout by Memory::dump
   screen (anti-aliased text through a GC refresh) would produce one to confirm the second plane's
   order and the level mapping. Bytes 11 and 20–23 are unknown (always 0 here).
 - Whether the *real* device (untouched here) enables developer mode by some out-of-band means (a
-  factory tool, a USB command, an OTA build with the predicate compiled live) is unknown; in the
-  7.2.4 image on the device the predicate is the same stub, so on-device Screen Capture is likewise
-  unreachable by a normal user gesture in this firmware version.
+  factory tool, a USB command, an OTA build with the predicate compiled live) is unknown; 7.5.4 and
+  7.6.8 carry the same return-0 stub, so on-device Screen Capture is unreachable by a normal user
+  gesture in every version seen. The device-parity session puts the patched 7.6.8 on the reader
+  (`docs/parity.md`).
 
 ## Tools and tests
 
@@ -181,12 +184,13 @@ Everything above is implemented and guarded in the tree; the proof-of-concept sc
   screenshot`, portrait captures un-rotated, exit 1 when they differ), `--encode IN.png OUT.xic`
   (version 1 / levels 1 / planes 1). `decode_xic`, `encode_xic`, `compare` are importable; the module
   docstring is the manual. The grey path is the documented two-plane guess.
-- **`tools/stockdev.py`** — enables developer mode in a stock 7.2.4 image (`IMAGE [--check]`, a bare
-  app image or a 16 MB flash image with app0 at 0x10000): verifies the stub bytes, writes the one
-  byte at `0x4eabe4`, recomputes the ESP checksum byte and the appended SHA-256 and re-parses the
-  result. `--check` reports patched / unpatched / unknown (exit 0 / 1 / 2). It refuses anything that
-  is not the 7.2.4 stub, and warns that an image made from the dump still carries the owner's
-  credentials.
+- **`tools/stockdev.py`** — enables developer mode in a stock image, 7.2.4, 7.5.4 or 7.6.8 (`IMAGE
+  [--check]`, a bare app image or a 16 MB flash image with app0 at 0x10000; the site comes from
+  `tools/stockver.d/`): verifies the stub bytes, writes the one byte (`0x4eabe4` in 7.2.4),
+  recomputes the ESP checksum byte and the appended SHA-256 and re-parses the result. `--check`
+  reports patched / unpatched / unknown (exit 0 / 1 / 2). It refuses any other firmware, and warns
+  that an image made from the dump still carries the owner's credentials. `tools/stockpatch.py
+  apply IMAGE developer-menu` is the same patch.
 - **`tests/data/stock-home-capture.xic`** + **`tests/data/stock-home-panel.png`** — the verified
   pair: a Home capture the stock wrote in the emulator and the panel screenshot taken just before it,
   0 pixels apart. Both are emulator-made and safe to commit. (The second run's pair is not committed:

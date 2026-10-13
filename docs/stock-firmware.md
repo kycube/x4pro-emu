@@ -12,6 +12,15 @@ file offset = VA − segment load address + segment file offset (table below).
 Scratch material (disassembly windows, string lists, vtable dumps) is in the session's scratchpad
 under `survey/` and is not needed to use this document.
 
+> **Status (2026-10-13).** Every address below is **7.2.4**'s; the device runs 7.6.8. What moved, and the
+> re-located sites the tools use, are in `docs/stock-7.5.4.md` and `docs/stock-7.6.8.md` (the constants in
+> `tools/stockver.d/`). This survey was written before most of its questions were answered; the answers,
+> where they landed: unwrapped Lua apps load once an `app.xtapp` container sits beside them, unsigned
+> (§10 "Probed in session 7", `docs/lua-apps.md`); the `.xtf` metric bytes and CRC-32 words (§4
+> correction, `tools/xtfont.py`); the label packs' free tail and `compact` (§6 correction,
+> `tools/stockstrings.py`); the hidden menu rows and the developer menu (`tools/stockpatch.py`); Ghidra is
+> installed (§9). The lock-screen route, the icon table and the layout constants are still open.
+
 ## 1. The binary's shape
 
 `esptool image-info`: 8 segments, entry 0x40379908, checksum 0x89 and the appended SHA-256 both valid,
@@ -154,7 +163,8 @@ description, app_icon_s, app_icon_l, splash, display, permissions (sys.battery, 
 lockscreen), interval_sec, preload_assets`. Packages are wrapped (`xteink.xtapp.wrap.%s`,
 `xteink.xtapp.appdek.wrap.v2`, `dek_wrap_alg`, `dek_wrap_key_id`, `dek_wrap_ephemeral_pub`,
 `wrapped_dek_pack`, `hmac_code/assets/data/fonts`, `iv_*`): **whether an unwrapped
-`manifest.json` + `index.lua` directory is accepted is not established** — the loader has both the
+`manifest.json` + `index.lua` directory is accepted is not established** *(answered later: with an
+unsigned `app.xtapp` container beside it, yes — §10 "Probed in session 7")* — the loader has both the
 `%s/%s/app.xtapp` path (referenced at 0x42002cd8, 0x42106150, 0x42187f2c) and `index.lua`; only a
 run in the emulator (a plain app directory on the card) or a read of the loader will tell. If it is,
 "a new screen" becomes a Lua file, which changes the whole cost picture (§10).
@@ -413,8 +423,8 @@ list, vtables, the i18n packs, the wallpapers, the fonts. It could **not** cheap
 function draws the Settings row and where does its y come from": that needs cross-references from
 literal pools to functions, function boundaries, and ideally a decompiler.
 
-On this Mac nothing is installed: no Java, no Ghidra, no rizin/radare2, no capstone (checked `PATH`,
-`/Applications`, `brew list`, `/usr/libexec/java_home`). What it would take (not done, per the brief):
+*(Written before the session-7 install above; kept for the reasoning.)* At the time nothing was installed:
+no Java, no Ghidra, no rizin/radare2, no capstone. What it would take:
 
 - **Ghidra** (`brew install --cask temurin@21 ghidra`, ~1.2 GB): recent Ghidra (11.x) ships an
   **Xtensa** processor module with decompiler support (added in the 11.1 line as far as I recall —
@@ -426,10 +436,10 @@ On this Mac nothing is installed: no Java, no Ghidra, no rizin/radare2, no capst
   layout constants of §7 and the icon table of §5 within an hour each.
 - **rizin/radare2** (`brew install rizin`): Xtensa disassembly + ESIL, no real decompiler for Xtensa;
   lighter, scriptable; useful for xref lists (`aar`) but the windowed-call analysis is weaker.
-- **capstone 5+ in the venv** (`pip install capstone`): makes the literal/xref scripts here robust
-  (no false-positive "pointers" inside instruction bytes). Smallest step, good return.
+- ~~capstone 5+ in the venv~~: capstone 5 has no Xtensa architecture, so it cannot help here (checked
+  2026-10-13; it was dropped from the venv). `tools/appdis.py` uses the toolchain's objdump instead.
 
-Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `.venv` regardless.
+Recommendation (taken): Ghidra + JDK (installed: 12.1.3 through Homebrew formulae, §9 above).
 
 ## 10. First enhancements, ranked by effort (with the evidence pointer)
 
@@ -437,16 +447,16 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
 1. **Custom sleep / power-off wallpaper** — drop a 480×800 image into `/sdcard/wallpapers/`, set it
    from Images → "Set as Lockscreen Wallpaper" (NVS `lockscrWallp`, `shutWallp`, `wallpMode`; §5).
    Verify in the emulator (Images page, sleep = short power press).
-2. **A different system font** — a `.xtfont` package (§4): write the `.xtf` converter (format above),
+2. **A different system font** *(done: `tools/xtfont.py`, `docs/fonts.md`)* — a `.xtfont` package (§4): write the `.xtf` converter (format above),
    test on the card image, install via System Font. Changes every label's look and, through
    `advance_y`, the list rhythm (§7). Medium effort, all in Python; needs one confirmation of the 4
    metric bytes and of whether `hot` is required.
-3. **A Lua app / lock screen** — *if* the script host accepts unwrapped `XTApps/<app>/{manifest.json,
+3. **A Lua app / lock screen** *(apps done: `docs/lua-apps.md`; the lock screen is still blocked)* — *if* the script host accepts unwrapped `XTApps/<app>/{manifest.json,
    index.lua}`: the "Lua Apps" menu entry and `set_as_lockscreen_app` exist (§2). One emulator
    experiment decides it; if it works, "a new screen" costs a Lua file.
 
 **Data-only, in-image edits (re-checksum with `stockdev.refresh_image`, emulator first):**
-4. **Relabel anything** — the 234-group pack at 0x3c3f7d54 (§6): rename "USB Mode" to "File Transfer",
+4. **Relabel anything** *(done: `tools/stockstrings.py`)* — the 234-group pack at 0x3c3f7d54 (§6): rename "USB Mode" to "File Transfer",
    shorten Japanese labels, etc. Bytes only.
 5. **Replace the built-in "Get Started" screen** — 96,000 payload bytes at file 0xd79e0 (§5), for the
    case where the card is absent or `wallpMode` is built-in. Needs the 2-plane encoder confirmed on the
@@ -454,7 +464,7 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
 6. **Icons** — same-size bitmap swap once the icon table is located (Ghidra, §9).
 
 **Small code patches (1–6 bytes in place):**
-7. **Show the hidden menu entries** (Extensions / Lua Apps / Statistics / Subscriptions labels exist,
+7. **Show the hidden menu entries** *(done: `tools/stockpatch.py` `hidden-menu-rows`, `lua-apps-row`)* (Extensions / Lua Apps / Statistics / Subscriptions labels exist,
    8 widgets are allocated, 5 shown) — find the gate as `stockdev.py` found the developer stub
    (a predicate or a count immediate near 0x4216b76d), flip it, screenshot.
 8. **A layout constant** (row height, margin) — after §9 locates it: a `movi` immediate or a struct
@@ -544,7 +554,8 @@ Recommendation: Ghidra + JDK when the owner agrees to the install; capstone in `
   `docs/lua-apps.md`.
 
 ### What this map still lacks
-The icon table and image-blit call signatures (§5), the second string pack's header (§6), the exact
-`.xtf` metric-byte order and the `.hot.xtfp` body (§4), the accessor of the i18n packs, whether the
-Lua host takes unsigned apps, the `Display` method names (which of the 64 entries is "flush partial"),
-and the layout constants themselves (§7). All are Ghidra-hours, not unknowns.
+The icon table and image-blit call signatures (§5), the accessor of the i18n packs, the `.hot.xtfp` body
+(§4; not needed to install a font), the `Display` method names (which of the 64 entries is "flush
+partial"), the layout constants themselves (§7) and the standby path that skips a Lua lock screen. All are
+Ghidra-hours, not unknowns. (Answered since: the `.xtf` metric-byte order (§4), the toast pack's layout
+(§6 correction; u32 from 7.5.4 on), and that the Lua host takes unsigned apps (§10, "Probed in session 7").)

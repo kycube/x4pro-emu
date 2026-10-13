@@ -47,8 +47,8 @@ registers all 65 pages unconditionally, so nothing else has to change.
 .venv/bin/python tools/stockpatch.py list SCRATCH/flash.bin
 ```
 
-`stockpatch.py` verifies the exact bytes at the site before writing, refuses any image that is not
-`xteink_app` 7.2.4, recomputes the ESP checksum byte and the appended SHA-256 the second-stage
+`stockpatch.py` verifies the exact bytes at the site before writing, refuses any image that is not a
+known `xteink_app` (7.2.4, 7.5.4, 7.6.8; the sites come from `tools/stockver.d/`), recomputes the ESP checksum byte and the appended SHA-256 the second-stage
 bootloader verifies, and re-parses the result; `revert` puts the image back byte for byte. It knows
 two other patches — `developer-menu` (Screen Capture, `docs/xic.md`) and `hidden-menu-rows` (the
 Preload List / Statistics rows) — and they combine freely. **Never patch a file under `images/`, and
@@ -122,9 +122,9 @@ one-argument forms in older notes were reading `ctx`, not an event:
 |---|---|---|
 | `on_load(ctx)` / `on_enter(ctx)` | `ctx` | seen firing |
 | `on_draw(ctx, g)` | `ctx`, and the same `g` as the global | |
-| `on_tick(ctx, n)` | `ctx`, a number | fires on its own; the number's meaning is not established |
+| `on_tick(ctx, n)` | `ctx`, a number | fires on its own; `n` is the tick interval in ms (§4c) |
 | `on_input(ctx, ev)` | `ctx`, the event table below | return `true` to claim the event |
-| `on_leave`, `on_unload` | | registered, not exercised |
+| `on_leave`, `on_unload` | | `on_leave` runs on leaving (what it writes into `ctx.state` is saved, §4c); `on_unload` not seen |
 
 **The `on_input` event table** — a plain table, no metatable, five keys:
 
@@ -133,8 +133,8 @@ one-argument forms in older notes were reading `ctx`, not an event:
 ```
 
 `x` and `y` are in the **same portrait frame you draw in**, so a hit test is a plain comparison.
-Only `type='touch'`, `gesture='tap'` have been seen; the `double_tap` / `swipe_*` names in the API
-string list have not.
+Swipes (`swipe_up/down/left/right`) and the side buttons (`type = 'key'`) arrive too (§4c); `double_tap`
+has not been seen.
 
 ### Drawing — the global `g`
 
@@ -355,14 +355,14 @@ Shorter than it was — `apps/probe` (§7) answered the API shape, the `on_input
 - **Assets.** `g:image(asset, x, y)` takes the arguments but there is no asset pack to feed it:
   `assets.xtab`, `XtabAssetSource`, `preload_assets`, `app_icon_s/l` and `splash` have still not been
   exercised, `ctx.assets:handle(name)` answers nil, and apps in the list show a default black icon.
-- **Layers.** `ctx.layers:create(w, h)` returns a real object with `dispose` and `draw_with`, and
-  `g:layer(t)` wants exactly such a table — but nothing has been *composited* through them yet, and
-  `draw_with`'s argument (a function? a layer?) is unread.
+- **Layers** are answered (§4c): `L:draw_with(function(g) … end)` paints into one, `g:layer(L, x, y)` blits it;
+  text drawn into a layer does not appear.
 - **Fonts.** `ctx.fonts:handle(name)` is nil for every built-in name, so a second text size is
   probably an app-supplied font pack; how a handle would then reach `g:text` (a fourth argument is
   accepted and ignored) is unknown.
 - **`ctx.save`** is a stub returning `false`; `ctx.state` is saved on leave and restored on start (§4c).
-- **`set_tick_rate` units**, and what the number `on_tick` receives means.
+- **`set_tick_rate`**: it takes a string (`'realtime'` … `'idle'`, §4c); the intervals come from the
+  disassembly and were not seen on screen.
 - **`ctx.lock`** (`set_interval`, `flush_once`, `interval_sec = 30`, `reason = "idle"`) belongs to
   the lock-screen route, which is still blocked: `ctx.system.set_as_lockscreen_app()` raises the
   stock's confirmation dialog and does write `user_config/{lockscrLuaApp, lockscrMode = 2,
@@ -370,9 +370,9 @@ Shorter than it was — `apps/probe` (§7) answered the API shape, the `on_input
   no presenter** — nothing on that path builds `ScriptHostPagePresenter`, so the sleep screen stays
   the stock's, and the `lockscreen.lua` entry point is unreachable for the same reason. Finding the
   standby-side gate is the next Ghidra job (docs/stock-firmware.md, "Probed in session 7").
-- **`on_leave` / `on_unload`** are registered and were not seen firing.
-- **The device.** Everything here was done in the emulator. The patched image has not been flashed
-  to the real X4 Pro.
+- **`on_unload`** was not seen firing (`on_leave` does, §4c).
+- **The device.** No patched image has been flashed to the real X4 Pro; on 7.6.8 none is needed, and
+  the gamebook (`docs/gamebook.md`) ran there from a card copy, with `ctx.state` kept across visits.
 
 ## 6. The workflow
 
@@ -398,31 +398,32 @@ $EDITOR $S/hello/index.lua
 Iterating on the script means `xtapp.py install` onto a fresh copy of the card and a reboot: the
 stock mounts the card at boot and writes to it, so edit the image while the emulator is stopped.
 
-**On the device**, when it comes to that: the app image goes into a slot through the guarded tools
-only (`tools/device.py`, backup first, never 0x0..0x10000 — CLAUDE.md, "The real device"), and the
-app directory is copied onto the card like any other file. The card side is reversible on its own;
-the patch is reverted with `tools/stockpatch.py revert IMAGE lua-apps-row`, which restores the
-image byte for byte.
+**On the device** (7.5.4 and later, what it runs): copy the app directory to `/XTApps/<app_id>/` on the
+card over the reader's USB mode; the Mini Apps row appears by itself, and deleting the directory undoes
+it. Only 7.2.4 would need the patched app image in a slot, through the guarded tools only
+(`tools/device.py`, backup first, never 0x0..0x10000 — CLAUDE.md, "The real device"); the patch is
+reverted with `tools/stockpatch.py revert IMAGE lua-apps-row`, which restores the image byte for byte.
 
-> **Every offset here is 7.2.4 only.** `stockpatch.py` reads the image's `esp_app_desc` and refuses
-> anything else, so a newer stock (the desk unit took an OTA to **7.5.4** on 2026-09-07, CLAUDE.md)
-> is rejected rather than corrupted. Porting means finding the three sites again in the new image —
-> `tools/ghidra_stock.py` on the nav-menu builder, then `tools/appdis.py` to confirm the bytes — and
-> adding a second manifest entry. The card side (`tools/xtapp.py`) is version-independent as long as
-> the container format has not changed.
+> **The offsets in §1 are 7.2.4's.** 7.5.4's and 7.6.8's sites are in `docs/stock-7.5.4.md` and
+> `docs/stock-7.6.8.md` §2 and in `tools/stockver.d/`, which `stockpatch.py` selects by the image's
+> `esp_app_desc`; an unknown version is refused rather than corrupted. Porting to the next OTA is a new
+> version file (the recipe is in `docs/stock-7.6.8.md` §5). The card side (`tools/xtapp.py`) is
+> version-independent as long as the container format has not changed.
 
 ## 7. The apps in `apps/`
 
-Four app directories live in the repo, each one `manifest.json` + `index.lua`, ready for
+Six app directories live in the repo, each one `manifest.json` + `index.lua`, ready for
 `tools/xtapp.py install`. `app_id` and the directory name are kept the same, because `install` uses
 `app_id` for the card directory and a mismatch is confusing on the device.
 
 | directory | `app_id` | what it is |
 |---|---|---|
-| `apps/probe/` | `probe` | the API dump §4 was written from: it enumerates `g`, every `ctx` sub-table and every `ctx.sys` getter, calls the ones that cannot change state, catches the error messages (a bad call's *"bad argument #2 to 'handle'"* is the only documentation the host has), and paints the lot one page per tap. The last two pages are the live `on_input` event and a set of drawing experiments. Nine pages; tap anywhere to advance |
-| `apps/status-typographic/` | `status-typographic` | **Status, variant A.** Airy: the weekday alone at the top, a hand-drawn seven-segment `HH:MM` filling the upper third, the date spelled out under it, a battery percentage with a gauge across the page, then four quiet label/value rows (uptime, network, radio, Lua heap). White space does the work; one hairline per section |
+| `apps/probe/` | `probe` | the API dump §4 was written from: it enumerates `g`, every `ctx` sub-table and every `ctx.sys` getter, calls the ones that cannot change state, catches the error messages (a bad call's *"bad argument #2 to 'handle'"* is the only documentation the host has), and paints the lot one page per tap. The text dump runs 33 lines to a page (`PER` in its `index.lua`), then come the live `on_input` event and a set of drawing experiments; tap anywhere to advance |
+| `apps/status-typographic/` | `status-typographic` | **Status, variant A.** Airy: the weekday alone at the top, a hand-drawn seven-segment `HH:MM` filling the upper third, the date spelled out under it, a battery percentage with a gauge across the page, then four quiet label/value rows (uptime, network, radio, Lua heap). White space does the work; one hairline per section. Its right-aligned values still use an estimated width table (kept so its golden holds), so "0h 00m" lands about 20 px past its right margin; the owner wants it left as it is |
 | `apps/status-panels/` | `status-panels` | **Status, variant B, the owner's pick.** The same facts as framed cards: a solid header band, a clock card, a battery card with a wide gauge, a 2 × 2 grid of stat cards and a footer band. Denser, more "instrument panel". Its geometry is a three-number scale — page margin 24, card padding 18, gap between cards 16 — and every right-aligned string is placed with the measured advance table (§4b) |
 | `apps/probe-metrics/` | `probe-metrics` | the sheet §4b is measured from: two cells per printable character, plus the space, the awkward characters and six validation strings. Tap to change page. Re-run it if a firmware update or a new system font changes the face |
+| `apps/probe-io/` | `probe-io` | the 7.6.8 limits probe §4c is written from: 22 pages, each drawing its own evidence (files, modules, the frame cap, layers, input, ticks, refresh, persistence); `apps/probe-io/mkcard.py CARD` puts it and its test files on a card |
+| `apps/gull-rock/` | `gull-rock` | the gamebook, built by `tools/gamebook.py` from `stories/gull-rock/` (`docs/gamebook.md`); do not edit by hand |
 
 Both status apps are readable on purpose — the layout is a list of `g:` calls with the coordinates
 in plain sight, so retuning one is editing numbers. Both carry the same two workarounds, commented
@@ -461,5 +462,6 @@ bands, and each masked band is separately asserted to contain ink.
 | `tests/test_lua_apps.py` | the emulator test: menu → app list → the script painting |
 | `tests/golden/stock-menu-lua.png`, `stock-lua-apps.png`, `stock-lua-hello.png` | its three screens |
 | `tests/test_lua_status.py` | the emulator test for the two status screens |
+| `tests/test_lua_state.py`, `tests/test_aes.py` | `ctx.state` across Exit and a reboot (7.6.8); the AES model against a host AES over qtest |
 | `tests/golden/stock-lua-status-{list,typographic,panels}.png` | its three screens |
 | `docs/stock-firmware.md` | the map of the app, and how these offsets were found |

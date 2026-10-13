@@ -1,14 +1,14 @@
 # The upstream watch
 
 Everything this emulator runs on is pinned: CrossPoint Reader as the `firmware/` submodule, Espressif's
-QEMU as `QEMU_REF` in the Makefile, PlatformIO through CrossPoint's `platformio.ini` and ci.yml's core
-pin, and on the desk Mac whatever Homebrew has installed today. On 2026-10-12 a manual check after five
+QEMU as `QEMU_REF` in the Makefile, PlatformIO through CrossPoint's `platformio.ini` and the Makefile's core
+pin (`PIO_CORE_VERSION`), and on the desk Mac whatever Homebrew has installed today. On 2026-10-12 a manual check after five
 weeks found the three ways that goes stale (docs/log.md, "Upstream check after five weeks"):
 
 - **CrossPoint moved on** (1.6.5, 93 commits past the pin). It built and booted; 17 of the 18 CrossPoint
   tests passed, and the one miss was upstream's own UI change ("Recent Books" became "Library") against
   a device-made golden. Upstream drift is mostly *goldens differ*, rarely *the emulator broke*.
-- **Espressif QEMU** `esp-develop` had not moved, but when it does the 20-patch series has to follow.
+- **Espressif QEMU** `esp-develop` had not moved, but when it does the `qemu-patches/` series has to follow.
 - **Homebrew moved under the Mac's build**: `qemu/build` had been configured against a libgcrypt keg
   Homebrew had since removed, and a fresh configure failed on gnutls 3.8.13 (now `--disable-gnutls` in
   the Makefile). CI runs on Ubuntu and could not see either.
@@ -23,10 +23,10 @@ That check now runs by itself every Monday: `tools/upstream_check.py` for the qu
 | CrossPoint Reader | gitlink `firmware` (`git ls-tree HEAD firmware`) | its latest GitHub release; its default branch (`develop`) for information | report, **crosspoint-latest** |
 | freeink-sdk | the gitlink inside CrossPoint at the pin | the gitlink at that release | report |
 | platform-espressif32 | `platform =` in CrossPoint's `platformio.ini` at the pin | the same line at the release; pioarduino's latest release | report |
-| pioarduino core | `PIO_CORE_VERSION` in ci.yml | what CrossPoint's own CI installs at the release; the latest release | report |
+| pioarduino core | `PIO_CORE_VERSION` in the Makefile (ci.yml and upstream.yml read it) | what CrossPoint's own CI installs at the release; the latest release | report |
 | Espressif QEMU | `QEMU_REF` in the Makefile | `esp-develop` HEAD | report, **qemu-head** |
 | Homebrew (desk Mac) | nothing: whatever is current | a fresh configure and build on a GitHub arm64 Mac | **macos-build** |
-| This checkout (local runs only) | `qemu/build`, `.venv`, `~/.platformio/penv`, `firmware/` | the disk | report |
+| This checkout (local runs only) | `qemu/build`, `.venv`, `.venv-pio`, `~/.platformio/penv`, `firmware/` | the disk | report |
 
 ## What stays manual
 
@@ -63,9 +63,9 @@ The local section only means something on the desk Mac:
 
 - *qemu/build was configured against Homebrew kegs that are gone* — the 2026-10-12 libgcrypt case: the
   next link fails. `rm -rf qemu/build && make qemu` (a fresh configure).
-- *.venv / ~/.platformio/penv: its base interpreter is gone* — a `python@3` bottle replaced the Cellar
-  Python the venv was made from. `rm -rf .venv && make setup`; delete `~/.platformio/penv` and the next
-  `pio run` rebuilds it.
+- *.venv / .venv-pio / ~/.platformio/penv: its base interpreter is gone* — a `python@3` bottle replaced the
+  Cellar Python the venv was made from. `rm -rf .venv && make setup`; `rm -rf .venv-pio && make firmware`;
+  delete `~/.platformio/penv` and the next `pio run` rebuilds it.
 - *firmware/ is checked out at X, not the pin* — someone left the submodule elsewhere (a scratch build
   of a newer release, say). `git submodule update --init --recursive firmware`.
 
@@ -81,14 +81,14 @@ the run's summary page; screenshots and logs are in the run's artifacts.
 | `report` | always | < 1 min | a remote could not be read |
 | `crosspoint-latest` | CrossPoint's latest release is not in the pin (or `force`) | ~12 min: QEMU from ci.yml's cache, the firmware ~2 min, the pytest run ~4 min (ci.yml's figures) | the emulator broke on the new firmware, or that firmware does not build |
 | `qemu-head` | `esp-develop` moved past `QEMU_REF` (or `force`) | ~15 min: QEMU from scratch (ci.yml rebuilds it with the firmware in 7 min), then as above | the patch series conflicts, or the patched head does not build or fails `make test` |
-| `macos-build` | always | ~20–30 min, an estimate until its first run: `brew update` + install, QEMU from scratch (54 s at `-j4` on the desk Mac, longer on the runner's 3 cores), PlatformIO packages (cached after the first run), the firmware | today's Homebrew breaks `make setup`, a fresh QEMU configure/build, the fast tests or a CrossPoint boot |
+| `macos-build` | always | 14m44s on its first green run (2026-10-13): `brew update` + install, QEMU from scratch (54 s at `-j4` on the desk Mac, longer on the runner's 3 cores), PlatformIO packages (cached after the first run), the firmware | today's Homebrew breaks `make setup`, a fresh QEMU configure/build, the fast tests or a CrossPoint boot |
 
 ### Reading `report`
 
 A table of pin against upstream, then findings, each with what to do:
 
 - **drift** — something moved that the other jobs test: read *their* summaries before acting.
-- **action** — something here should change (ci.yml's core pin no longer matches CrossPoint's CI at the
+- **action** — something here should change (the Makefile's core pin no longer matches CrossPoint's CI at the
   release; a stale local build).
 - **info** — worth knowing, nothing to do yet (develop's unreleased commits, freeink-sdk moving with the
   release, a newer pioarduino platform that CrossPoint has not adopted).
@@ -110,7 +110,8 @@ an opt-in option of `tests/conftest.py` (off by default; `make test` and ci.yml 
   **failure**.
 - Everything else fails as it always would: boot not reaching Home, a timeout, a lost input, a console
   string upstream reworded. The failures are run once more (`--lf`); one that passes the second time is
-  named as *passed only on the retry* (the input race, NEXT_PHASE §0 h) and does not turn the job red.
+  named as *passed only on the retry* and does not turn the job red. That pass dates from the input race,
+  fixed on 2026-10-13 (`docs/x4emu.md`, "Input delivery"): a test that needs it now is worth a look.
 
 The verdict line says which it was. To act:
 
@@ -124,13 +125,13 @@ The verdict line says which it was. To act:
   A test that no longer fits the firmware (a menu moved, a log line reworded) is a test to update when the
   pin moves, not an emulator bug: say so in the log entry.
 - **"does not build here"** — an upstream build change (a new platform or core, a renamed env). Not the
-  emulator; check CrossPoint's own CI at the tag, and ci.yml's `PIO_CORE` when the pin moves.
+  emulator; check CrossPoint's own CI at the tag, and the Makefile's `PIO_CORE_VERSION` when the pin moves.
 
 **Moving the pin** is a decision, not a reaction to this job: the device oracles (home, reader pages,
 `tests/golden/device-*.bmp`) were captured from CrossPoint 1.6.0 on the device, so a bump needs new
 device captures, which need CrossPoint on the device (CLAUDE.md's device rules), then
-`git -C firmware checkout <tag> && git add firmware`, ci.yml's `PIO_CORE` if CrossPoint's CI moved, and a
-`make test`.
+`git -C firmware checkout <tag> && git add firmware`, the Makefile's `PIO_CORE_VERSION` if CrossPoint's CI
+moved, and a `make test`.
 
 Locally, against a release without moving the submodule (what the 2026-10-12 check and this page's
 verification did): clone the tag elsewhere (`git clone --depth 1 --branch TAG --recurse-submodules
@@ -187,8 +188,8 @@ bottle removes.
 - `tests/test_upstream_check.py` — the parsing, findings, rendering and summary with the network stubbed
   (the 2026-10-12 state as the fixture), and a guard that `GOLDEN_ORACLES` still names real tests.
 - `tests/conftest.py` — `--golden-drift FILE`, `GOLDEN_ORACLES`, the health check.
-- `.github/workflows/upstream.yml` — the four jobs; its shared parts are copies of ci.yml's (keep them in
-  step).
+- `.github/workflows/upstream.yml` — the four jobs; the shell steps it shares with ci.yml are
+  `.github/scripts/ci.sh`.
 
 **Found on its first run (2026-10-13).** Homebrew's `platformio` formula now runs on Python 3.15, and
 the pinned pioarduino platform (55.03.311) refuses anything past 3.14 ("Python version must be 3.10 …

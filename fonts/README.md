@@ -26,7 +26,8 @@ several famous names (Literata, Noto, Source Serif, Inter, Merriweather) ship fr
 
 ## Refetching the open ones
 
-All of them come from `github.com/google/fonts`; each family's path is in `docs/fonts.md`. For example:
+All of them come from `github.com/google/fonts`; the families' paths are in `docs/fonts.md` §5–6, except
+Libre Baskerville, added later for the gamebook's lettering. For example:
 
 ```bash
 curl -sfL https://raw.githubusercontent.com/google/fonts/main/ofl/charissil/CharisSIL-Regular.ttf -o fonts/charis-sil/CharisSIL-Regular.ttf

@@ -149,8 +149,9 @@ image).
 - The new `.xtapp` install / decrypt / uninstall machinery and the 64-app limit: strings only.
 - The light-panel developer buttons draw their labels clipped ("Screen Ca…") in `p-light.png`; not
   compared with 7.5.4's panel.
-- `tools/device.py` was only used as `slots --from-dump`; its writers' slot logic was not reviewed
-  for the new layout (7.6.8 boots from app0, 7.5.4 left in app1).
+- `tools/device.py` was only used as `slots --from-dump` here; its writers' plans for this layout (7.6.8
+  booting from app0, 7.5.4 in app1) were walked offline later for the parity session (`docs/parity.md`,
+  "A device session", steps 4 and 9).
 
 ## 5. How to redo the analysis
 

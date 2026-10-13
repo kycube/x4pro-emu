@@ -61,7 +61,7 @@ tools/x4emu --json state
 
 The stock firmware is Xteink's and is not in this repository: it runs from your own device's flash
 dump (`tools/device.py backup`), which stays in the gitignored `images/` because it holds your WiFi
-credentials. [CLAUDE.md](CLAUDE.md) has the full CLI reference and the stock boot recipe.
+credentials. [CLAUDE.md](CLAUDE.md) has the stock boot recipe, [docs/x4emu.md](docs/x4emu.md) every command.
 
 ## Faithful to the device
 
@@ -83,7 +83,8 @@ The models are checked against the desk unit, not just against datasheets:
 - `tools/parity.py` runs the same steps on the emulator and, from a printed runbook, on the reader, and
   compares the stock's own Screen Captures pixel by pixel, every difference masked or explained
   ([docs/parity.md](docs/parity.md)); on the emulator side the captures equal the panel on 7 of 8 screens
-  (the light panel closes itself to be captured), and the first device session is still to come.
+  (the light panel closes before a capture is taken, so it has none of its own), and the first device
+  session is still to come.
 - Touch, buttons, the capacitive Home pad, the front light (LEDC with hardware fades), the battery
   gauge, the RTC, the SD card, deep sleep and the radio blocks a WiFi start touches are modelled to
   the point where both firmwares run unpatched ([docs/hardware.md](docs/hardware.md)).
@@ -93,7 +94,7 @@ The models are checked against the desk unit, not just against datasheets:
 
 ## Lua apps and a gamebook
 
-The stock firmware shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app. An app is
+The stock firmware (7.5.4 and later) shows a **Mini Apps** row as soon as `/XTApps` on the card holds an app. An app is
 a folder with a manifest and an `index.lua`; `tools/xtapp.py` packs and installs one. What the host
 offers, and its hard limits (no file reads, a 1024-command frame cap, layers that have none), are in
 [docs/lua-apps.md](docs/lua-apps.md).
@@ -110,16 +111,16 @@ real reader, where it keeps your place between visits. Write your own with
 
 USB mass storage, WiFi and Bluetooth traffic (the radio comes up, finds no air and stops), cycle
 timing (refresh times are the device's measured ones; CPU speed is not), the electrical side of the
-GPIO matrix, RMT, I2S and USB OTG. Deep sleep is a paused VM followed by a modelled reset. The details
-are at the top of [CLAUDE.md](CLAUDE.md).
+GPIO matrix, RMT, I2S and USB OTG. Deep sleep is a paused VM followed by a modelled reset. The details,
+with what a firmware sees, are in [docs/hardware.md](docs/hardware.md#what-is-not-emulated-how-it-shows-up-for-a-firmware-developer).
 
 ## Documentation
 
 | | |
 |---|---|
-| [CLAUDE.md](CLAUDE.md) | build, the full CLI, the stock boot recipe, device rules — the entry point for people and agents alike |
+| [CLAUDE.md](CLAUDE.md) | build and test, the stock boot recipe, the device rules, where things are — the entry point for people and agents alike |
 | [docs/x4emu.md](docs/x4emu.md) | the `x4emu` CLI and its JSON shapes; installing it with pipx |
-| [docs/hardware.md](docs/hardware.md) | the X4 Pro as the emulator models it, with sources |
+| [docs/hardware.md](docs/hardware.md) | the X4 Pro as the emulator models it, with sources; what is not emulated |
 | [docs/lua-apps.md](docs/lua-apps.md) · [docs/gamebook.md](docs/gamebook.md) | writing apps for the stock firmware |
 | [docs/stock-firmware.md](docs/stock-firmware.md) · [7.5.4](docs/stock-7.5.4.md) · [7.6.8](docs/stock-7.6.8.md) | the stock app's internals, version by version |
 | [docs/README.md](docs/README.md) | every other document, with a line each |
@@ -136,7 +137,7 @@ x4emu/          the CLI as a Python package (tools/x4emu is its in-repo shim)
 qemu-patches/   our changes to Espressif's QEMU, applied by `make setup`
 models/         pure-C panel cores (SSD1677, UC8179, UC8279) with host tests and device fixtures
 tools/          flash/SD/efuse image builders, stock-firmware tools, the gamebook builder, device.py
-apps/           Lua apps for the stock firmware;  stories/  gamebook sources
+apps/           Lua apps for the stock firmware;  stories/  gamebook sources;  parity/  device-parity scripts
 tests/          pytest end-to-end and unit tests;  tests/golden/  the screens they hold
 firmware/       CrossPoint Reader (submodule)
 docs/           everything written down

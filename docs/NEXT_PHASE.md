@@ -1,153 +1,120 @@
 # NEXT PHASE — handoff for the next agent
 
-Goal of the next phase, in the owner's words: run the **stock Xteink firmware** in the emulator
+Goal of this phase, in the owner's words: run the **stock Xteink firmware** in the emulator
 (it has features CrossPoint lacks, looks better, and drives the frontlight), and make the emulator
 **world class**. This document is the whole context you need; the previous agent's context is gone.
-Read `CLAUDE.md` first (build, CLI, device rules), then this file, then `docs/log.md` for history.
+Read `CLAUDE.md` first (build, device rules, where things are), then this file, then the last entries of
+`docs/log.md`.
 
-## 0. Resume here (end of session 8, 2026-09-07; amended 2026-10-12)
+## 0. Resume here (2026-10-13, after the world-class pass)
 
-**2026-10-12: the device runs stock 7.6.8 (app0 boots), and the re-baseline on it is done** —
-`tools/stockver.d/7.6.8.json`, `docs/stock-7.6.8.md`, the three tools accept it (its string packs are
-u32 now, sixteen languages). Read the 2026-10-12 entry of `docs/log.md` first. What it changes below:
-**the Lua route needs no firmware write on the device** — 7.5.4 and 7.6.8 show the Mini Apps row by
-themselves once the card holds an app, so status screen A/B (step a) can go to the device as a card copy,
-and step c (the deployment decision) only matters for native patches such as the keyboard (b). Item e is
-confirmed (CI green), and item f is answered for 7.6.8 (its toast pack is readable; `presenter+176` is
-written by the menu presenter from an `/sdcard/XTApps` enumeration). Step b and d now target 7.6.8:
-`tools/ghidra_stock.py --image images/device/stock-app0-7.6.8.bin --version 7.6.8 …`.
-**Also 2026-10-12: the first Lua app on the reader is a gamebook** (`docs/gamebook.md`): The Keeper of Gull
-Rock, built by `tools/gamebook.py` from `stories/gull-rock/`, played on the device with state kept across
-visits. `docs/lua-apps.md` §4c is the host's measured limits (no files or `require` for a folder app, the
-1024-command frame cap, layers); new apps start there.
-**And: leaving a Lua app no longer hangs the emulator** (qemu-patches 0019/0020, the last 2026-10-12
-entry of `docs/log.md`). The AES model was there all along. The GDMA could not reach the PSRAM buffers
-ESP-IDF's DMA-AES uses, and two AES model errors (OFB IV, INC32) turned up on the way.
-`ctx.state` now round-trips through `/XTApps/<id>/state.xtsv` across Exit and reboot as on the device
-(`tests/test_lua_state.py`; `tests/test_aes.py` is the qtest known-answer suite). Open from it: the
-script time budget (a 2 s `on_draw` is cut short and leaves the app inert until Home) is unmeasured,
-and DMA-SHA through the same GDMA path is untested (no stock path seen using it yet).
+**Where things stand.** Both firmwares run unpatched: CrossPoint 1.6.0 and the stock `xteink_app` 7.2.4,
+7.5.4 and 7.6.8; the device runs **7.6.8 in app0**. `make test` is 219 tests in about two minutes on eight
+workers, with no input retries anywhere (log, "World-class pass, wave 2"). Lua apps reach the device as a
+card copy (7.5.4 and later show Mini Apps by themselves), keep `ctx.state` in the emulator as on the reader,
+and the gamebook was played on the device. Three things wait for the owner:
 
-**2026-10-13, the world-class pass (log entries "wave 1" and "wave 2"):** inputs reliable at the root, the two
-cores in TSO, `make test` in ~2 min on parallel workers, a weekly upstream watch, the device-parity harness
-(`docs/parity.md`; **the first device session with the owner is still to run**), and the Espressif upstream series
-prepared (`docs/upstream-qemu.md`; **submission waits for the owner's sign-off**). The 7.2.4 heap corruption is the
-firmware's own race (`docs/heap.md`).
+1. **The first device-parity session** (`docs/parity.md`, "A device session"): the harness is built and the
+   emulator side passes on 7 of 8 screens (the light panel cannot be captured); the owner walks the runbook
+   on the reader. It needs the developer-patched 7.6.8 in app0 and a fresh tagged backup first.
+2. **Sign-off for the Espressif upstream series** (`docs/upstream-qemu.md` §8): branches `upstream-s3` and
+   `x4pro-on-upstream` are ready and checkpatch-clean; nothing is pushed.
+3. **The deployment decision for native patches** (item c below).
 
-**Work is organised as squads: read §10 before starting anything.** Sessions 5–8 ran four to five agents in
-parallel with cost balancing (Fable for models and symbol-less firmware reading, Opus for C/Python work with
-a mechanical acceptance). The session-8 entry of `docs/log.md` says what each agent delivered.
+**Work is organised as squads: read §10 before starting anything.**
 
-1. `cd /Users/mini/x4pro-emu && make test` — see the session-8 log entry for the current count and time; it
-   needs the built QEMU, the CrossPoint build and the gitignored `images/` (device dumps, card mirror, ROM ELF,
-   `images/ghidra/stock-7.2.4/` and now `stock-7.5.4/` — each rebuilt in a minute by
-   `tools/ghidra_stock.py analyze [--version 7.5.4]`). `qemu/build-s1/`, `build-s2/` are agents' build
-   directories (`X4EMU_QEMU=…`): the pattern for QEMU work beside other agents.
-2. **Session 8 in one line:** the re-baseline the OTA forced is **done** — 7.5.4 keeps the Lua host and still
-   takes unsigned apps, its three patch sites are re-located and boot-verified (`docs/stock-7.5.4.md`), the
-   three stock tools read a per-version JSON instead of literals (`tools/stockver.py` + `tools/stockver.d/`),
-   `tools/device.py` parses otadata so it can no longer write a slot the bootloader does not start, and the
-   stock's Lua API is mapped by an app that draws it (`apps/probe/`), which produced two status screens for
-   the owner to choose between (`apps/status-typographic/`, `apps/status-panels/`).
-3. **Facts a next agent should not re-derive.** 7.5.4 = app1 of `images/device/flash-2026-09-07-a.bin`
-   (flash 0x7F0000), extracted as `images/device/stock-app1-7.5.4.bin`; a 7.5.4 *app* offset X is at
-   0x7F0000+X in that flash image, and `stockdev.app_base` finds app0, not app1. In 7.5.4 the extra nav row
-   is labelled **"Mini Apps"**, "USB Mode" is "USB" and "Cloud Sync" is "Cloud"; with all three patches
-   applied the eighth row (Settings) falls off the panel. The Lua drawing API has **eight** methods and **no
-   fill** — bars are framed or hatched — `g:text`'s y is the top of a ~24 px line box, and `ctx.fonts` offers
-   no larger face, so bigger type means shipping a font (`tools/xtfont.py`) or drawing the glyphs.
-4. **Next steps, in order:**
-   a. **The owner's pick between status screen A (typographic) and B (panels)** — screenshots went to them at
-      the end of session 8. Finish the chosen one (and consider `tools/xtfont.py` for real large digits).
-   b. **The keyboard (the owner's second wish), now against 7.5.4.** Map the stock's on-screen keyboard with
-      `tools/ghidra_stock.py --version 7.5.4`: the `KeyboardLayer{View,Presenter}` pair (the survey's class
-      list, `docs/stock-firmware.md`), where it is invoked (WiFi password, Startup Password, search), the key
-      layout table, hit-testing, the key-commit path and the text buffer. Then design the hook: new native
-      code compiled with the pioarduino Xtensa toolchain
-      (`~/.platformio/packages/toolchain-xtensa-esp-elf`) into the app slot's free space as an extra IROM
-      segment, a trampoline at the key-commit site, a dictionary on the card, a suggestion strip drawn
-      through the app's own text routine; near-miss correction = a key-adjacency-weighted edit distance over
-      the dictionary. Fable for the hook design and the segment/trampoline mechanics (a new segment means a
-      new image-header entry and the hash recomputed — `stockdev.refresh_image` handles the hash, the segment
-      table needs code); Opus for the dictionary, the correction algorithm (host-tested in Python, then C),
-      and the tests.
-   c. **Device deployment path — blocked on one decision by the owner.** `tools/device.py` now knows which
-      slot boots and refuses to write the wrong one, but a patched stock can only reach the device two ways:
-      write the **booting** slot (`--slot app1`, allowed, no rollback if the image is bad — recovery is
-      `restore-stock` over the pogo pins) or write the spare slot and move the boot pointer (otadata), which
-      lives below 0x10000 and is forbidden by CLAUDE.md rule 2 without the owner's explicit go-ahead.
-      Ask in plain words; do not build the otadata writer before the answer.
-   d. Lock screen as a Lua app: the standby path reads `lockscrMode` 2 but constructs no presenter
-      (`docs/stock-firmware.md`, "Probed in session 7"); a Ghidra job on the standby coordinator, now in 7.5.4.
-   e. **CI was red from 2026-09-07 and is fixed here, unverified on GitHub**: a UNIX socket path one byte
-      over Linux's 108 (`.x4emu/pytest-test_mcp_module_imports_and_calls_in_process/console.sock` under CI's
-      20-bytes-longer checkout), now clamped by `conftest.instance_name`. **Confirm on the owner's next push**
-      — that is the only thing outstanding. `gh` is installed and logged in as kycube; it needs the Little
-      Snitch allowance and only works outside the command sandbox, so run it with the sandbox disabled.
-      `gh run list -R kycube/x4pro-emu` and `gh run view <id> --log-failed` are the tools; the unauthenticated
-      Actions API gives steps and durations but never logs or artifacts. Docker Hub pulls hang on this Mac, so
-      a containerised Linux reproduction is not available.
-   f. The 7.5.4 **toast pack** (u32 offsets, 874 groups, no `XTZB` tag) has no loadable spec yet:
-      `stockstrings` refuses that pack alone on 7.5.4. Also unanswered: who writes `presenter+176`.
-   g. `docs/stock-firmware.md` is still entirely 7.2.4 — either re-locate more of it in 7.5.4 as the work
-      needs it, or mark its heading so nobody reads its addresses as current.
-   h. ~~**The input-delivery race belongs in `x4emu`, not in every test.**~~ **Done 2026-10-13**: the cause was the
-      GT911 model wiping an unread release; frames latch now and `x4emu` holds inputs in guest time until seen
-      (log entry "World-class pass, wave 1"). The original note follows. Five full runs in session 8 each
-      lost one input, in five different tests: the firmware reads the GT911 frame in 0.03 s and then never
-      repaints, because both firmwares poll input only between rendering passes that take seconds, and the
-      desk Mac runs the owner's own applications. Session 8 answered it per test (`conftest.x4emu_input`,
-      three tries, `back_to_list` outcome-driven, `test_replay` re-running its journal), which works but is
-      whack-a-mole. `x4emu tap/press/home --wait` already knows both facts it needs — the firmware read the
-      frame (`state.gt911.clears`) and no refresh followed — so re-asserting the input inside the CLI would
-      cure every test at once. Design it carefully: `record`/`replay` journals and the MCP tools share that
-      path, and a retry must never double-deliver an input the firmware did act on.
-   i. **Reading typography — a Kindle-like font panel (§11).** The owner asked for the plan, not the
-      build: face / style / size with a preview, in the reader's own settings. The reading font list
-      turned out to be wide open (`docs/reading-fonts.md`) and there is **no size control in the
-      stock at all** — the font file *is* the size — so most of the value lands in §11.3, a generated,
-      well-named set of `.xtf` files on the card, with no firmware change. Read §11 before starting;
-      §11.2 lists what has to be answered first, and the panel itself (§11.5) shares the
-      segment-and-trampoline machinery with the keyboard (b).
-   j. Carried over: the ignored-tap parity question (does the device also drop a tap right after Home? — the
-      parity harness, §9 D4); the 4-level grey `.xic`; the QMP `pmemsave` zero pages; the `esp32s3.gpspi
-      +0x38` and IO_MUX logger noise; S7 upstream (patches 0003/0006/0008/0009/0016 are the candidates).
-## 1. Where things stand (2026-09-06)
+**Next, in order:**
 
-- Repo: `/Users/mini/x4pro-emu` (symlink at `/Users/mini/xteink x4/x4pro-emu`; paths with spaces
-  break QEMU/ESP-IDF). `make test` = core unit tests + fixture replay + the pytest suite (CrossPoint, stock,
-  record/replay, `.xic`, `stockdev`, `nvsedit`), all green. `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182
-  with branch `x4pro`; **the source of truth for our QEMU changes is `qemu-patches/`** (export with
-  `cd qemu && git format-patch -o ../qemu-patches febae182..x4pro` after every QEMU commit).
+a. **The device-parity session** above, run by the coordinator with the owner present. Its results also
+   answer the old ignored-tap question (does the device, too, drop a tap that lands right after Home?).
+b. **The keyboard (the owner's second wish), against 7.6.8.** Map the stock's on-screen keyboard with
+   `tools/ghidra_stock.py --image images/device/stock-app0-7.6.8.bin --version 7.6.8`: the
+   `KeyboardLayer{View,Presenter}` pair (the class list in `docs/stock-firmware.md` §2), where it is invoked
+   (WiFi password, Startup Password, search), the key layout table, hit-testing, the key-commit path and the
+   text buffer. Then design the hook: new native code compiled with the pioarduino Xtensa toolchain
+   (`~/.platformio/packages/toolchain-xtensa-esp-elf`) into the app slot's free space, as an extra IROM
+   segment or by extending segment 2 (`docs/stock-firmware.md` §1 weighs the two), a trampoline at the key-commit site, a dictionary on the card, a
+   suggestion strip drawn through the app's own text routine; near-miss correction = a key-adjacency-weighted
+   edit distance over the dictionary. The segment work needs code (`stockdev.refresh_image` handles the
+   checksum and hash, not the segment table); the dictionary and the correction algorithm are host-tested in
+   Python first, then C.
+c. **Device deployment path for native patches — blocked on one decision by the owner.** A patched stock
+   reaches the device two ways: write the **booting** slot (app0 today: `tools/device.py flash-crosspoint
+   --firmware APP.bin --slot app0`, allowed after the backup, no rollback if the image is bad — recovery is
+   `restore-stock --slot app0` over the pogo pins), or write the spare slot and move the boot pointer
+   (otadata), which lives below 0x10000 and is forbidden by CLAUDE.md rule 2 without the owner's explicit
+   go-ahead. Ask in plain words; do not build an otadata writer before the answer. Lua apps and data-only
+   changes on the card need neither.
+d. **Lock screen as a Lua app**: the standby path reads `lockscrMode` 2 but constructs no presenter
+   (`docs/stock-firmware.md`, "Probed in session 7"; `docs/lua-apps.md` §5); a Ghidra job on the standby
+   coordinator, now in 7.6.8.
+e. **Reading typography — a Kindle-like font panel (§11).** Plan only, as the owner asked. §11 was written
+   against 7.2.4; 7.6.8's label pack gained font-picker groups ("All", "No TTF fonts", "No XTF fonts", "No
+   BIN fonts", "Size") and a font-download set (`docs/stock-7.6.8.md` §1), so the picker has probably
+   changed: re-survey it on 7.6.8 before relying on §11.1's "no size control at all".
+f. **Smaller open items**: the Lua script time budget (a 2 s `on_draw` is cut short and leaves the app inert
+   until Home; the budget and the device's behaviour are unmeasured); DMA-SHA through the GDMA path (no stock
+   path seen using it); why 7.2.4's font restore job runs twice (`docs/heap.md`); the firmware's own reader of
+   the u32 string packs (header byte 3) and the `.xtapp` install/decrypt/uninstall strings with their 64-app
+   limit (`docs/stock-7.6.8.md` §4); 7.5.4's toast pack (u32, 874 groups) stays unloadable (the 7.6.8
+   `offset_width` change would likely describe it; not tried);
+   `tests/golden/stock-lua-hello.png` is 7.2.4-made, so a 7.6.8 Lua test needs its own goldens; the 4-level
+   grey `.xic`; QMP `pmemsave` zero pages; the IO_MUX logger noise (525 + 525 lines per stock boot; the GP-SPI
+   +0x38 noise is gone since the 2026-10-13 review); the CrossPoint pin stays at 1.6.0 until new device captures
+   exist (1.6.5 builds and boots, `docs/upstream.md`).
+
+**Done since session 8** (each with its `docs/log.md` entry):
+
+- The 7.6.8 re-baseline: `tools/stockver.d/7.6.8.json`, `docs/stock-7.6.8.md`, u32 string packs in sixteen
+  languages; the Lua route needs no patch on 7.5.4 or 7.6.8, and the menu presenter writes `presenter+176`
+  from an `/sdcard/XTApps` enumeration (2026-10-12, "Upstream check after five weeks").
+- CI green again; the session-8 socket-path fix confirmed (same entry).
+- The owner picked status screen **B** (`apps/status-panels/`); its spacing was fixed with measured text
+  advances (commit 5c17445, `docs/lua-apps.md` §4b, §7).
+- The gamebook, played on the reader with state kept across visits (2026-10-12, "A gamebook on the stock").
+- Lua exits no longer hang: the GDMA reaches PSRAM, two AES model fixes, `ctx.state` round-trips
+  (qemu-patches 0019/0020; "A Lua app's exit no longer hangs").
+- The `spinlock.h:141` assert was QEMU's memory order on arm64: TSO (0021/0022, `docs/smp.md`); lost inputs
+  were the GT911 model wiping an unread release: frames latch and `x4emu` holds every input in guest time
+  until seen (0023/0024, `docs/x4emu.md` "Input delivery"); the weekly upstream watch and PlatformIO in
+  `.venv-pio` ("World-class pass, wave 1").
+- The two-minute suite, the device-parity harness, the Espressif series prepared, the 7.2.4 heap corruption
+  diagnosed as the firmware's own race (`docs/heap.md`; "World-class pass, wave 2").
+
+**Facts a next agent should not re-derive.**
+
+- 7.6.8 = app0 of `images/device/flash-2026-10-12-a.bin`, extracted as `images/device/stock-app0-7.6.8.bin`; a
+  7.6.8 app offset X is at 0x10000+X in that flash image, and `stockdev.app_base` finds it. 7.5.4 = app1 of
+  `flash-2026-09-07-a.bin` (flash 0x7F0000+X; `app_base` finds app0, not app1), extracted as
+  `stock-app1-7.5.4.bin`. 7.2.4 = `stock-app0-7.2.4.bin`.
+- From 7.5.4 on the extra nav row is **"Mini Apps"**, "USB Mode" is "USB" and "Cloud Sync" is "Cloud"; with
+  all three patches applied the eighth row (Settings) falls off the panel.
+- The Lua drawing API has **eight** methods and **no fill** (bars are framed or hatched); `g:text`'s y is the
+  top of a ~24 px line box; `ctx.fonts` offers no larger face. A folder app cannot read its own files or
+  `require`; a frame keeps its first 1024 drawing commands, a layer has no cap (`docs/lua-apps.md` §4c).
+- The gitignored `images/` holds the device dumps, the card mirror (`images/device/sd-files/`), the ROM ELF
+  and the Ghidra exports (`images/ghidra/stock-<version>/`, each rebuilt in a minute by
+  `tools/ghidra_stock.py analyze [--image … --version …]`). Agents doing QEMU work beside others use their own
+  build directory or worktree (`X4EMU_QEMU=…`) and `X4EMU_TEST_PREFIX` for their pytest instances.
+
+## 1. The machine (what is modelled, and where)
+
+- `qemu/` is a plain clone of espressif/qemu `esp-develop` @ febae182 with branch `x4pro`; **the source of
+  truth for our QEMU changes is `qemu-patches/`** (35 patches; export with `cd qemu && git format-patch -o
+  ../qemu-patches febae182..x4pro` after every QEMU commit, the old files removed first).
 - Machine `xteink-x4pro` = Espressif's `esp32s3` machine + overlays (higher MemoryRegion priority):
   USB Serial/JTAG console, full GPIO, SPI2 (CPU FIFO and GDMA paths), I2C0 (GT911 0x5D, BM8563 0x51,
-  CW2017 0x63), LEDC, RTC_CNTL deep-sleep overlay, D-cache occupy/lock DONE shim, analog-master I2C
-  block (0x6000E000; the RF PLL lock flag and the PHY's DC-offset comparator read as done), SENS (SAR oneshot,
-  temperature sensor), radio register stub (FE2/FE/RX/BB/MAC with sticky status bits), RTC IO stored-value
-  overlay (0x60008400), named I/O access loggers for everything else (`x4pro/<block>` lines in qemu.log,
-  32 per address, then counted into `state.iolog_hot`). Espressif files are edited only by
-  the separate, upstreamable patches 0003 (USJ SOF), 0006 (interrupt matrix), 0008 (GDMA), 0009 (SPI1
-  dummy cycles); everything else is overlays and new files.
+  CW2017 0x63), LEDC with hardware fades, RTC_CNTL deep-sleep overlay (the D-cache occupy/lock DONE shim was dropped on 2026-10-13: the cache model answers it),
+  analog-master I2C block (0x6000E000; the RF PLL lock flag and the PHY's DC-offset comparator read as done),
+  SENS (SAR oneshot, temperature sensor), radio register stub (FE2/FE/RX/BB/MAC with sticky status bits), RTC
+  IO stored-value overlay (0x60008400), named I/O access loggers for everything else (`docs/hardware.md`).
+  Espressif's own files are edited only by separate, upstreamable patches (`docs/upstream-qemu.md` §3 says
+  which, patch by patch).
 - Panel: pure-C core `models/epd_core.c` (SSD1677 / UC8179 / UC8279) behind `hw/display/x4pro_epd.c`
   (SSI peripheral + bit-banged probe pins + BUSY timer + QemuConsole, qdev id `epd`).
-- CrossPoint 1.6.0: boots to Home, touch, reader, battery, sleep/wake, all verified against the real
-  device: probe answer, 38-command panel stream, BUSY timings, wake log, and the home screenshot
-  (0 pixels different). Oracles live in `docs/device/`, `models/fixtures/`, `tests/golden/`.
-- Stock `xteink_app` 7.2.4 (ESP-IDF **6.0.1**): with `user_config/net_en=0` it boots to its **home
-  screen** ("Bookshelf", clock, battery), paints through IDF's `spi_master` + GDMA, lights the warm
-  frontlight channel, takes touch (INT-driven GT911) and keeps polling the gauge. With WiFi enabled
-  (the device's NVS as dumped) the PHY calibrates against the analog-master, SENS and radio-stub models,
-  the driver reaches `wifi:mode : sta` (after the full PHY calibration on a cold boot, or after a wake) and
-  stops itself ~8 s later for lack of air; the UI never stalls
-  (`tests/test_stock.py`, two cases). See §3.
-- Device: ESP32-S3 rev v0.2, 8 MB octal PSRAM, **UC8279** panel (LUT_VER 0x68), 15.7 GB card.
-  app0 = stock 7.2.4, **app1 = stock 7.5.4 and booting** (the owner's OTA update of 2026-09-07; otadata entry 1
-  seq 2), bootloader/table untouched; `tools/device.py slots` reads that from the device or a dump and both
-  writers refuse a slot that would not boot (session 8),
-  verified double backups in `images/device/flash-2026-09-07-{a,b}.bin` (current) and `flash-2026-09-06-{a,b}.bin`. The owner, when present, can
-  press buttons, enter File Transfer (card mounts on the Mac as "NO NAME"), and re-seat the pogo
-  adapter; ask in plain words, one step at a time. In deep sleep the USB port vanishes; the stock app switches to a mass-storage
-  personality in USB mode.
+- CrossPoint 1.6.0 is verified against the real device: probe answer, 38-command panel stream, BUSY timings,
+  wake log, the home screenshot (0 pixels different) and two reader pages (0 outside the footer clock).
+  Oracles live in `docs/device/`, `models/fixtures/`, `tests/golden/`.
 
 ## 2. Non-negotiables
 
@@ -155,8 +122,8 @@ a mechanical acceptance). The session-8 entry of `docs/log.md` says what each ag
    burn efuses; app-slot writes only via `tools/device.py flash-crosspoint` / `restore-stock`
    (they re-read the device and refuse without the verified backup).
 2. The flash dump holds the owner's WiFi credentials in NVS. `images/` is gitignored; if you build
-   a stock image with the dump's NVS (§3.2), keep it under `images/`. Redact SSID/BSSID/IP in any
-   log you commit (`docs/device/boot-stock-7.2.4.log` shows the convention).
+   a stock image with the dump's NVS, keep it under `images/` (or `tools/nvsedit.py redact` it). Redact
+   SSID/BSSID/IP in any log you commit (`docs/device/boot-stock-7.2.4.log` shows the convention).
 3. Keep the "no edits to Espressif files" discipline: overlays, new files, meson/Kconfig hooks.
    If a fix belongs in an Espressif model, make it a separate, upstreamable patch.
 4. Every model change ships with a test: a core unit test, a fixture replay, or a pytest that boots
@@ -165,34 +132,34 @@ a mechanical acceptance). The session-8 entry of `docs/log.md` says what each ag
 
 ## 3. Goal A — stock firmware, fully working
 
-### 3.1 What the stock app does in the emulator today (2026-09-06, after patches 0006..0015)
+### 3.1 What the stock app does in the emulator (7.2.4, sessions 4–5; 7.5.4 and 7.6.8 the same unless noted)
 
-`tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin` (optionally
-`tools/nvsedit.py images/stock.bin set-u8 user_config net_en 0` to skip the 18 s WiFi start), then
-`x4emu --name stock run --flash images/stock.bin --sd images/sd-device.img --trace-epd f --trace-i2c g`:
+`tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin`, `tools/nvsedit.py
+images/stock.bin redact` (skips the 18 s WiFi start), then `x4emu --name stock run --flash images/stock.bin
+--sd CARD --boot-hold-power [--trace-epd f --trace-i2c g]`:
 
 1. ROM → IDF 6.0.1 bootloader → octal PSRAM → `app_main`. `boot-preflight` rejects a plain power-on
-   (`decision=2 reason=3`) and deep-sleeps; `x4emu press power` (1.5 s hold) wakes it
-   (`source=2 hold=602ms decision=0 reason=11`). The real device on a USB reset: `source=6 … auth=3`.
+   (`decision=2 reason=3`) and deep-sleeps; `--boot-hold-power` holds the button from reset so the cold
+   boot is accepted (`hold=600ms decision=0 reason=11`); without it `x4emu press power` (1.5 s hold) wakes
+   it. The real device on a USB reset: `source=6 … auth=3`.
 2. NVS loads intact (0 page programs at boot), the card mounts (CMD0…ACMD41, CMD13+CMD17 reads),
    GT911 ID/config read, RTC read, CW2017 polled every 3 s.
 3. Panel: three RST pulses, VER read (`00 0F 68 00 00`) through SPI2, then the UC8279 init and the
-   home paint through `spi_master` with GDMA (sequence in `docs/hardware.md`). Home at ~5 s after the
-   wake; `refresh_count` 3; warm frontlight on GPIO9 at ~25 %.
+   home paint through `spi_master` with GDMA (sequence in `docs/hardware.md`). Home at ~5 s;
+   warm frontlight on GPIO9 at ~25 %.
 4. Touch: a tap on the menu icon (`x4emu tap 88 38`) repaints; the stock reads the GT911 on its
    INT line (`state.gpio_irqs`, `gt911.frames`). Nav menu entries at landscape x 160/245/330/415/500,
-   y ≈ 150 (Read, All Files, USB Mode, Cloud Sync, Settings); All Files first row (250, 320); reader
+   y ≈ 150 (7.2.4: Read, All Files, USB Mode, Cloud Sync, Settings); All Files first row (250, 320); reader
    page centre (400, 240) opens the reading menu, its back arrow is (80, 445); Right/Left page.
    60 s after the last input the frontlight fades out (`state.ledc` `fading` → warm 0), the next touch
-   fades it back; the status-bar clock repaints every minute.
+   fades it back; the status-bar clock repaints every minute. The Home pad is Back, one level (`x4emu home`).
 5. With `net_en=1` (the device's setting): at 14 s `wifi_init` logs appear exactly as on the device,
    PHY 711 calibrates (≈1050 analog-master reads, the temperature sensor, ≈8700 radio-block accesses),
    `wifi:mode : sta (98:c3:77:be:ea:30)` and `wifi:enable tsf` follow as on the device, then — no air —
    `W wifi:TX Q not empty: 500`, `force witi stop`, `flush txq` at +7.5 s and `Deinit lldesc rx mblock:6`
-   at +17.5 s. Gauge polls, repaints and touch continue throughout. No emulator-only console line remains:
-   the `pll_cal exceeds 2ms` lines went with the lock flag (0x62/0x07 bit 1, session 5) and a cold boot runs
-   the full PHY calibration through the DC-offset comparator at 0x6000E04C. The Home pad is Back, one level
-   (`x4emu home`). No blocker is known in the stock now.
+   at +17.5 s. Gauge polls, repaints and touch continue throughout. A cold boot runs the full PHY
+   calibration ("Saving new calibration data") through the DC-offset comparator at 0x6000E04C; no
+   emulator-only console line remains.
 
 `tests/test_stock.py` boots scratch copies of the dump with `tests/mkepub.py`'s book on the card:
 `net_en=0` checks 1–4 against `tests/golden/stock-home.png` (status bar masked); `net_en=1` checks 5
@@ -203,104 +170,58 @@ a mechanical acceptance). The session-8 entry of `docs/log.md` says what each ag
 `test_stock_light_controls_follow_the_sliders`; `tests/test_stock_capture.py` boots a developer-patched copy
 (`tools/stockdev.py`) and requires its Screen Capture to match the panel outside the status bar.
 
-### 3.2 Attack plan (in order)
+### 3.2 Status
 
-1. ~~Analog-master I2C block model~~ **done** (`hw/misc/x4pro_ana_i2c.c`; protocol and evidence in
-   `docs/hardware.md`, "Analog master…"; `state.ana_i2c`; `sar2-code` property).
-2. ~~WiFi MAC/BB/RF loggers~~ **done as a stub**: `hw/misc/esp32s3_rfstub.c` (FE2/FE/RX/BB/MAC storage
-   + sticky status bits FE +0x174.16 and MAC +0xD14.0; `sticky` property for run-time experiments);
-   loggers remain for the map's holes (`state.iolog_hot`). The driver stops itself at +7.5 s. Open and
-   cosmetic: answer the RF PLL lock flag (analog block 0x62 reg 0x0c, read after each write of the cap
-   value to 0x62 reg 0x01) so the six `pll_cal exceeds 2ms` lines disappear.
-3. ~~SAR ADC model~~ **done for SENS** (`hw/misc/esp32s3_saradc.c`: MEAS1/2 oneshot → DONE + DATA,
-   TSENS always ready, storage; `sar1-data`/`sar2-data`/`tsens-out`). APB_SARADC (the DMA controller at
-   0x60040000) stays a logger until a firmware uses continuous mode.
-Next, in the order that serves the owner's goal (a usable stock in the emulator) best:
+Done (sessions 4–6, `docs/log.md`): the analog-master I2C block, the radio stub, SENS (SAR oneshot and
+temperature sensor), the stock's screens beyond Home with goldens and a walk test, the light pull-down
+(`x4emu light` and NVS follow it), the PHY's DC-offset comparator and the RF PLL lock flag (patch 0013, no
+`pll_cal` line on either boot path), `--boot-hold-power`, `nvsedit set-str / erase / redact`, the RTC IO
+overlay (patch 0015), and the emulator half of a device oracle (the `.xic` decoded, a capture equals the
+panel; `docs/xic.md`).
 
-4. ~~**Stock screens beyond Home**~~ **done** (session 4: menu / All Files / reader / reading menu /
-   Settings in `test_stock_screens_walk`; the light pull-down with brightness, colour temperature and
-   the Light button in `test_stock_light_controls_follow_the_sliders`, `x4emu light` and NVS follow). Menu (`x4emu tap 88 38` repaints it; find its items by
-   tapping and diffing screenshots), All Files (the device card holds no books: build an SD image with
-   an EPUB, `tests/mkepub.py` + `tools/mksd.py --src`), Settings (brightness/warmth sliders → `x4emu
-   light` must follow; that is the open acceptance item), one reader page. One golden per screen under
-   `tests/golden/stock-*.png` and one pytest walking them (extend `tests/test_stock.py`; mask the status
-   bar as `masked_diff` does). Compare each full refresh's panel stream (`--trace-epd`,
-   `tools/epdtrace.py`) with the UC8279 sequence in `docs/hardware.md`.
-5. **Device oracle for a stock screen** — emulator half **done** (session 5: the `.xic` container is decoded
-   and a capture matches the panel, `docs/xic.md`), device half open and the owner's call (§0.3): Screen
-   Capture is compiled out of 7.2.4, so either the developer-patched stock goes into an app slot
-   (`tools/stockdev.py`, a guarded `tools/device.py` write) and its capture is diffed with
-   `tools/xic2png.py --diff`, or Home and one more screen are photographed and compared by eye. Either way
-   also capture a boot log with `tools/device.py console --reset --seconds 40` and compare timing (device
-   `wifi:mode : sta` at 13.6 s, emulator 13.3 s cold). Photos go to `docs/device/photos/`, the log next to
-   `boot-stock-7.2.4.log` (redact SSID/BSSID/IP).
-6. ~~**PHY on a cold boot**~~ **done** (session 5, patch 0013): the block was not the PLL but the PHY's
-   DC-offset comparator at 0x6000E04C (bit 1 start, bit 24 done polled with no timeout, bits 31:30 comparator
-   outputs; `cal-cmp` property), and the `pll_cal` lines came from the lock poll on analog 0x62 reg 0x07
-   bit 1 (`ana_answered[]`), not reg 0x0c. `test_stock_wifi_fails_fast` boots cold, sees "Saving new
-   calibration data" and asserts no `pll_cal` line.
-7. ~~`x4emu run --boot-hold-power MS`~~ **done** (S1): every stock test boots cold; `boot_to_home(name,
-   wake=True)` keeps the deep-sleep/wake path for whoever needs it.
-8. ~~**NVS shareable image**~~ **done** (S1): `tools/nvsedit.py set-str / erase / redact`, slots blanked,
-   `tests/test_nvsedit.py`; recipe in the module docstring.
-9. ~~**RTC IO pads**~~ **done** (session 5, patch 0015): `x4pro.rtcio` stored-value overlay at 0x60008400,
-   `state.rtcio`; no `x4pro/rtcio` line after a stock boot or a CrossPoint sleep/wake (asserted in both).
-10. **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps` = 0); keep
-    the plan to advance the virtual clock by the timer wake if it ever does.
-11. **APB_SARADC continuous mode** (0x60040000, DMA) only when a firmware uses it (the logger will show).
+Open:
 
-Acceptance for Goal A (updated, session 4): Home renders ✓; touch navigates it ✓ (menu, All Files,
-reader, reading menu, Settings); WiFi fails fast instead of hanging ✓ (`test_stock_wifi_fails_fast`);
-pytests boot the stock and walk its screens ✓; the frontlight duty follows its sliders ✓
-(`test_stock_light_controls_follow_the_sliders`); the 60 s auto-dim no longer freezes the emulator ✓.
-Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the emulator side is closed by
-`tests/test_stock_capture.py`).
+- **A stock screen against a device oracle**: the parity harness is built (`docs/parity.md`); the device
+  session is item 0.a. Compare a boot log too (`tools/device.py console --reset --seconds 40`; device
+  `wifi:mode : sta` at 13.6 s, emulator 13.3 s cold).
+- **Light sleep / esp_pm**: the stock never light-slept so far (`state.sleep.light_sleeps` = 0); keep the plan
+  to advance the virtual clock by the timer wake if it ever does.
+- **APB_SARADC continuous mode** (0x60040000, DMA) only when a firmware uses it (the logger will show).
 
 ## 4. Goal B — fidelity ("world class" model quality)
 
-- ~~**Waveform-level grayscale**~~ **built** (session 6, behind a flag): the UC8279 LUT interpreter and a
-  per-pixel reflectance model live in `models/epd_core.c` (`docs/grayscale.md`); `waveform-gray` / `gray-k`
-  properties on `x4pro.epd`, `state.gray_model`. Finding: CrossPoint's AA bank has BW == WB, so its text is
-  three-level on this panel; the old table drew the two greys the wrong way round. **Open:** the owner's
-  verdict (a photo of a book page, or the side-by-side crops) decides the default and `gray-k`; the 150 Hz
-  frame period and ghosting in OTP DUs are not modelled; SSD1677's 105-byte LUT keeps the approximation.
-- **Timing table**: per-mode BUSY durations from the device (`Wait complete` lines) for every
-  waveform the stock uses; `full-ms/fast-ms/…` properties exist, extend per opcode value.
-- **Partial-window fidelity**: ~~add core tests~~ done (session 6, `models/tests/test_windows.c`: 28 cases,
-  115 checks). Open: the three SSD1677 gaps the tests record as XFAIL — X-decrement windows collapse to one
-  column, the AM bit of 0x11 is ignored, the gate-scan mirror byte is ignored (unreachable by CrossPoint or
-  the stock as configured; an Opus fix flips the XFAILs). The drivers send the RED/DTM1 resync themselves;
-  the core does not copy planes at refresh.
-- ~~**Determinism**~~ **done** (session 5, S4): `x4emu run --deterministic` (`-icount 3` + the RTC pinned by
-  `base-epoch`), `x4emu record` / `replay` journals with guest timestamps, `tests/test_replay.py` (two
-  replays of one journal, 0 px apart). Reproduced to the pixel, not to the microsecond: the replay's waits
-  are host-paced polls of the guest clock; QEMU's own `rr=record` mode would be the bit-exact step if ever
-  needed.
-- ~~**SDMMC**~~ done (session 6, patch 0016): the ESP32-specific SDMMC_CLOCK and the other configuration
-  registers are stored, CDETECT/WRTPRT come from the SD bus, DEBUG became `dwc_sdmmc_*` trace events; a
-  stock boot's qemu.log went from 484,963 to 1,788 lines. Next noisiest: `esp32s3.gpspi unhandled read
-  +0x38` (SPI_DMA_INT_CLR, 608 per stock boot) and the `x4pro/iomux` logger (525 reads + 525 writes).
-- **USB Serial/JTAG input**: RX path exists (`OUT_RECV_PKT`); wire `x4emu console-send TEXT` so
-  firmware CLIs can be driven (the stock's `boot-preflight … auth=` hints at a service console).
+Done: the waveform-level grey model, validated against a photo of the glass and the default since
+2026-09-07 (`gray-k` 38, `docs/grayscale.md`); the partial-window tests and the three SSD1677 addressing
+gaps they recorded, fixed (`models/tests/test_windows.c`, 115 checks, no known gap; commit 5f26ba3);
+determinism (`--deterministic`, `record`/`replay`, `tests/test_replay.py`: reproduced to the pixel, not to
+the microsecond — QEMU's `rr=record` would be the bit-exact step if ever needed); SDMMC configuration
+registers and trace events (patch 0016: a stock boot's qemu.log from 484,963 to 1,788 lines); the USB
+Serial/JTAG RX path (`x4emu console-send`); the two cores in TSO (`docs/smp.md`); the generic S3 models split
+out for Espressif (`docs/upstream-qemu.md`, awaiting the owner). The per-mode BUSY timing table was skipped:
+the device logs hold only what the defaults already are.
+
+Open:
+
+- The 150 Hz frame period and ghosting in OTP DUs are not modelled; SSD1677's 105-byte LUT keeps the
+  fixed table.
+- The noisiest log lines left: the `x4pro/iomux` logger (525 reads + 525 writes per stock boot), which an
+  IO_MUX stored-value overlay would end (the `esp32s3.gpspi +0x38` lines are gone since the 2026-10-13 review).
 - **GPIO fidelity**: open-drain, per-pin pull registers from IO_MUX (today idle levels are a board
   table), RTC-domain GPIO reads for wake sources.
-- **Upstream the generic models** (S3 GPIO, GP-SPI, I2C, LEDC, USB Serial/JTAG, cache DONE bits)
-  to espressif/qemu; keep the board file here.
 
 ## 5. Goal C — developer experience
 
-- ~~`x4emu` as a package (`pipx install .`), `--json` on every command~~ done (session 4: `x4emu/` package,
-  `tools/x4emu` shim, `docs/x4emu.md`); `record/replay` done (session 5); `x4emu shell`, `x4emu watch` (HTTP live view) and the MCP server
-  importing the package with `emu_record`/`emu_replay`/`emu_wait_guest_ms` done (session 6).
-- Optional SDL window (`configure --enable-sdl`) and a documented `-display sdl` mode; keep
-  headless as the default.
-- ~~CI~~ **green** (session 5): the first Linux run of `.github/workflows/ci.yml` passed on b7f5918 in
-  12 min (`make build` 9 min from scratch, `make test` 86 s, a 178 KB artifact of screenshots and logs).
-  The owner pushes (GitHub Desktop; no push credential on the Mac). Watch the QEMU/PlatformIO caches on the
-  next runs and the run time once the stock-free suite grows.
-- Docs site or a `docs/README.md` index; keep `CLAUDE.md` under two screens.
-- Golden-image tests for every screen we can reach, each paired with a device oracle where one
-  exists (the chord in CrossPoint; a photo for stock until it has a screenshot function).
+Done: `x4emu` as a package with `--json` everywhere (`docs/x4emu.md`), `record`/`replay`, `shell`, `watch`
+(HTTP live view), the MCP server running the package in-process, CI on Ubuntu (green; ~86 s of `make test` on
+4 workers), the weekly upstream watch (`docs/upstream.md`), the docs index (`docs/README.md`).
+The owner pushes (GitHub Desktop); `gh` is installed and logged in as kycube (§7 has its quirks).
+
+Open:
+
+- Optional SDL window (`configure --enable-sdl`) and a documented `-display sdl` mode; keep headless as the
+  default.
+- Golden-image tests for every screen we can reach, each paired with a device oracle where one exists (the
+  chord in CrossPoint; the stock's Screen Capture through the parity harness).
 
 ## 6. Device workflow (what the owner can do for you)
 
@@ -310,11 +231,16 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
   File Transfer mounts the card at `/Volumes/NO NAME`; `x4emu screenshot out.png --diff that.bmp`
   un-rotates the 480x800 BMP. Copy the card's files read-only with `rsync` into
   `images/device/sd-files/` and rebuild `images/sd-device.img` with `tools/mksd.py`.
-- To run the stock on the device again: `tools/device.py restore-stock --yes` (app0 ← backup).
-  To put CrossPoint back: `flash-crosspoint --yes` (app1 already holds the stock copy).
+- Before any write: `tools/device.py slots` (today app0 = 7.6.8 boots, app1 = 7.5.4). Both writers default
+  to app0, the booting slot, so `restore-stock --yes` rewrites 7.6.8 from the newest verified backup and
+  `flash-crosspoint --yes` would **replace** 7.6.8 (CrossPoint on the device is the owner's call; there is
+  no stock copy in a spare slot to fall back to, only the backup). The parity session's write and revert are
+  spelled out in `docs/parity.md`, "A device session".
 - Recorded oracles so far: `docs/device/boot-stock-7.2.4.log`, `boot-crosspoint-1.6.0*.log`,
   `sleep-wake-crosspoint-1.6.0.log`, `screenshots/screenshot-3824.bmp`, `efuse-*.txt`,
-  `models/fixtures/uc8279-device-boot-home.log`, `images/device/sd-files/`.
+  `photos/reader-aa-text-2026-09-07.jpg`, `models/fixtures/uc8279-device-boot-home.log`,
+  `images/device/sd-files/` (the card as of 2026-09-06), the reader-page screenshots behind
+  `tests/test_device_screenshot.py`.
 
 ## 7. Lessons that cost time (read before touching the models)
 
@@ -329,10 +255,10 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
   whole lines otherwise.
 - Firmware ignores input while painting; the CLI has `--quiet` / `wait-quiet`, and
   `wait-refresh --total`/`press --wait` avoid the baseline race that looked like 4-second latency.
-  CrossPoint also polls touch only between rendering passes that take seconds ("Time = 3494 ms from
-  clearScreen to displayBuffer"), which `wait-quiet` cannot see: a 120 ms tap into such a pass was the
-  session-4 flake in three different tests. `tap`/`home` now stay asserted until the firmware reads the
-  GT911 frame (`state.gt911.clears`); firmware measures a tap from its own first read, so it stays short.
+  Both firmwares poll input only between rendering passes that can take seconds ("Time = 3494 ms from
+  clearScreen to displayBuffer"). Since 2026-10-13 every input is held in guest time until the firmware has
+  consumed it and its release, and the GT911 model latches frames until the clear (`docs/x4emu.md`, "Input
+  delivery"); a test that still loses an input has found a bug, not a flake — do not add a retry.
 - SdFat mounts MBR partition 1 only; `mksd.py` writes an MBR. QEMU needs power-of-two images.
 - The GT911 only answers while GPIO2 is driven LOW (with GPIO1 HIGH); the model NACKs otherwise.
 - The panel probe is bit-banged by CrossPoint but read through SPI2 half-duplex by the stock;
@@ -341,14 +267,22 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
 - zsh: quote globs that may not match (`ls x* 2>/dev/null` errors with "no matches found"), and
   variables holding commands are not word-split (use arrays or Python).
 - macOS builds `qemu-system-xtensa-unsigned`; `ninja qemu-system-xtensa` runs the signing step.
+- `gh` is installed and logged in as kycube; it needs the Little Snitch allowance and works only outside the
+  command sandbox (run it with the sandbox disabled). `gh run list -R kycube/x4pro-emu` and `gh run view <id>
+  --log-failed` diagnose CI; the unauthenticated Actions API gives steps and durations but never logs or
+  artifacts. Docker Hub pulls hang on this Mac, so a containerised Linux reproduction is not available.
 - Espressif's models log only what they do not implement: `dwc_sdmmc_*` lines are `LOG_UNIMP`
   defaults, the SPI/I2C/GPIO traffic of implemented registers is silent. Turn on QEMU trace events at
   runtime through QMP (`trace-event-set-state`, e.g. `m25p80_*`, `sdcard_*`) before rebuilding anything.
 - `-d exec` (`log exec` via QMP) plus a debug stop shows the translation block that touched a bad
   address; `get_pc()` in the memory path reports the block start, not the instruction.
 - FreeRTOS TCB walk (docs/log.md 2026-09-06) tells you what every task waits on without symbols;
-  ROM symbols come from `images/rom/esp32s3_rev0_rom.nm`; the app is disassembled with objdump on the
-  segments parsed from the ESP image header (esptool's "File offs" is the segment header, data is +8).
+  ROM symbols come from `images/rom/esp32s3_rev0_rom.nm` (`make rom-symbols`); the app is disassembled
+  with `tools/appdis.py IMAGE 0xPC` on the segments parsed from the ESP image header (esptool's "File
+  offs" is the segment header, data is +8); `tools/ghidra_stock.py` answers xrefs, callers and decompiles.
+- Panel command streams: `tools/epdtrace.py device.log emu.jsonl --from-cmd 0x00` compares a device
+  recording with `x4emu run --trace-epd`; `models/build/replay uc8279 FIXTURE.log` replays a recording
+  through the core alone.
 - The pioarduino gdb builds do not work against this QEMU (python libs missing / no XML target
   description); QMP `info registers -a`, `pmemsave` and `xp` do the job.
 - Three Espressif-model bugs bit the stock (patches 0006, 0008, 0009): interrupt re-routing, GDMA
@@ -379,7 +313,7 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
 - [x] Stock firmware: the screens reachable by touch have goldens and a walk test (session 4).
 - [x] Stock firmware: screens matched to the device — by the owner's eye (Home, menu, light panel, Settings, All
   Files, reader; session 5). A pixel-exact `.xic` device capture stays optional (needs the developer-patched
-  stock on the device); the emulator side of that is proven (`tests/test_stock_capture.py`).
+  stock on the device; the parity session, §0.a); the emulator side of that is proven (`tests/test_stock_capture.py`).
 - [ ] CrossPoint: every activity reachable by script has a golden and a device oracle — Home ✓ (session 3) and
   the reader's pages 1–2 ✓ (session 7: the device's own screenshots of the test book match the emulator's
   base frame in 0 pixels outside the footer clock, `tests/test_device_screenshot.py`); FileBrowser, sleep
@@ -390,12 +324,13 @@ Open: a stock screen matches a *device* oracle (step 5 / squad S2-device; the em
   reflectance, so `gray-k` = 38; default on since 2026-09-07, `docs/device/photos/reader-aa-text-2026-09-07.jpg`).
 - [x] `make setup && make build && make test` verified on Ubuntu 24.04 in CI (first run green, session 5) and on macOS.
 - [x] `x4emu` installable, JSON everywhere, documented in one page (`docs/x4emu.md`, session 4).
-- [ ] Generic S3 models proposed upstream; board file and panel cores stay here.
+- [ ] Generic S3 models proposed upstream; board file and panel cores stay here. (Prepared and
+  checkpatch-clean, `docs/upstream-qemu.md`; submission waits for the owner.)
 - [ ] `docs/audit.md`/`hardware.md` still the single source of truth, every claim with evidence.
 
 ## 9. Goal D — agent ergonomics, as milestones (the agent iterates on firmware through these)
 
-Done in this phase: the MCP server (28+ tools, screenshots inline), `make run` (build → image →
+Done in this phase: the MCP server (screenshots inline), `make run` (build → image →
 boot → wait → screenshot), `x4emu flash-app` (swap the app in the live image, keep NVS/SD,
 relaunch), `x4emu console-send` (bidirectional USB Serial/JTAG: the chardev is now a unix socket
 with a logfile), hot-poll lists in `x4emu state` (`iolog_hot`, `rf.hot`: which unmodelled register a
@@ -424,23 +359,25 @@ replies against `tests/golden/`; on the device it runs without touching the card
 used; `build_cache_dir`), ELF kept next to the image for `x4emu gdb`, warm build under 30 s.
 Acceptance: edit a string in the firmware → `make run` → new pixels in under 60 s.
 
-**D3. Time control.** `x4emu run --speed N` (icount shift; `--deterministic` = shift 3 exists) and
+**D3. Time control.** `x4emu run --speed N` (icount shift; `--deterministic` = shift 3 and
+`--icount shift=2,sleep=off`, which the timer-bound tests use, exist) and
 ~~`x4emu wait-guest-ms N`~~ (done, session 5: virtual-clock wait, not host sleep) for time-driven UI:
 auto-sleep, toasts, battery polls.
 Acceptance: a test triggers CrossPoint's inactivity auto-sleep in a few host seconds.
 
-**D4. Parity harness.** The same input script runs on emulator and device (D1), screenshots are
-diffed pairwise, and every difference is either 0 or explained in the test's assertion message
-(battery %, clock). Acceptance: the M3/M5 device comparisons become an automated job the owner
-starts by plugging in the device.
+**D4. Parity harness.** ~~Built for the stock~~ (2026-10-13, `tools/parity.py`, `docs/parity.md`): one step
+script walked by `x4emu` and, from a printed runbook, by the owner; the stock's own Screen Captures are
+paired and every differing pixel is masked, explained or reported. Open: the first device session (§0),
+and a D1-driven variant for a custom firmware that needs no hands.
 
 **D5. Fidelity gaps that block custom firmware first.** Analog-master I2C block, WiFi "fail fast" and
-the SENS/SAR oneshot are done (§3.2 steps 1–3); next RMT/I2S if the firmware uses them, APB_SARADC
+the SENS/SAR oneshot are done (§3.2); next RMT/I2S if the firmware uses them, APB_SARADC
 continuous mode if a firmware samples with DMA, then USB OTG device mode (large, optional).
 
 What the emulator guarantees a custom firmware today (design against this list): USB Serial/JTAG
-console both ways; GPIO 0..48 with edge/level interrupts; SPI2 to the panel, CPU FIFO or GDMA
-(ESP-IDF `spi_master`, interrupt-driven, re-routing in the interrupt matrix works); UC8279/UC8179/
+console both ways; two cores with the chip's store order (TSO) on any host; GPIO 0..48 with edge/level
+interrupts; SPI2 to the panel, CPU FIFO or GDMA (ESP-IDF `spi_master`, interrupt-driven, re-routing in the
+interrupt matrix works); GDMA to PSRAM and Espressif's AES model (DMA-AES); UC8279/UC8179/
 SSD1677 with the real probe answers and device timings; I2C0 with GT911, BM8563, CW2017 (BATINFO
 resident); LEDC frontlight; SDMMC 1-bit card (MBR/FAT32 image); NVS reads and writes through the
 QIO flash path; deep sleep with EXT1 wake on GPIO3; efuse/MAC of the desk unit; a WiFi start that
@@ -488,7 +425,10 @@ it as "the Opus 5.5 agent that does the firmware reading". Use Fable 5.1 only wh
    build products; a git worktree would not have them. Agents run side by side in the checkout with
    unique instance-name prefixes (`x4emu --name <prefix>…`) and their own scratch subdirectory.
 3. **Never:** `git commit`/`push`, `tools/device.py`, writes under `images/`, edits to another agent's
-   files. A tool another agent is rewriting (session 4: `tools/x4emu`) must stay working at every
+   files, and nothing that rewrites the shared working tree as a whole (`git stash`, `git checkout .`,
+   `git reset`, `git clean`): every other agent's uncommitted work lives there (2026-10-13: a reviewer's
+   half-second stash went unnoticed only by luck). Old versions come from `git show HEAD:path` into scratch.
+   A tool another agent is rewriting (session 4: `tools/x4emu`) must stay working at every
    moment; the rewriter develops beside it and switches only after its own verification.
 4. **Every brief carries:** the files to read first; the facts the coordinator already knows
    (coordinates, register semantics, what was tried); deliverables; the verification the agent must run
@@ -514,13 +454,13 @@ edit CLAUDE.md or docs/*.md except [own page]. Time box: [N] minutes. Final repo
 |---|---|---|
 | ~~**S1 stock-close**~~ | **done** (sessions 4–5): `--boot-hold-power`, `nvsedit` set-str/erase/redact, RTC IO overlay, the DC-offset comparator + PLL lock flag, the GT911 key byte (Home pad = Back) | met: `make test` green, no `rtcio` in `iolog_hot`, no `pll_cal` line, a redacted image boots to Home |
 | ~~**S2 oracle**~~ (emulator half) | **done** (session 5): `.xic` decoded and verified, `tools/xic2png.py`, `tools/stockdev.py`, `tests/test_stock_capture.py`, `docs/xic.md` | met in the emulator: a capture equals the panel in 0 px |
-| **S2-device** (optional) | owner + coordinator, only if a pixel-exact capture is wanted: the developer-patched stock into an app slot through a guarded `tools/device.py` path, one capture copied off the card, `xic2png.py --diff` against the emulator's screen (§0.3). The owner already judged the screens 1:1 by eye (session 5) | one stock screen diffed against a device capture with every difference explained |
+| **S2-device** | ~~the harness~~ built (2026-10-13, `tools/parity.py`, `docs/parity.md`); **open**: the device session with the owner (§0.a): the developer-patched 7.6.8 into app0 through `tools/device.py`, the runbook walked, the captures compared. The owner already judged the screens 1:1 by eye (session 5) | one stock screen diffed against a device capture with every difference explained |
 | ~~**S3 ci-green**~~ | **done** (session 5): first Linux run green without iteration | met; keep an eye on cache hits and run time |
 | ~~**S4 determinism**~~ | **done** (sessions 5–6): `--deterministic`, `record/replay`, `watch`, `shell`, the MCP server in-process | met (`tests/test_replay.py`, `tests/test_cli_polish.py`) |
-| **S5 fidelity** | ~~Fable: waveform grey core · Opus: window tests · Opus: `dwc_sdmmc` trace patch~~ done (session 6); the BUSY timing table was skipped (the device logs hold only what the defaults already are); **open**: the grey validation against the glass (owner) and then the default flip + `gray-k`; a follow-up Opus item: the `esp32s3.gpspi +0x38` (SPI_DMA_INT_CLR) unhandled-read noise and an IO_MUX stored-value overlay (525 + 525 logger lines per stock boot) | `qemu.log` free of `dwc_sdmmc_` lines ✓; grayscale validated against the device ☐ |
-| **S6 custom-firmware** (§9 D1–D4) | **Fable**: the `X4>` console protocol design in the custom firmware · Opus: `x4emu console-expect`, `tools/x4target.py`, the `--target emu\|device` pytest · **Fable**: the parity harness and its "explain every difference" assertions · Opus: `--speed` (D3; `wait-guest-ms` done in session 5) | one script runs on emulator and device and the diff is 0 or explained |
-| **S8 typography** (§11) | research first: **Fable** on where the reading-font selection persists and the `.xtf` line-pitch field · Opus on the two Lua capability probes (binary file reads, `g:image`) · then Opus on `tools/readingfonts.py` and a verified set | a book's Font card lists a tidy face/style/size set, every entry renders, and the choice survives a reboot |
-| **S7 upstream** | Opus: split the generic S3 models (GPIO, GP-SPI, I2C, LEDC, USJ, cache DONE, intmatrix/GDMA/SPI fixes) into espressif/qemu-style patches with tests and cover letters · **Fable**: review before submission | patches apply to `esp-develop` HEAD and pass `make test` here |
+| **S5 fidelity** | ~~waveform grey core · window tests · `dwc_sdmmc` trace patch~~ done (session 6); ~~the grey validation against the glass, the default flip + `gray-k`~~ done (session 7); the BUSY timing table was skipped (the device logs hold only what the defaults already are); ~~the `esp32s3.gpspi +0x38` noise~~ done (2026-10-13 review); **open**: an IO_MUX stored-value overlay (525 + 525 logger lines per stock boot) | `qemu.log` free of `dwc_sdmmc_` lines ✓; grayscale validated against the device ✓ |
+| **S6 custom-firmware** (§9 D1–D4) | the `X4>` console protocol design in the custom firmware (a reading-and-design brief) · `x4emu console-expect`, `tools/x4target.py`, the `--target emu\|device` pytest · ~~the parity harness and its "explain every difference" assertions~~ done for the stock (2026-10-13, `docs/parity.md`) · `--speed` (D3; `wait-guest-ms` done in session 5) | one script runs on emulator and device and the diff is 0 or explained |
+| **S8 typography** (§11) | research first, on 7.6.8 (§0.e): where the reading-font selection persists and the `.xtf` line-pitch field (firmware reading) · the two Lua capability probes (binary file reads, `g:image`) · then `tools/readingfonts.py` and a verified set | a book's Font card lists a tidy face/style/size set, every entry renders, and the choice survives a reboot |
+| **S7 upstream** | ~~split the generic S3 models into espressif/qemu-style patches with cover letters~~ **prepared** (2026-10-13): `upstream-s3` (15 commits, checkpatch-clean, builds, the AES qtests pass on `-M esp32s3`) and `x4pro-on-upstream` (3 board commits, tree = x4pro up to formatting; smoke 37 passed), `docs/upstream-qemu.md`. **Open**: the owner's sign-off and approval for each step of its §8; PRs #185/#177/#181 overlap; register-level qtests per model | patches apply to `esp-develop` HEAD and pass `make test` here |
 
 Run one squad per coordinator turn; two if their files are disjoint (S3 pairs with anything). After
 each squad: `make test`, a dated `docs/log.md` entry, §0 of this file updated, and a commit left for
@@ -563,8 +503,8 @@ re-rendering as you change things.
 3. **Two Lua capability probes** (`apps/probe/` is the vehicle): can Lua read a *binary* file
    (`ctx.data.open_text` / `read_text` across NUL bytes), and what does `g:image` actually take?
    Together they decide whether 11.4 is possible at all. Cheap: one app, one boot.
-4. **7.5.4**: the strings are present but the reading path was never booted there. The device runs
-   7.5.4, so nothing ships until this is re-verified.
+4. **7.6.8**: the device runs 7.6.8, whose label pack has new font-picker groups (§0.e); the reading path
+   was booted on neither 7.5.4 nor 7.6.8, so nothing ships until this is re-verified there.
 
 ### 11.3 Stage 1 — the set (no code, no risk, most of the value)
 
@@ -607,8 +547,8 @@ and present face as the list, style and size as steppers — selecting simply pi
 three axes name.
 
 * Mechanism: new native code compiled with the pioarduino Xtensa toolchain into the app slot's free
-  space as an extra IROM segment, plus a trampoline at the list builder — **the same machinery the
-  keyboard needs (§0.4.b)**. Do the keyboard first or in the same squad; the segment/trampoline and
+  space (an extra or extended IROM segment), plus a trampoline at the list builder — **the same machinery the
+  keyboard needs (§0.b)**. Do the keyboard first or in the same squad; the segment/trampoline and
   image-header work is the expensive part and it is shared.
 * Anything drawn goes through the app's own text routine; a preview strip can reuse the reading
   font's own glyphs, which is exactly what Kindle shows.
@@ -617,7 +557,7 @@ three axes name.
 
 ### 11.6 Order, and what it costs
 
-11.2 (research, one squad — Fable for the firmware reading, Opus for the Lua probes) → 11.3 (one
-Opus agent, a tool plus a verified set) → 11.4 only if the probes allow → 11.5 with, or after, the
+11.2 (research, one squad — the firmware reading and the Lua probes as two briefs) → 11.3 (one
+agent, a tool plus a verified set) → 11.4 only if the probes allow → 11.5 with, or after, the
 keyboard. Stages 1 and 2 touch nothing but files on the card and are reversible by deleting them;
-stage 3 is a patched app image and follows the device rules in `CLAUDE.md` and §0.4.c.
+stage 3 is a patched app image and follows the device rules in `CLAUDE.md` and §0.c.

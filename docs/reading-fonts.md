@@ -225,9 +225,15 @@ Screenshots, in order: `01-home` `02-menu` `03-allfiles` `04-reader` `05-reading
 A replaced *system* font (`tools/xtfont.py install`) therefore changes the two system entries as well;
 the reading list and the UI font are independent otherwise.
 
-## 7. 7.5.4
+## 7. 7.5.4 and 7.6.8
 
-Not booted. `strings` on `images/device/stock-app1-7.5.4.bin` shows the same machinery: `/sdcard/fonts`,
+**7.6.8** (what the device runs since 2026-10-12) was not booted on this path either. Its label pack has new
+font-picker groups — "All", "No fonts available", "No TTF fonts", "No XTF fonts", "No BIN fonts",
+"Please put font files in the Fonts folder", "Size" — and "TTF" / "XTF" / "BIN" labels, plus a
+font-download set (`docs/stock-7.6.8.md` §1): the picker probably changed, and a size control and TTF files
+may now exist. Re-survey it before relying on §0 for 7.6.8.
+
+**7.5.4**: not booted. `strings` on `images/device/stock-app1-7.5.4.bin` shows the same machinery: `/sdcard/fonts`,
 `/sdcard/Pushed Fonts`, `/fonts/` + `.xtf,.bin`, `font.xtf.open`, `font.bin.open`, `XtfFontProvider`,
 `BinFontProvider`, `ReadingFontPickerLayerPresenter/View`, "System Font Medium/Small", plus a new
 "Reading settings" page label. Expect the recipe to hold; the four embedded `.xtf` headers (§4) are

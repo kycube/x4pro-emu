@@ -114,7 +114,9 @@ reads the counts and label packs and refuses the toasts with a message naming th
   `lua-apps-row` only forces the row for a card without apps.
 - The icon table, the `Display` method names, the layout constants, the meaning of the five `XTF0`
   hits: untouched (same open items as 7.2.4).
-- `tools/device.py` still targets app0 and assumes app0 boots; nothing here changes that.
+- `tools/device.py` targeted app0 and assumed app0 boots when this was written; the same session taught it
+  otadata (`device.py slots`; both writers refuse a slot the bootloader does not start, docs/log.md
+  session 8).
 
 ## 5. How to redo the analysis
 

@@ -102,7 +102,7 @@ Everything here follows from the 7.6.8 probe (`apps/probe-io/`, `docs/lua-apps.m
   into the next scene (seen in the emulator: one `full` per passage change).
 - **Progress** lives in `ctx.state` (passage, page, flags, endings found; flat strings and numbers
   only). `ctx.save()` is a stub in 7.6.8; the host saves `ctx.state` itself when the app is left
-  (apparently encrypted, into `state.xtsv`). **Confirmed on the reader (2026-10-12):** after a few
-  pages, Home pad → Exit, and back in, the cover offers **Continue**; the app exits cleanly. In the
-  emulator the same exit hangs on the AES accelerator, which is not modelled, so the emulator test
-  never leaves the app.
+  (encrypted, into `state.xtsv`). **Confirmed on the reader (2026-10-12):** after a few
+  pages, Home pad → Exit, and back in, the cover offers **Continue**; the app exits cleanly. The
+  emulator does the same since qemu-patches 0019/0020 (the AES model was there; the GDMA could not
+  reach PSRAM; `tests/test_lua_state.py`); the gamebook's own emulator test never leaves the app.

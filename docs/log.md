@@ -1335,3 +1335,57 @@ into live buffers, and a watchpoint saw only the allocator write the poison head
 no lock: the second close frees the FILE lock twice. 0/183 on 7.6.8 under the same stalls (its restore
 retries while a slot is busy). The debug instrumentation stays off the series (branch `x4pro-heap`,
 `images/qemu-debug-x4watch-2026-10-13.bundle`).
+
+## 2026-10-13 — The efficiency review: nine areas, every line
+
+The owner asked for a line-by-line check for duplication, inefficiency and obsolete code after two
+days of fast work. Nine Opus 5.5 reviewers, disjoint files (the CLI; the stock tests; conftest and the
+core tests; the stock tools; device/infra/workflows; parity and the Lua apps; the C panel models; the
+35-patch QEMU series' code; the docs). The gamebook was left out at the owner's word: it was a test app.
+Every change preserves behaviour, each reviewer proved it (byte-identical tool outputs on the three real
+stock images, 4,251 panel-state digests equal under ASan/UBSan, a fake device driving device.py's plans,
+identical deterministic boots), and the coordinator ran the combined result.
+
+**Bugs the review found:** `device.py` computed an app image 16 bytes short when its segments ended on
+a 16-byte boundary, so `restore-stock` would have left half the appended SHA-256 unwritten (no real image
+ends that way); the panel core read past `plane1` for a TRES height over 600; two core tests tested
+nothing (`wait-text` matched the boot's own "Entering activity: Home"); the MCP server leaked a file
+descriptor per `emu_run`; four of five stock fixtures left unredacted dump copies (WiFi credentials) in
+pytest's temp dirs, now redacted at once and deleted at teardown.
+
+**Faster:** panel composition ~2x (UC GC 206 -> 91 us per refresh); QEMU host CPU per CrossPoint page
+turn -20 %, boot -12 % (the intmatrix forwards a source only when its level changes; GPIO interrupt types
+decoded on write; BUSY driven only on change); the stock-tool checksum 7x and string-pack `compact` 10x;
+the stock walks run under `-icount shift=2,sleep=off` (half their host time); `wait-text` reads only
+new log; each CLI call ~12 ms quicker. `make test`: **231 passed, 2 skipped in 1:40** (219 tests in 1:48
+before the review).
+
+**One copy instead of several:** ESP image segment parsing (4 copies -> `stockdev.segments`), checksum
++ SHA reseal (5 -> `stockdev.reseal`), the mtools wrapper (3 -> `xtapp.mtools`), five stock boot fixtures
+(-> `tests/stockkit.py` `booted()`), the five input commands' hold logic in x4emu, the two workflows'
+shared steps (-> `.github/scripts/ci.sh`), the panel core's command/data bookkeeping, shared test helpers
+in conftest. Kept as copies on purpose, with a guard test (`tests/test_shared_tables.py`): the four Lua
+advance-width tables (apps cannot `require`) and the pixel-difference threshold.
+
+**Gone:** x4emu's fallbacks for QEMUs without today's input counters, the board's cache DONE overlay
+(the cache model answers it; first time the model's own fix ran with the stock), the GP-SPI `DMA_INT_CLR`
+log line (89 % of one test's qemu.log), dead counters and helpers, `capstone` (no Xtensa in capstone 5),
+`make clean-run`, two goldens nothing compared, 11 redundant `sys.path` lines; CLAUDE.md went from 31 KB
+to 12 KB (loaded into every session), every removed fact moved to the page that owns it.
+
+**Decisions:** the stock walks run under icount, so real two-core timing stays covered by the stock boot
+test, the SMP litmus and the CrossPoint suite. That boot test now reports stock 7.2.4's own font-slot
+race (a toast over Home, the page redrawn in the built-in font; `docs/heap.md`) as an expected failure
+instead of a red run; any other difference still fails. It appeared once in the combined runs.
+
+**Incidents, both harmless and now ruled out:** a reviewer `git stash`ed the shared tree for half a
+second (NEXT_PHASE §10.2 now forbids tree-wide git commands); another amended the shared QEMU branch's
+tip by accident (content and message identical, kept; its own reset was denied by the permission system,
+and the coordinator did not run it on its behalf).
+
+**Open:** the UC8179 variant's LUTs are parsed in the UC8279 layout, so its grey passes move no pixel
+(a task was offered); `x4pro_epd.c` re-implements the probe read-out and loses a pending command on reset
+(both need a small core API); `apps/status-typographic` right-aligns with an estimated width table (the
+owner keeps the status screens as they are); the hotlog has two regions named `wdev`; `x4pro.ana-i2c`
+logs every transaction on WiFi-on boots; the Espressif series predates the review's generic cleanups
+(`docs/upstream-qemu.md` §1).

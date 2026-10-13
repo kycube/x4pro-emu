@@ -216,11 +216,11 @@ tools/device.py restore-stock --slot app0
 tools/device.py restore-stock --slot app0 --yes
 ```
 
-Two cautions. Even without `--yes`, `restore-stock` rewrites `images/device/stock-app0-7.6.8.bin`
-from the newest backup (identical while that backup holds the pristine app). And **never take a
-backup while the patched app is on the device** unless it is moved out of `images/device/` at once:
-it would become the newest verified pair, and both `restore-stock` and that extracted file would then
-hold the patched app. The equivalent explicit path is
+One caution: **never take a backup while the patched app is on the device** unless it is moved out of
+`images/device/` at once: it would become the newest verified pair, and `restore-stock` would then
+restore the patched app (its plan says so: it names the image "pristine xteink_app 7.6.8" or "NOT a
+pristine known stock build"). `restore-stock` stages the bytes it writes in a temporary file and never
+rewrites the reference copy `images/device/stock-app0-7.6.8.bin` (fixed 2026-10-13, commit 1f8ccc5). The equivalent explicit path is
 `tools/device.py flash-crosspoint --firmware images/device/stock-app0-7.6.8.bin --slot app0` (its
 first 64 KB equal the backup's, so the sanity check passes). The card keeps `/Parity` and the
 captures until the owner deletes them; the bookshelf then still lists the parity book (its reading

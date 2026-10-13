@@ -233,7 +233,7 @@ already overflows the cell at its fitted size), **Newsreader**, **EB Garamond**,
 **Crimson Pro**, **Vollkorn** (all unhinted and all overflow), **Noto Serif/Sans** as shipped by
 Google Fonts (unhinted copies; the hinted builds from notofonts.github.io are a different file).
 
-### (b) Reading serif (anti-aliased path — different rules)
+### (b) Reading serif (written when an anti-aliased reader path was assumed; it is 1 bpp too, §0)
 
 1. **Literata** — the only OFL face commissioned specifically for an e-reading app, with a published
    design rationale ([TypeTogether](https://www.type-together.com/literata-book)); OFL;
@@ -342,8 +342,8 @@ Then judge the three by eye on the emulator's Home screen against
 * **What the stock renderer does with a negative `y_off`** — whether ink above the cell is clipped,
   drawn, or collides with the line above. The "*overflows*" verdicts in §1 are therefore risks, not
   proven failures.
-* **Whether the reader view's font list can be extended at all**, and in what format. This document
-  assumes it can; §5(b) and §5(c) are useless if it cannot.
+* ~~**Whether the reader view's font list can be extended at all**, and in what format.~~ Answered: it
+  can — any `.xtf` or `NameWWxHH.bin` in `/fonts/` on the card joins the list (`docs/reading-fonts.md`).
 * **Any controlled study of Atkinson Hyperlegible.** Only the designers' claims were found.
 * **Bookerly's actual metrics** — it is the most-praised e-reading face and unavailable for
   measurement, so "large x-height, low contrast, heavily hinted" is inference from commentary.

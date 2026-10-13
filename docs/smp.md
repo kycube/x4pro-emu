@@ -3,8 +3,8 @@
 Written 2026-10-12 (squad member `sl`). The fix is the QEMU patch
 `target/xtensa: TCG memory order TSO, so two cores see stores in program order`
 (`target/xtensa/cpu-param.h`); a second patch, `esp32s3.cache: CTRL1 is the bus-shut register, so the
-caches read as enabled`, gives the assert messages their strings back. Both are on branch `x4pro-sl`
-of the QEMU tree; the regression test is `tests/test_smp.py`.
+caches read as enabled`, gives the assert messages their strings back. Both were developed on branch `x4pro-sl` of the QEMU
+tree and are qemu-patches 0021 and 0022 on `x4pro`; the regression test is `tests/test_smp.py`.
 
 ## The symptom
 
@@ -210,7 +210,8 @@ heap block's head canary holds a DRAM pointer, in a task with a PSRAM stack. Seq
 forbids every reordering, so this is not ordering: a timing-dependent use-after-free or stray pointer
 store, in the firmware or in a model writing guest memory (a peripheral or DMA write-back to a buffer
 already freed is the first thing to check). In the 288 TSO and SC boots of 7.2.4 it happened twice
-(0.7 %); none of the 7.6.8 boots with a fix (over 100) showed it. Open for a separate investigation.
+(0.7 %); none of the 7.6.8 boots with a fix (over 100) showed it. Investigated since: a race between two
+of 7.2.4's own tasks, not the emulator's (`docs/heap.md`).
 
 ## Why only the Mac
 

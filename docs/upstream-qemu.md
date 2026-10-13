@@ -6,11 +6,19 @@ e-mail and `Signed-off-by` the commits do not contain yet (`Signed-off-by: TODO 
 
 ## 1. Where things are
 
+**Refresh before submitting.** The series below was cut from x4pro's first 24 patches on 2026-10-12. The
+2026-10-13 review added 11 cleanups on top (qemu-patches 0025-0035), several of them in generic models
+that belong upstream: the GP-SPI `DMA_INT_CLR` read, intmatrix forwarding only on a level change (the
+same idea as open PR #185), GPIO interrupt types decoded on write, an LEDC fade helper, dead counters
+removed, and the board's cache DONE overlay dropped. Fold the generic ones into `upstream-s3` and rebuild
+`x4pro-on-upstream` (§8) before any PR is opened.
+
 | What | Where |
 |---|---|
-| Upstream series, 15 commits on `esp-develop` @ `febae182` (still Espressif's HEAD today) | branch **`upstream-s3`** in the QEMU clone, worktree `qemu/wt-up` |
-| The board on top, 3 commits | branch **`x4pro-on-upstream`** (same worktree; it is checked out there now) |
-| Builds | `qemu/wt-up/build` (the Makefile's configure line); a copy of the upstream-only binary was kept in the session scratch dir |
+| Upstream series, 15 commits on `esp-develop` @ `febae182` (still Espressif's HEAD today) | branch **`upstream-s3`** in the QEMU clone |
+| The board on top, 3 commits | branch **`x4pro-on-upstream`** |
+| A copy of both branches, should the clone be re-made | `images/upstream-qemu-2026-10-13.bundle` (`git -C qemu fetch ../images/upstream-qemu-2026-10-13.bundle 'refs/heads/*:refs/heads/*'`) |
+| Builds | the squad's worktree `qemu/wt-up` and its `build/` have been removed since; recreate with `git -C qemu worktree add wt-up x4pro-on-upstream` and the Makefile's configure line in `wt-up/build` |
 | The x4pro branch, `qemu/build`, `qemu-patches/` | untouched |
 
 The worktree's three panel symlinks (`hw/display/x4pro_epd_core.c`, `hw/display/epd_core.h`,
@@ -75,7 +83,7 @@ In `qemu/wt-up` they were repointed to absolute paths in the working tree only a
 | 0002 GPIO, SPI2, panel device, board state | split: GPIO → `hw/gpio: …`, GP-SPI → `hw/ssi: …`; panel + state here | |
 | 0003 USJ SOF on every INT_RAW read | **upstream** (folded into the USJ model) | generic ESP-IDF connection-monitor behaviour |
 | 0004 I2C0 + GT911/PCF8563/CW2017, LEDC, deep sleep, QOM input | split: I2C → `hw/i2c: …`, LEDC → `hw/misc: … LEDC …`; devices, sleep, input here | |
-| 0005 cache OCCUPY/LOCK DONE overlay, SPI probe answers, BUSY on reset | split: the DONE semantics re-done **in the cache model** (`hw/misc/esp32s3_cache: complete the DCache lock and occupy operations`); the overlay, probe answers and BUSY stay | upstream fixes the model; the board's overlay is now redundant but kept so the board tree equals x4pro |
+| 0005 cache OCCUPY/LOCK DONE overlay, SPI probe answers, BUSY on reset | split: the DONE semantics re-done **in the cache model** (`hw/misc/esp32s3_cache: complete the DCache lock and occupy operations`); the overlay, probe answers and BUSY stay | upstream fixes the model; x4pro dropped its overlay on 2026-10-13 (review commit `xteink-x4pro: drop the cache DONE overlay`), so `x4pro-on-upstream` should drop it too when it is next rebuilt |
 | 0006 intmatrix re-routing | **upstream** — but **superseded by PR #185** | |
 | 0007 SPI2 through GDMA | split: into the GP-SPI model; board wiring here | |
 | 0008 GDMA: no fetch after the last descriptor | **upstream** | |
@@ -169,7 +177,7 @@ pytest tests/test_boot.py tests/test_aes.py tests/test_smp.py tests/test_input_d
 |---|---|---|
 | 16 files: the five models' .c/.h, `esp_gdma.c`, `esp32s3_spi.c`, `dwc_sdmmc.c/.h`, `esp_aes.c`, `esp32s3_intc.h`, `esp32s3_gpspi.h`, … | checkpatch reformatting and reworded comments; **token-identical** to x4pro | none |
 | `hw/xtensa/esp32s3_intc.c` | as above, plus one local `const XtensaConfig *config` to shorten a line | none |
-| `hw/misc/esp32s3_cache.c/.h` | the new LOCK/OCCUPY DONE handling (`OCCUPY_CTRL` register fields added) | none for the board: its DONE overlay (priority 2) still shadows both registers |
+| `hw/misc/esp32s3_cache.c/.h` | the new LOCK/OCCUPY DONE handling (`OCCUPY_CTRL` register fields added) | none for the board: x4pro no longer has a DONE overlay (dropped 2026-10-13), so the model's handling is what runs |
 | `hw/xtensa/esp32s3.c` | the wiring commit (model instances, includes, `ESP32S3_GPSPI_COUNT`/`I2C_COUNT`) | SPI3 and I2C1 now exist in the SoC; the board's `iolog` regions at priority 1 still shadow them, as before |
 | `hw/xtensa/xteink_x4pro.c` | uses the SoC's instances (−~60 lines), `x4pro_soc_device()`, the compat prop, header comment | QOM paths `/machine/x4pro-gpio/-spi2/-i2c0/-ledc` and `/machine/usj` are gone; nothing references them |
 
@@ -331,6 +339,7 @@ Draft issue (owner to rewrite in their own words):
 The owner approves each step; nothing is pushed until then.
 
 ```sh
+git -C /Users/mini/x4pro-emu/qemu worktree add wt-up upstream-s3     # if it does not exist (section 1)
 cd /Users/mini/x4pro-emu/qemu/wt-up
 git checkout upstream-s3
 
@@ -364,14 +373,3 @@ gh pr create -R espressif/qemu -B esp-develop -H <you>:pr-gdma-last-desc \
 Afterwards, when Espressif merges (or rewrites) any of these, rebase `x4pro-on-upstream` on the new
 `esp-develop`, regenerate `qemu-patches/` from it (`git format-patch -o ../qemu-patches <base>..x4pro-on-upstream`)
 and point `make setup` at that base — a separate, reviewed change.
-
-## 9. Lines for the coordinator's files
-
-- `CLAUDE.md` / `docs/NEXT_PHASE.md` §10.3, S7 row: "prepared (2026-10-12): `upstream-s3` (15 commits, checkpatch
-  clean, builds, AES qtests pass on `-M esp32s3`) and `x4pro-on-upstream` (3 board commits; tree = x4pro up to
-  formatting, wiring and the cache DONE fix; smoke 37 passed). Not submitted: owner's sign-off and approval;
-  #185/#177/#181 overlap. `docs/upstream-qemu.md`."
-- `docs/log.md`: the overlap with open PRs #185 (supersedes our 0006), #177 (= 0009), #181 (vs 0019); QEMU's
-  AI-content policy blocks the TSO patch on qemu-devel.
-- Housekeeping: `qemu/wt-up` is a worktree with its own `build/` (~1.5 GB); remove with
-  `git -C qemu worktree remove --force wt-up` when done (the branches stay).

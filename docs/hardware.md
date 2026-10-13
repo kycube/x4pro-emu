@@ -27,9 +27,11 @@ Register offsets used by the models are listed in `docs/audit.md` ("Register off
 ## Firmware on the desk unit
 
 Delivered state: stock `xteink_app` 7.2.4 (ESP-IDF v6.0.1, built 2026-08-14) in **app0**; app1 erased;
-otadata seq 1 → app0. Current state (2026-09-06): app0 = CrossPoint 1.6.0-x4pro (built with the EpdBus
-trace patch), app1 = a copy of the stock 7.2.4 image, otadata untouched; `tools/device.py restore-stock`
-reverses it. Panel identity from CrossPoint on the device: **UC8279**, `VER=00 0F 68 00 00 FLG=13`.
+otadata seq 1 → app0. On 2026-09-06 CrossPoint 1.6.0-x4pro (with the EpdBus trace patch) ran in app0 for
+the panel captures, then the stock was restored. Two OTA updates by the owner followed: 7.5.4 into app1
+(2026-09-07), then **7.6.8 into app0, which boots today** (2026-10-12, otadata entry 0 seq 3; app1 still
+holds 7.5.4). `tools/device.py slots` reads this from the device or a dump; CLAUDE.md "The real device"
+has the rules. Panel identity from CrossPoint on the device: **UC8279**, `VER=00 0F 68 00 00 FLG=13`.
 Stock partition table: nvs 0x9000/0x5000, otadata 0xE000/0x2000, app0 0x10000/0x7E0000, app1 0x7F0000/0x7E0000,
 spiffs 0xFD0000/0x14000, coredump 0xFE4000/0x1C000 (`docs/device/partitions.md`). CrossPoint's own table
 (`firmware/partitions.csv`): app0 0x10000/0x640000, app1 0x650000/0x640000, spiffs 0xC90000/0x360000,
@@ -49,8 +51,8 @@ serial `X4CB02EN26082416646`.
 
 Three controller variants share the glass and the pins: **SSD1677**, **UC8179**, **UC8279** (X4 800x480
 variant). The SDK decides at boot with a bit-banged probe (below). The desk unit's factory NVS
-`hw_calib/screenType = 2` means **UC8279** by the SDK's mapping; the `[XTDET]` line from a CrossPoint boot on
-the device is the final word (pending, needs CrossPoint flashed).
+`hw_calib/screenType = 2` means **UC8279** by the SDK's mapping, and the `[XTDET]` line of a CrossPoint boot
+on the device confirmed it (`docs/device/boot-crosspoint-1.6.0.log`).
 
 | Signal | GPIO | Notes |
 |---|---|---|
@@ -138,8 +140,9 @@ of the MTP block; bytes 12–15 are TRES 800×600): DDX `01` = KW mode with NEW/
 PLL 0x0E = FRS 1110 = 150 Hz in the UC8179c table (not timed on the device). CrossPoint's AA bank for
 LUT_VER 0x68 has **BW and WB byte-identical** ("BW/WB carry the dark-gray channel" in the driver), so its
 anti-aliased text has three levels on this panel: black, one grey, white. The emulator's waveform model
-(`-global driver=x4pro.epd,property=waveform-gray,value=on`) integrates the phases per transition class;
-the default remains the fixed two-plane table until a device photo settles the grey level.
+integrates the phases per transition class; it is the default since a photo of the glass settled the grey
+level (2026-09-07, `gray-k` 38), and `-global driver=x4pro.epd,property=waveform-gray,value=off` restores
+the old fixed two-plane table.
 
 ## Touch: GT911
 
@@ -257,21 +260,73 @@ at the PCs of its polling loops (docs/log.md 2026-09-06, "Stock WiFi start"). Th
 
 What the emulator does with them: the analog master and SENS are models (idle/done answers, values as QOM
 properties, registers read back as written); FE/FE2/RX/BB/MAC are a storage stub with a table of status bits
-that read as set (`esp32s3.rfstub`, `sticky` property). There is no radio: the driver's TX queue never
-drains and ESP-IDF's own timeouts stop WiFi about 8 s after `wifi:mode : sta`.
+that read as set (`esp32s3.rfstub`). One more such bit can be tried without a rebuild:
+`x4emu run … -global driver=esp32s3.rfstub,property=sticky,value=0xADDR:0xMASK`. There is no radio: the
+driver's TX queue never drains and ESP-IDF's own timeouts stop WiFi about 8 s after `wifi:mode : sta`.
 
-## Simplifications the emulator makes (by design)
+Everything else in 0x60000000..0x600d1000 that no model claims is answered by a named logger overlay:
+`x4pro/<block>` lines in `qemu.log`, 32 per address, after which further accesses are only counted, into
+`state.iolog_hot` (the radio stub's own into `state.rf.hot`), so the register a firmware spins on shows up
+in `x4emu state` without reading the log.
 
-- The GPIO matrix is not modelled electrically: SPI2 transmits on its bus regardless of pin routing, and board
-  devices read CS/DC/RST/SCLK/MOSI straight from the GPIO model's per-pin outputs.
-- IO_MUX and RMT stay `unimp`; pull-up/pull-down settings written there are ignored, so the GPIO model carries a
-  per-pin idle level itself (buttons, MOSI, RST idle HIGH).
-- BUSY durations and the RTC follow guest time.
-- USB OTG (TinyUSB MSC) and BLE are absent. WiFi has the register blocks its start touches (analog master,
-  SENS, FE/RX/BB/MAC stub) but no radio: the driver comes up, finds no air and stops itself.
-- SAR ADC oneshots and the temperature sensor answer fixed values (`sar1-data`, `sar2-data`, `tsens-out`);
-  the analog registers behind the regi2c masters hold what was written, except the status bits the PHY waits
-  for (RF PLL lock 0x62/0x07 bit 1; the DC-offset comparator at 0x6000E04C answers done with fixed comparator
-  bits), so the full calibration runs and "succeeds" with meaningless results.
-- RTC IO (0x60008400) is a stored-value overlay: pad hold/pull/sleep-isolation writes read back (`state.rtcio`),
-  nothing electrical follows from them; the EXT1 wake goes through RTC_CNTL.
+## What is not emulated (how it shows up for a firmware developer)
+
+The short list is in the README; this is the full one, with what a firmware sees.
+
+- **USB mass storage / TinyUSB / USB OTG**: absent. CrossPoint's "File Transfer" screen does nothing, and
+  the host never sees a disk from either firmware. The console is the USB Serial/JTAG peripheral, which is
+  modelled.
+- **WiFi / BLE**: no radio. The blocks a WiFi start touches are answered (the analog-master I2C block, SENS
+  temperature sensor and SAR oneshot, the FE/RX/BB/MAC register stub with status bits that read as set, the
+  RF PLL lock flag and the DC-offset comparator the full PHY calibration polls; section "Analog master"
+  above), so ESP-IDF's driver comes up on a cold boot or a wake alike, finds no air and stops itself about
+  8 s after `wifi:mode : sta`; nothing enumerates on the network side. The calibration runs and "succeeds"
+  with meaningless results. BLE is untested.
+- **Grayscale**: LUT refreshes go through a waveform-level model (the UC8279 tables interpreted per
+  transition class, a reflectance per pixel, `gray-k` 38 = the rim level measured on a photo of the glass,
+  `docs/device/photos/`), the default since 2026-09-07; `-global driver=x4pro.epd,property=waveform-gray,value=off`
+  restores the old fixed two-plane table (`state.gray_model`). Ghosting and the 150 Hz frame period are not
+  modelled; SSD1677's 105-byte LUT keeps the fixed table (`docs/grayscale.md`).
+- **Deep sleep**: a paused VM followed by a system reset with reset cause 5 (DSLEEP), EXT1 wake status =
+  the power button (section "Power and sleep"). RTC-domain retention beyond RTC RAM, power draw and GPIO
+  hold latches are not simulated; the guest's `millis()` keeps counting across the modelled reset.
+- **Light sleep** returns immediately (no time passes). Neither firmware has been seen to light-sleep
+  (`state.sleep.light_sleeps`).
+- **Timing**: BUSY durations are the device's measured values (UC8279: PON 40 ms, GC 1326 ms, DU 483 ms)
+  or 2 ms with `--fast-epd`; the RTC, PWM and GP-SPI transfers of a millisecond or more follow guest time;
+  nothing is cycle-accurate, and CPU-frequency changes by the firmware do not change emulation speed. The
+  two cores see each other's stores in program order (TSO, as the LX7 cores do) on any host, an arm64 Mac
+  included (qemu-patches 0021, `docs/smp.md`; before it the stock asserted in `spinlock_acquire` on half
+  the boots of a loaded Mac).
+- **GPIO matrix / IO_MUX**: not modelled electrically. SPI2 always reaches the panel, and board devices read
+  CS/DC/RST/SCLK/MOSI straight from the GPIO model's per-pin outputs. IO_MUX is an access logger: pull
+  settings written there are ignored, so the GPIO model carries a per-pin idle level itself (buttons, MOSI,
+  RST, CS idle HIGH).
+- **Unmodelled blocks**: RMT, I2S, APB_SARADC's DMA (continuous) mode, the touch-sensor pads and the ULP.
+  SAR ADC oneshots and the temperature sensor answer fixed values (`sar1-data`, `sar2-data`, `tsens-out`).
+  RTC IO (0x60008400) is a stored-value overlay: pad hold/pull/sleep-isolation writes read back
+  (`state.rtcio`), nothing electrical follows from them; the EXT1 wake goes through RTC_CNTL.
+- **The stock firmware** runs unpatched on all of the above: Home, touch, the menu, the reader, the light
+  panel, its 60 s frontlight fade, the WiFi start and stop, and Lua apps whose `ctx.state` the firmware
+  encrypts by DMA-AES into `/XTApps/<app_id>/state.xtsv` (Espressif's AES model; the GDMA reaches PSRAM
+  since qemu-patches 0019; `tests/test_aes.py`, `tests/test_lua_state.py`). Its developer menu (Screen
+  Capture) is compiled out in every version seen; `tools/stockdev.py` patches the predicate in an image copy
+  (`docs/xic.md`).
+
+## Board state (`x4emu state`)
+
+One JSON object from the board, read over QMP (`docs/x4emu.md`). The top-level keys and what they come from:
+
+| key | from | notable fields |
+|---|---|---|
+| `uptime_us` | guest virtual clock | what every `x4emu` wait and hold is measured in |
+| `panel`, `refresh_count`, `last_mode`, `busy`, `last_refresh_us`, `epd_*`, `gray_model` | the panel device | `epd_unknown_cmds`, `probe_reads`, `gray_approx` |
+| `gpio`, `gpio_irqs`, `gpio_in` | GPIO model | `gpio_in`: per-pin firmware samples (`samples`, `changes`, `sample_gap_us`) |
+| `buttons`, `touch`, `gt911` | input devices | `gt911`: `frames`, `clears`, `input_seq` / `read_seq`, `pending`, `deferred`, `key_reads` |
+| `usj`, `spi2`, `i2c0` | USB Serial/JTAG, GP-SPI, I2C counters | `spi2`: `busy`, `transfer_ms`, DMA byte counts |
+| `battery`, `rtc` | CW2017, BM8563 | |
+| `ledc` | LEDC | per channel `duty_permille`, `fading`, `target_permille`; `fades` |
+| `sleep` | RTC_CNTL sleep overlay | `sleeping`, `wakes`, `light_sleeps`, `wakeup_cause`, `ext1_status` |
+| `ana_i2c`, `saradc`, `rf` | analog master, SENS, radio stub | `cal_starts`, `pll_cals`; `tsens_reads`; `rf.hot`, `rf.sticky` |
+| `rtcio` | RTC IO overlay | `pad_writes`, `hold_mask` |
+| `iolog_hot` | the logger overlays | addresses polled past the 32-line log cap, with counts |

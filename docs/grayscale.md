@@ -18,9 +18,9 @@ x4emu run … -- -global driver=x4pro.epd,property=waveform-gray,value=off
                 -global driver=x4pro.epd,property=gray-k,value=38        # the tunable (default 38)
 ```
 
-`x4pro_epd_gray_model()` reports `"approx"` / `"waveform"` for the JSON state (`gray_model`; the
-board's state printer in `hw/xtensa/xteink_x4pro.c` has to emit it — one line,
-`c->waveform_gray ? "waveform" : "approx"`). After a waveform refresh `state.gray_approx` is false.
+`x4pro_epd_gray_model()` reports `"approx"` / `"waveform"` for the JSON state (`state.gray_model`,
+emitted by the board's state printer since patch 0017). After a waveform refresh `state.gray_approx` is
+false.
 
 ## 1. LUT layout of the UC8279 X4 (0x20..0x24, 49 bytes)
 
@@ -140,13 +140,14 @@ Why 28: the settle bank's 25 driven frames must saturate (k ≥ 10.2); 3 frames 
 grey"; 28 puts it at **84**, the level the previous approximation used for its darker grey, so the
 owner's earlier look at the reader applies. The X3's AA bank (2 and 5 frames) would give 56 and 140.
 
-Levels on the desk unit's bank, from a black base (k = 28):
+Levels on the desk unit's bank, from a black base, at the default k = 38 (with the earlier k = 28 both greys
+were 84):
 
 | pixel | class | drive | reflectance |
 |---|---|---|---|
 | black | WW | 1 frame VDH | 0 (a white pixel labelled black would drop to 227) |
-| dark grey | BW | 3 frames VDL | **84** |
-| light grey | WB | 3 frames VDL | **84** — the same table as dark |
+| dark grey | BW | 3 frames VDL | **114** |
+| light grey | WB | 3 frames VDL | **114** — the same table as dark |
 | white | BB | 1 frame VDL | 255 |
 
 **Finding:** with `kXtfAa68` (and `kXtfAa02`) the BW and WB tables are byte-identical, and both grey
@@ -175,10 +176,10 @@ bytes 0 and 6.
 
 ## 5. Renderings and tests
 
-`tests/golden/reader-page1.png` is the approximation (a run of the reader flow with the default
-reproduces it in 0 pixels). With `waveform-gray=on` the same page differs in **14,967 pixels**, all
+Before the default changed, `tests/golden/reader-page1.png` was the approximation (a run of the reader flow
+reproduced it in 0 pixels). With `waveform-gray=on` the same page differed in **14,967 pixels**, all
 grey and nothing else: the 7,622 pixels the approximation showed at 170 (the dark-grey glyph
-pixels) become 84, and the 7,345 it showed at 85 (light-grey glyph pixels) become 84. Black (32,453)
+pixels) became 84 (k 28), and the 7,345 it showed at 85 (light-grey glyph pixels) became 84. Black (32,453)
 and white (336,580) counts are identical. Renderings for the owner's comparison with a photo of the
 device: `reader-approx.png` / `reader-waveform.png` (landscape panel), `reader-*-crop.png` (upright
 portrait, the first four text lines, 3×) and `reader-crops-approx-top-waveform-bottom.png` in the
