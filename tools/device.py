@@ -37,7 +37,7 @@ Subcommands:
                    backup and on that slot being the one that boots
   restore-stock    write the stock app back from the verified backup, same gates
 """
-import argparse, binascii, datetime, glob, hashlib, os, struct, subprocess, sys, tempfile, time
+import argparse, binascii, datetime, glob, hashlib, os, re, struct, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
@@ -98,13 +98,19 @@ def sha256(path):
 def verified_backup():
     """(a, b, data) for the newest backup pair whose two reads are identical, or None. `data`
     is a's bytes, the very bytes whose SHA-256 was compared with b's: the write commands work
-    on what was verified, without reading the 16 MB a second time."""
+    on what was verified, without reading the 16 MB a second time. Newest = the date in the
+    name, then the read's modification time: by name alone a same-day tag sorts by its letters
+    (flash-D-a.bin before flash-D-pre-parity-a.bin, whichever was read later)."""
     pairs = {}
     for p in glob.glob(os.path.join(ROOT, 'images/device/flash-*-a.bin')):
         b = p[:-5] + 'b.bin'
         if os.path.exists(b) and os.path.getsize(p) == FLASH_SIZE and os.path.getsize(b) == FLASH_SIZE:
             pairs[p] = b
-    for a, b in sorted(pairs.items(), reverse=True):
+
+    def age(item):
+        m = re.match(r'flash-(\d{4}-\d\d-\d\d)', os.path.basename(item[0]))
+        return (m.group(1) if m else '', os.path.getmtime(item[0]))
+    for a, b in sorted(pairs.items(), key=age, reverse=True):
         with open(a, 'rb') as f:
             data = f.read()
         if len(data) == FLASH_SIZE and hashlib.sha256(data).hexdigest() == sha256(b):

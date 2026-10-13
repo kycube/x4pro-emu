@@ -302,6 +302,14 @@ def test_the_backup_gate_takes_the_newest_pair_whose_reads_match(tmp_path, monke
     assert len(data) == device.FLASH_SIZE and data[0x10000] == 1
     pair('2026-04-01', 4, 4)
     assert os.path.basename(device.verified_backup()[0]) == 'flash-2026-04-01-a.bin'
+    # same day: the pair read last wins, whatever its tag (by name, '-a' sorts before '-pre-parity-a')
+    pair('2026-05-01-pre-parity', 5, 5)
+    pair('2026-05-01', 6, 6)
+    for side in 'ab':
+        os.utime(d / f'flash-2026-05-01-pre-parity-{side}.bin', (1_000_000, 1_000_000))
+    assert device.verified_backup()[2][0x10000] == 6
+    os.utime(d / 'flash-2026-05-01-pre-parity-a.bin', (2_000_000_000, 2_000_000_000))
+    assert device.verified_backup()[2][0x10000] == 5
 
 
 # ---------------------------------------------------- the gate in front of every write
