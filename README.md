@@ -80,6 +80,10 @@ The models are checked against the desk unit, not just against datasheets:
 - The two emulated cores keep the chip's memory order on any host, an arm64 Mac included, and every
   input is held, in guest time, until the firmware has seen it and its release: no test retries inputs
   ([docs/smp.md](docs/smp.md), [docs/x4emu.md](docs/x4emu.md)).
+- `tools/parity.py` runs the same steps on the emulator and, from a printed runbook, on the reader, and
+  compares the stock's own Screen Captures pixel by pixel, every difference masked or explained
+  ([docs/parity.md](docs/parity.md)); on the emulator side the captures equal the panel on 7 of 8 screens
+  (the light panel closes itself to be captured), and the first device session is still to come.
 - Touch, buttons, the capacitive Home pad, the front light (LEDC with hardware fades), the battery
   gauge, the RTC, the SD card, deep sleep and the radio blocks a WiFi start touches are modelled to
   the point where both firmwares run unpatched ([docs/hardware.md](docs/hardware.md)).
@@ -119,6 +123,7 @@ are at the top of [CLAUDE.md](CLAUDE.md).
 | [docs/lua-apps.md](docs/lua-apps.md) · [docs/gamebook.md](docs/gamebook.md) | writing apps for the stock firmware |
 | [docs/stock-firmware.md](docs/stock-firmware.md) · [7.5.4](docs/stock-7.5.4.md) · [7.6.8](docs/stock-7.6.8.md) | the stock app's internals, version by version |
 | [docs/README.md](docs/README.md) | every other document, with a line each |
+| [docs/parity.md](docs/parity.md) | device parity: the same steps on the emulator and the reader, the stock's own Screen Captures compared pixel by pixel |
 | [docs/upstream-qemu.md](docs/upstream-qemu.md) | the generic ESP32-S3 models split out for Espressif's QEMU: the series, the proposed PRs, what awaits the owner |
 | [docs/upstream.md](docs/upstream.md) | the weekly upstream watch: new CrossPoint releases, Espressif QEMU, PlatformIO and Homebrew drift |
 | [docs/log.md](docs/log.md) | the engineering log: what was done, what failed, and why |

@@ -1,0 +1,186 @@
+{
+  "format": "x4pro-parity/1",
+  "name": "stock-7.6.8",
+  "description": "Eight screens of the stock xteink_app 7.6.8 with the developer-menu patch: Home, the light panel, the nav menu, Settings, All Files (the Parity folder), a page of the parity book, the Mini Apps list and the cover of The Keeper of Gull Rock. Coordinates and boxes are portrait pixels (480 x 800, origin top left), the frame the stock draws and captures in.",
+  "references": "stock-7.6.8",
+  "firmware": {
+    "stock_version": "7.6.8",
+    "dump": "images/device/flash-2026-10-12-a.bin",
+    "patches": ["developer-menu"]
+  },
+  "card": {
+    "mirror": "images/device/sd-files",
+    "size": "256M",
+    "apps": ["apps/gull-rock"],
+    "files": [
+      {"path": "Parity/Parity Book.epub", "make": "book", "title": "Parity Book"}
+    ]
+  },
+  "capture": {
+    "pull": {"from": [239, 5], "to": [239, 300], "ms": 600},
+    "button": [280, 733],
+    "toast_ms": 5000,
+    "toast_box": [140, 72, 340, 116],
+    "say": [
+      "Put one finger on the very top edge of the screen, on the line with the clock and the battery, and slide it slowly straight down, about a third of the screen.",
+      "The light panel opens: Brightness, Color Temp, four round buttons (Boost, Full Refresh, Sleep Lock, Light) and, at the bottom of the screen, three boxed buttons: \"Memory Developer\", \"Screen Ca\" and \"BGIO Developer\".",
+      "Tap the middle boxed button, \"Screen Ca\" (Screen Capture). The panel closes at once.",
+      "A small \"Screenshot saved\" label appears near the top. Then count slowly to five before the next tap: for about four seconds the label is still alive and would be drawn onto the next screen (it stays visible afterwards until something is redrawn; that is expected). If no label appears, take the capture again (an extra capture does no harm)."
+    ]
+  },
+  "masks": {
+    "status-bar": {"box": [0, 0, 480, 60], "why": "status bar: clock, battery percentage and level, the WiFi glyph (WiFi is on on the device, off in the redacted copy)"},
+    "menu-date": {"box": [214, 740, 480, 800], "why": "the nav menu's date and time line"},
+    "reader-clock": {"box": [0, 760, 120, 800], "why": "the reader footer's clock"},
+    "reader-battery": {"box": [400, 760, 480, 800], "why": "the reader footer's battery level"}
+  },
+  "preconditions": {
+    "system-font": {
+      "check": {"kind": "same-as-mirror", "path": "XTData/system_fonts/selection.config"},
+      "scope": "all",
+      "say": "The card selects the same system font as the mirror (MiSans DemiBold)",
+      "why": "every line of UI text is drawn in it"
+    },
+    "language": {
+      "check": {"kind": "owner"},
+      "scope": "all",
+      "say": "Is the reader's menu in English (Read, All Files, USB, Cloud, Mini Apps, Settings)?",
+      "why": "the emulator runs the NVS of the 2026-10-12 dump, language English"
+    },
+    "bookshelf": {
+      "check": {"kind": "absent", "path": "XTData/reading/recent.xtbr"},
+      "say": "No book has ever been opened on this card, so Home says \"Bookshelf Empty\"",
+      "why": "the stock keeps the bookshelf (recent books) in /XTData/reading/recent.xtbr; the September mirror has none"
+    },
+    "cloud-account": {
+      "check": {"kind": "owner"},
+      "say": "Does the first row of Settings still say \"Unbound\" (no Xteink cloud account bound)?",
+      "why": "the account row is drawn from NVS (cloud_bind_st), as of the 2026-10-12 dump"
+    },
+    "reading-settings": {
+      "check": {"kind": "owner"},
+      "say": "Are Settings -> Reading settings (Font / Layout / Reading Style) as they were on 12 October (unchanged since)?",
+      "why": "the reader page is laid out with the reading defaults from NVS, as of the 2026-10-12 dump"
+    },
+    "apps": {
+      "check": {"kind": "same-dirs", "path": "XTApps", "expect": ["gull-rock"]},
+      "say": "/XTApps on the card holds exactly one app, gull-rock",
+      "why": "the Mini Apps list shows one card per app folder"
+    },
+    "gamebook": {
+      "check": {"kind": "same-files", "path": "XTApps/gull-rock", "like": "apps/gull-rock", "files": ["index.lua", "manifest.json"]},
+      "say": "The gamebook on the card is the repository's apps/gull-rock (index.lua and manifest.json identical)",
+      "why": "the cover is drawn by the app's own index.lua"
+    },
+    "gamebook-state": {
+      "check": {"kind": "absent", "path": "XTApps/gull-rock/state.xtsv"},
+      "say": "The gamebook has no saved game on the card, so its cover offers only \"Begin\"",
+      "why": "with ctx.state saved (/XTApps/gull-rock/state.xtsv) the cover offers Continue / Begin again and counts endings found; the emulator's card is fresh"
+    }
+  },
+  "screens": [
+    {
+      "id": "home",
+      "title": "Home (Bookshelf)",
+      "expect": "\"Bookshelf\" at the top left, ≡ at the top right, \"Bookshelf Empty / Open a book from \"All Files\"\" in the middle (or the books you have opened, if there are any)",
+      "steps": [
+        {"do": "note", "say": "Start on Home: the Bookshelf page. If the reader shows anything else, touch the Home pad until the Bookshelf appears."}
+      ],
+      "masks": ["status-bar"],
+      "state": [
+        {"box": [0, 100, 480, 800], "depends": "bookshelf", "why": "the bookshelf lists recently opened books"}
+      ]
+    },
+    {
+      "id": "light",
+      "title": "The light panel",
+      "expect": "Brightness and Color Temp sliders, Boost / Full Refresh / Sleep Lock / Light, the three developer buttons at the bottom",
+      "capture": false,
+      "masks": ["status-bar"],
+      "note": "the stock closes the light panel before it captures (the capture holds the screen below it), so this screen has no device capture; the report shows the emulator's picture of it for comparing by eye",
+      "steps": [
+        {"do": "swipe", "from": [239, 5], "to": [239, 300], "ms": 600, "repaint": false, "settle": 1.5,
+         "say": "Open the light panel: slide a finger down from the very top edge of the screen, as for a capture. Look at it; do NOT tap Screen Capture this time."}
+      ],
+      "leave": [
+        {"do": "tap", "at": [240, 560], "say": "Tap the dimmed page below the panel (the middle of the screen) to close it. The Bookshelf comes back."}
+      ]
+    },
+    {
+      "id": "menu",
+      "title": "The nav menu",
+      "expect": "a menu on the right: Read (black, selected), All Files, USB, Cloud, Mini Apps, Settings, and the date at the bottom",
+      "steps": [
+        {"do": "tap", "at": [441, 88], "say": "Tap the ≡ icon at the top right."}
+      ],
+      "masks": ["status-bar", "menu-date"],
+      "state": [
+        {"box": [0, 100, 214, 740], "depends": "bookshelf", "why": "the dimmed Bookshelf shows to the left of the menu"}
+      ]
+    },
+    {
+      "id": "settings",
+      "title": "Settings",
+      "expect": "Unbound, General, Display & personalization, Network & connections, Buttons & interaction, Reading settings, About device",
+      "steps": [
+        {"do": "tap", "at": [329, 582], "say": "Tap Settings (the last row of the menu, the gear icon)."}
+      ],
+      "masks": ["status-bar"],
+      "state": [
+        {"box": [0, 120, 480, 205], "depends": "cloud-account", "why": "the account row"}
+      ]
+    },
+    {
+      "id": "all-files",
+      "title": "All Files, inside the Parity folder",
+      "expect": "\"All Files\" and the path \"microSD / Parity\", one row: \"Parity Book.epub, EPUB | 3KB\", and \"0 folders 1 files\" at the bottom",
+      "steps": [
+        {"do": "tap", "at": [441, 88], "say": "Tap ≡ at the top right."},
+        {"do": "tap", "at": [329, 246], "say": "Tap All Files (the folder icon)."},
+        {"do": "tap", "at": [150, 185], "say": "Tap the folder Parity (the one the computer put on the card)."}
+      ],
+      "masks": ["status-bar"]
+    },
+    {
+      "id": "reader",
+      "title": "The parity book, first page",
+      "expect": "\"Chapter 1\" at the top, then \"Chapter 1, paragraph 1. The quick brown fox ...\", the clock, \"Chapter 1\" and the battery in the footer",
+      "steps": [
+        {"do": "tap", "at": [150, 185], "settle": 3, "say": "Tap Parity Book.epub. Wait until the first page is drawn (it starts \"Chapter 1, paragraph 1\"). Do not turn the page."}
+      ],
+      "masks": ["reader-clock", "reader-battery"],
+      "state": [
+        {"box": [0, 0, 480, 760], "depends": "reading-settings", "why": "font, size and margins of the reading layout"}
+      ]
+    },
+    {
+      "id": "mini-apps",
+      "title": "Mini Apps",
+      "expect": "\"Extensions\", one card \"The Keeper of Gull ...\", and \"1/1\" and \"1 books\" at the bottom",
+      "steps": [
+        {"do": "home", "say": "Touch the Home pad once: you are back in the Parity folder."},
+        {"do": "tap", "at": [441, 88], "say": "Tap ≡ at the top right."},
+        {"do": "tap", "at": [329, 498], "say": "Tap Mini Apps (the four-squares icon)."}
+      ],
+      "masks": ["status-bar"],
+      "state": [
+        {"box": [0, 120, 480, 800], "depends": "apps", "why": "one card per app on the card"}
+      ]
+    },
+    {
+      "id": "gull-rock",
+      "title": "The Keeper of Gull Rock, cover",
+      "expect": "the lighthouse picture, \"The Keeper of GULL ROCK\", \"a gamebook\", and a \"Begin\" box (Continue / Begin again if a game was saved)",
+      "steps": [
+        {"do": "tap", "at": [124, 225], "settle": 3, "say": "Tap the gamebook's card (The Keeper of Gull ...). Wait for the cover."}
+      ],
+      "leave": [
+        {"do": "note", "say": "Leave the gamebook as you usually do (Home pad, then Exit). Do not start a game: the cover is the last screen."}
+      ],
+      "state": [
+        {"box": [0, 515, 480, 800], "depends": "gamebook-state", "why": "the choices under the title, and the endings-found line"},
+        {"box": [0, 0, 480, 800], "depends": "gamebook", "why": "the app draws the whole frame"}
+      ]
+    }
+  ]
+}
