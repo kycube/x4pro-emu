@@ -10,6 +10,7 @@ the [project README](../README.md) is the overview.
 | [x4emu.md](x4emu.md) | the `x4emu` CLI: every command, its JSON shape, installing it with pipx |
 | [hardware.md](hardware.md) | the X4 Pro as the emulator models it: pins, buses, panel variants, with sources |
 | [grayscale.md](grayscale.md) | the waveform-level grey model of the UC8279 and how it was calibrated |
+| [smp.md](smp.md) | the two emulated cores and the memory order: the `spinlock.h:141` assert, TSO, the cache bits |
 | [audit.md](audit.md) | every claim of the original build brief, confirmed or corrected, with evidence |
 
 ## The stock firmware (`xteink_app`)

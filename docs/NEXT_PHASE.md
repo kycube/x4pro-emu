@@ -85,7 +85,9 @@ a mechanical acceptance). The session-8 entry of `docs/log.md` says what each ag
       `stockstrings` refuses that pack alone on 7.5.4. Also unanswered: who writes `presenter+176`.
    g. `docs/stock-firmware.md` is still entirely 7.2.4 — either re-locate more of it in 7.5.4 as the work
       needs it, or mark its heading so nobody reads its addresses as current.
-   h. **The input-delivery race belongs in `x4emu`, not in every test.** Five full runs in session 8 each
+   h. ~~**The input-delivery race belongs in `x4emu`, not in every test.**~~ **Done 2026-10-13**: the cause was the
+      GT911 model wiping an unread release; frames latch now and `x4emu` holds inputs in guest time until seen
+      (log entry "World-class pass, wave 1"). The original note follows. Five full runs in session 8 each
       lost one input, in five different tests: the firmware reads the GT911 frame in 0.03 s and then never
       repaints, because both firmwares poll input only between rendering passes that take seconds, and the
       desk Mac runs the owner's own applications. Session 8 answered it per test (`conftest.x4emu_input`,

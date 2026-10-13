@@ -77,6 +77,9 @@ The models are checked against the desk unit, not just against datasheets:
   firmware's identification probe as the real one does, refreshes with the device's measured BUSY
   times, and renders grey through a waveform-level model calibrated on a photo of the glass
   ([docs/grayscale.md](docs/grayscale.md)).
+- The two emulated cores keep the chip's memory order on any host, an arm64 Mac included, and every
+  input is held, in guest time, until the firmware has seen it and its release: no test retries inputs
+  ([docs/smp.md](docs/smp.md), [docs/x4emu.md](docs/x4emu.md)).
 - Touch, buttons, the capacitive Home pad, the front light (LEDC with hardware fades), the battery
   gauge, the RTC, the SD card, deep sleep and the radio blocks a WiFi start touches are modelled to
   the point where both firmwares run unpatched ([docs/hardware.md](docs/hardware.md)).

@@ -1243,11 +1243,61 @@ pointed at libgcrypt 1.12.3's removed Cellar include path. The Makefile's config
 **A known intermittent, not from these patches: `spinlock_acquire` asserts (line 141).** The first full
 `make test` with the patches (172 passed, 2 failed) lost `test_stock_runs_both_status_apps` to
 `assert failed: 0x40384060 <cached disabled>:141` on stock 7.2.4: 7.2.4's `spinlock_acquire`
-(FUN_40383f50+0x110, "lock->owner == SPINLOCK_FREE || …") called from `xQueueReceive` (FUN_42373db8)
+(FUN_40383f50+0x110; line 141 is `lock->owner == core_owner_id` -- the expression first quoted here
+was line 145's) called from `xQueueReceive` (FUN_42373db8)
 in a task, i.e. a lock word that is neither free nor the other core's. The same assert is in
 `.x4emu/pio2/console.log` from 14:55, before these patches (the 12:07 binary, stock 7.6.8,
 FUN_40383f68+0x110 reached from an ISR that interrupted the idle task). Both failing tests pass
 alone, twice. Suspected: a load-dependent race in the two-core TCG's S32C1I lock path or in a model
-raising interrupts from another thread; not investigated. The other failure of that run,
+raising interrupts from another thread; not investigated. **Resolved later that day** (`docs/smp.md`):
+the two cores' plain stores were reordered on the arm64 host (TCG memory order 0); TSO fixes it. The other failure of that run,
 `test_stock_relabelled_menu`, was the familiar tap that repainted something other than the menu.
 The second full run was green: **174 passed, 1 skipped, 13.5 min** (`make test`, the rebuilt `qemu/build`).
+
+## 2026-10-12/13 — World-class pass, wave 1: two root causes, an upstream watch, a speed study (four agents)
+
+The owner asked for the remaining roadmap in phases without stopping between them. Wave 1 ran four
+Opus 5.5 agents in parallel, each with its own files, QEMU worktree and `X4EMU_TEST_PREFIX`
+(`tests/conftest.py` gained that prefix first, so side-by-side pytest runs never share an instance).
+
+**The `spinlock.h:141` assert was a QEMU memory-order bug (`docs/smp.md`, qemu-patches 0021-0022).**
+Line 141 is `lock->owner == core_owner_id`, right after IDF's software compare-and-set succeeded on a
+lock word in PSRAM. QEMU ran the two cores as MTTCG threads with `TCG_GUEST_DEFAULT_MO` 0, so on the
+arm64 Mac a core's plain stores reached the other core in either order: CPU1's release of the DRAM
+lock overtook its owner store, and both cores held the queue lock (caught at a gdb breakpoint). A
+litmus test showed 78-342 stale reads per million rounds; six stock 7.6.8 instances asserted on 26 of
+48 boots. TSO (`TCG_MO_ALL & ~TCG_MO_ST_LD`) takes both to 0 (0/48, 0/120 on 7.2.4) at ~10 % on a
+memory-bound loop; it is what the LX7 cores guarantee (in-order loads, a write buffer, IDF fences only
+store-then-load), and full sequential consistency cost the same and fixed nothing more. x86 hosts are
+TSO already, which is why CI never saw it. The cache model also read the ICache/DCache enable bits as 0
+(CTRL1 was treated as the enable register), so every IDF assert printed `<cached disabled>`; now it
+prints `spinlock_acquire spinlock.h:141 (lock->owner == core_owner_id)`. Still open: `CORRUPT HEAP:
+Bad head at 0x3fce45c0` in `vQueueDelete` on 2 of 288 stock 7.2.4 boots, the same under full ordering,
+so a stray store, not a memory-order effect.
+
+**The lost inputs were the GT911 model's (`docs/x4emu.md` "Input delivery", qemu-patches 0023-0024).**
+Both firmwares read status 0x814E, then write 0 to it; the model turned every input change into a new
+frame at once, so a release landing between the read and the clear was wiped unread, the firmware
+kept the finger (or the Home pad) down, the tap never completed and the next input continued the stuck
+contact (`--trace-i2c`: 0x90 frames, never the 0x80 release). Frames now latch until the clear; a change
+meanwhile becomes the next frame. The GPIO model counts the firmware's samples per pin, and `x4emu`
+holds every input for `--ms` of guest time and until the firmware has consumed it (a frame's
+`read_seq`, or two button samples >= 8 ms apart: CrossPoint commits a button only when two polls agree),
+then until it has seen the release. Squeezed-host reproduction (QEMU SIGSTOPped 20 ms in every 50):
+12/580 inputs lost before, 4/400 with TSO alone, 0/520 with the patches, 0/400 with both. The
+per-test retries are gone (conftest `x4emu_input`, test_stock's `tap`/`tap_repaints`/`step`, the replay
+re-run, test_lua_status, the gamebook's `open_app`); `test_lua_state` had a re-entry that only passed by
+retrying into the minute-clock repaint and now taps the card alone.
+
+**The upstream watch (`docs/upstream.md`, `.github/workflows/upstream.yml`) found something on its
+first run:** Homebrew's `platformio` moved to Python 3.15, which the pinned pioarduino platform refuses.
+PlatformIO now lives in `.venv-pio` (pioarduino core v6.1.19 on the newest Python 3.10-3.14); the
+macOS job then passed end to end (14m44s), and CrossPoint 1.6.5 is reported as drift, not breakage.
+
+**The speed study** (no changes yet): 816-944 s sequential, stock tests 78 %; 130 s of lost-input
+timeouts and 115 s of re-waiting an already idle panel; `xdist -n 4` longest-first 215 s, 184 s with a
+guest-time quiet and an event-driven boot hold; snapshots impossible (the Xtensa CPU has no VMState).
+
+**Integrated and verified by the coordinator:** the four QEMU commits cherry-picked onto `x4pro`,
+qemu-patches regenerated (0021-0024), `make test` **188 passed, 2 skipped, 0 failed** in 13:18 at load
+6-8, with no input retries anywhere. The MCP `build_firmware` now uses `.venv-pio` too.
