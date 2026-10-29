@@ -1542,3 +1542,12 @@ off and blanks every erased slot; a test checks that no credential value the dum
 image. The leaky copies never left `images/`, the scratchpad or pytest's temp folders and were deleted; the
 goldens were regenerated from the clean image. The older dumps were already clean (checked: 0 copies). `list`
 now hides `pswd`, `pin`, `irk` and `apinfo` keys too (it would have printed `boot_pin_fw`).
+
+CI went red the same day for a reason of its own: `pip install pillow` now gets Pillow 13.0.0, whose bundled
+raqm 0.11 refuses to lay out a lone paragraph break (U+2029, LF). Ubuntu's DejaVu maps U+2029 and the
+`tests/test_xtfont.py` builds stopped at it (macOS builds from Arial, which does not, so they passed); the
+weekly upstream watch had been failing on the same error since 10-19. `xtfont._rasterise` now draws such a
+codepoint with the basic layout, which renders it as raqm 0.10 did: Arial Bold and DejaVu Sans build
+byte-identical `.xtf` files under Pillow 12.3 and 13.0 and before the change. Switching every glyph to the basic
+layout was measured and rejected: it changes about 270 glyphs per font (combining marks, zero-width marks,
+advances).

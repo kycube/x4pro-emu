@@ -377,12 +377,18 @@ def fit_size(ttf_path, cell, start=None):
 def _rasterise(font, cell_w, cell_h, baseline, cp):
     """(advance_x, x_off, y_off, bitmap bytes) for one codepoint, drawn without antialiasing with
     the pen at the cell's top-left corner and the baseline `baseline` rows below it."""
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
     pad = cell_w
     im = Image.new('L', (cell_w * 3, cell_h * 3), 0)
     d = ImageDraw.Draw(im)
     d.fontmode = '1'                                        # FreeType monochrome: no antialiasing
-    d.text((pad, pad + baseline), chr(cp), font=font, fill=255, anchor='ls')
+    try:
+        d.text((pad, pad + baseline), chr(cp), font=font, fill=255, anchor='ls')
+    except RuntimeError:
+        # raqm 0.11 (Pillow 13) refuses a lone paragraph break (U+2029, LF) that DejaVu maps; the
+        # basic layout draws it as raqm 0.10 did (no ink, the same advance)
+        font = font.font_variant(layout_engine=ImageFont.Layout.BASIC)
+        d.text((pad, pad + baseline), chr(cp), font=font, fill=255, anchor='ls')
     im = im.point(lambda v: 255 if v >= 128 else 0)
     box = im.getbbox()
     advance = max(0, min(cell_w, round(font.getlength(chr(cp)))))
