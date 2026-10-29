@@ -147,20 +147,51 @@ def test_redact_blanks_a_littlefs_radio_store_and_nothing_else():
     assert nvsedit.blank_radio_store(bytearray(0x5000)) == []          # a bare NVS: no partition table
 
 
-LICORICE = os.path.join(ROOT, 'images/device/flash-2026-10-13-v261013-a.bin')
+LICORICE = {'v261013': os.path.join(ROOT, 'images/device/flash-2026-10-13-v261013-a.bin'),
+            'v26102901': os.path.join(ROOT, 'images/device/flash-2026-10-29-v26102901-a.bin')}
+SECRETS = {('user_config', 'sta_ssid'), ('user_config', 'sta_pwd'), ('user_config', 'wifi_creds'),
+           ('nvs.net80211', 'sta.ssid'), ('nvs.net80211', 'sta.pswd'), ('fw', 'boot_pin_fw'),
+           ('nimble_bond', 'local_irk_1')}
 
 
-@pytest.mark.skipif(not os.path.exists(LICORICE), reason='the XTOS Licorice dump is not on this machine')
-def test_redact_leaves_no_wifi_secret_in_a_licorice_dump(tmp_path):
-    """On the device's Licorice dump: after `redact` neither the NVS keys nor the /radio files are left."""
+def secret_values(image):
+    """{ns/key: value bytes} of every credential the image holds (str or blob data, 6 bytes or more).
+    Only ever compared, never printed."""
+    n = nvs(image)
+    out = {}
+    for pg in n.pages:
+        for i, e in n.entries(pg):
+            k = (n.ns.get(e[0]), e[8:24].split(b'\0')[0].decode(errors='replace'))
+            if e[0] and k in SECRETS and nvsedit.TYPES.get(e[1]) in ('str', 'blob_data'):
+                size = struct.unpack('<H', e[24:26])[0]
+                v = bytes(pg[64 + 32 * (i + 1):64 + 32 * (i + 1) + size]).rstrip(b'\0').rstrip(b'\xff')
+                if len(v) >= 6:
+                    out['/'.join(k)] = v
+    return out
+
+
+@pytest.mark.parametrize('tag', list(LICORICE))
+def test_redact_leaves_no_wifi_secret_in_a_licorice_dump(tmp_path, tag):
+    """On the device's Licorice dumps: after `redact` no credential the dump held is anywhere in the image
+    (not in a live key, not in an erased slot NVS left behind, not in the /radio store), and WiFi is off.
+    26102901 keeps the network in the WiFi driver's own keys too, a passcode digest and a Bluetooth
+    identity key; before redact knew them, its "redacted" copy held the password three times."""
+    if not os.path.exists(LICORICE[tag]):
+        pytest.skip(f'the XTOS Licorice {tag} dump is not on this machine')
     flash = tmp_path / 'licorice.bin'
-    copy_image(LICORICE, flash)
+    copy_image(LICORICE[tag], flash)
     try:
+        held = secret_values(flash)
+        assert {'user_config/sta_pwd', 'user_config/wifi_creds'} <= set(held), sorted(held)
         out = run(flash, 'redact')
         assert 'spiffs: blanked' in out, out
         data = flash.read_bytes()
         assert data[0xFD0000:0xFE4000] == b'\xff' * 0x14000, 'the spiffs partition (the /radio store) is not blank'
         assert not [k for k in CREDS if k in items(flash)], 'a credential key is still in NVS'
+        left = sorted(k for k, v in held.items() if v in data)
+        assert not left, f'still in the redacted image (values not shown): {left}'
+        if tag == 'v26102901':
+            assert 'fw/wifi_on = 0' in out and not nvs(flash).keys('nimble_bond'), out
     finally:
         flash.unlink(missing_ok=True)
 

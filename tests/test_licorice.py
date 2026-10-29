@@ -10,27 +10,27 @@ unchanged. Skips without the dump (stockkit.stock_flash redacts the copy, NVS an
 """
 import json
 
-from stockkit import (DUMP_LICORICE, SKIP_IDLE, WHOLE, booted, golden_check, settle, state, stock_card,  # noqa: F401
+from stockkit import (SKIP_IDLE, WHOLE, booted, golden_check, licorice, settle, state, stock_card,  # noqa: F401
                       tap, wait_for, x4emu)
 
 HAMBURGER = (94, 33)                 # portrait (446, 94): the ≡ at the right of the Bookshelf tabs
 DRAWER_COLS = (60, 720)              # the drawer draws the date at portrait y 730..760
 
 
-def test_licorice_boots_upright_and_opens_the_drawer(request, tmp_path, stock_card):
-    with booted(request, tmp_path, stock_card, dump=DUMP_LICORICE, icount=SKIP_IDLE) as s:
+def test_licorice_boots_upright_and_opens_the_drawer(request, tmp_path, stock_card, licorice):
+    with booted(request, tmp_path, stock_card, dump=licorice.dump, icount=SKIP_IDLE) as s:
         x4emu(s.name, 'wait-refresh', '--total', 1, '--timeout', 90)
         settle(s.name, 2, 60)
         psr = [json.loads(ln)['data'] for ln in open(tmp_path / 'epd.jsonl') if '"cmd":"0x00"' in ln]
         assert psr and psr[0].split()[0] == '3b', f'Licorice sent PSR {psr} (3b expected: UD 1, SHL 0)'
         home = tmp_path / 'licorice-home.png'
         x4emu(s.name, 'screenshot', home)
-        golden_check(home, 'licorice-home.png', why=' (Bookshelf, "Open a book to start")')
+        golden_check(home, licorice.golden('licorice-home.png'), why=' (Bookshelf, "Open a book to start")')
         tap(s.name, *HAMBURGER)
         settle(s.name, 1.5, 60)
         drawer = tmp_path / 'licorice-drawer.png'
         x4emu(s.name, 'screenshot', drawer)
-        golden_check(drawer, 'licorice-drawer.png', cols=DRAWER_COLS, why=' (the side drawer)')
+        golden_check(drawer, licorice.golden('licorice-drawer.png'), cols=DRAWER_COLS, why=' (the side drawer)')
 
 
 def P(px, py):
@@ -47,30 +47,30 @@ def shot(name, tmp_path, label):
     return png
 
 
-def test_licorice_walk(request, tmp_path, stock_card):
+def test_licorice_walk(request, tmp_path, stock_card, licorice):
     """The walk a reader takes: All files, the test book opened, a page forward with the right button and
     back with the left, the light panel over the page with the frontlight driven from its slider, the
     Home pad back to the Bookshelf, Settings, and a deep sleep (its "Get Started" screen) with a wake
-    that resumes the book, not Settings, as Licorice does. Each screen against its golden; the clock
-    regions masked."""
-    with booted(request, tmp_path, stock_card, dump=DUMP_LICORICE, icount=SKIP_IDLE) as s:
+    that resumes the book (261013) or shows Recent (26102901), not Settings. Each screen against its
+    build's golden; the clock regions masked."""
+    with booted(request, tmp_path, stock_card, dump=licorice.dump, icount=SKIP_IDLE) as s:
         n = s.name
         x4emu(n, 'wait-refresh', '--total', 1, '--timeout', 90)
         settle(n, 2, 60)
         tap(n, *HAMBURGER)
         tap(n, *P(330, 320))                                   # All files
         settle(n, 1.5, 60)
-        golden_check(shot(n, tmp_path, 'files'), 'licorice-files.png', why=' (All files at the card root)')
+        golden_check(shot(n, tmp_path, 'files'), licorice.golden('licorice-files.png'), why=' (All files at the card root)')
         tap(n, *P(150, 245))                                   # Test Book.epub (the second row)
         settle(n, 2, 60)
         page1 = shot(n, tmp_path, 'page1')
-        golden_check(page1, 'licorice-reader.png', cols=READER_COLS, why=' (the test book, page 1)')
+        golden_check(page1, licorice.golden('licorice-reader.png'), cols=READER_COLS, why=' (the test book, page 1)')
         x4emu(n, 'press', 'right', '--quiet', 1, '--wait', 20)
         settle(n, 1.5, 60)
-        golden_check(shot(n, tmp_path, 'page2'), 'licorice-reader-page2.png', cols=READER_COLS)
+        golden_check(shot(n, tmp_path, 'page2'), licorice.golden('licorice-reader-page2.png'), cols=READER_COLS)
         x4emu(n, 'press', 'left', '--quiet', 1, '--wait', 20)
         settle(n, 1.5, 60)
-        golden_check(shot(n, tmp_path, 'page1-again'), 'licorice-reader.png', cols=READER_COLS,
+        golden_check(shot(n, tmp_path, 'page1-again'), licorice.golden('licorice-reader.png'), cols=READER_COLS,
                      why=' (left goes back to page 1)')
 
         # the light panel: pulled from the top edge; the brightness slider's right part drives both
@@ -78,9 +78,12 @@ def test_licorice_walk(request, tmp_path, stock_card):
         (x1, y1), (x2, y2) = P(240, 5), P(240, 300)
         x4emu(n, 'swipe', x1, y1, x2, y2, '--ms', 600, '--quiet', 1, '--wait', 20)
         settle(n, 1.5, 60)
-        golden_check(shot(n, tmp_path, 'light'), 'licorice-light.png', cols=(60, 760),
+        golden_check(shot(n, tmp_path, 'light'), licorice.golden('licorice-light.png'), cols=(60, 760),
                      why=' (the light panel; the dimmed page keeps its footer clock)')
-        assert json.loads(x4emu(n, 'light').stdout) == {'cool': 0, 'warm': 0}, 'the light is off at boot'
+        # off at boot: 261013 sets the two LEDC channels up at duty 0; 26102901 leaves LEDC untouched
+        # until the light is first used (no channel on GPIO 8/9: null)
+        assert json.loads(x4emu(n, 'light').stdout) in ({'cool': 0, 'warm': 0}, {'cool': None, 'warm': None}), \
+            'the light is off at boot'
         tap(n, *P(385, 130))
         settle(n, 1.5, 60)
         light = json.loads(x4emu(n, 'light').stdout)
@@ -93,13 +96,13 @@ def test_licorice_walk(request, tmp_path, stock_card):
         tap(n, *HAMBURGER)
         tap(n, *P(330, 580))                                   # Settings
         settle(n, 1.5, 60)
-        golden_check(shot(n, tmp_path, 'settings'), 'licorice-settings.png', why=' (Settings)')
+        golden_check(shot(n, tmp_path, 'settings'), licorice.golden('licorice-settings.png'), why=' (Settings)')
 
         # deep sleep: a held power button; the model pauses the VM with EXT1 armed on GPIO3
         x4emu(n, 'hold', 'power', '--ms', 1500)
         st = wait_for(lambda: (v := state(n))['sleep']['sleeping'] and v, 30, 'Licorice to deep-sleep', every=0.2)
         assert st['sleep']['deep'] and st['sleep']['ext1_sel'] == '0x8', st['sleep']
-        golden_check(shot(n, tmp_path, 'sleep'), 'licorice-sleep.png', cols=WHOLE, why=' (the sleep screen)')
+        golden_check(shot(n, tmp_path, 'sleep'), licorice.golden('licorice-sleep.png'), cols=WHOLE, why=' (the sleep screen)')
         refreshes = st['refresh_count']
         x4emu(n, 'press', 'power')                             # extended to a 1.5 s hold while asleep
         st = wait_for(lambda: (v := state(n))['refresh_count'] > refreshes and not v['sleep']['sleeping'] and v,
@@ -108,5 +111,9 @@ def test_licorice_walk(request, tmp_path, stock_card):
         settle(n, 2, 60)
         log = x4emu(n, 'log').stdout
         assert 'rst:0x5 (DSLEEP)' in log, log[-600:]
-        golden_check(shot(n, tmp_path, 'woken'), 'licorice-reader.png', cols=READER_COLS,
-                     why=' (a wake resumes the last book, page 1, not the screen it slept on)')
+        if licorice.tag == 'v261013':
+            golden_check(shot(n, tmp_path, 'woken'), licorice.golden('licorice-reader.png'), cols=READER_COLS,
+                         why=' (a wake resumes the last book, page 1, not the screen it slept on)')
+        else:   # 26102901 wakes to Home's Recent tab, the book on top (docs/stock-licorice.md)
+            golden_check(shot(n, tmp_path, 'woken'), licorice.golden('licorice-woken.png'),
+                         why=' (a wake shows Recent with the book just read)')

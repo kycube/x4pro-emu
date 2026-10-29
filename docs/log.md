@@ -1515,3 +1515,30 @@ boot. The two tests, three runs alone and two full `make test` runs: **262 passe
 `test_nvsedit::test_redacted_image_boots_to_home` (stock 7.2.4) fail once under load; it passed in both later
 full runs and alone; watch it. Open: the assets / data / fonts sections are read, not built; the >512 KB
 streamed path; the store-seed binding.
+
+## 2026-10-29 — XTOS Licorice 26102901: compatible, no model change; redact learns its new secrets
+
+The owner took the OTA released that day, "26102901". Before it finished, two things that would have broken
+were fixed blind: `stockver.release_tag` read six digits (it would have named the build `v261029`), and
+`xtapp.licorice_device_pubkey` read the scalar at 261013's address without checking it. The key id turned out
+to be `sha256(Q)[:8]`, so the scalar now has to hash to it; on the new image that check fired at once (the
+same key, moved from DROM 0x3c32c674 to 0x3c3a4918), where before it would have wrapped packages for a wrong
+key that fail to install with no reason given. `LICORICE_SCALAR_VA` is now per build.
+
+After the update: a double backup (`flash-2026-10-29-v26102901-{a,b}.bin`, sha256 5ca66d1c…, equal); app0 =
+26102901 boots (otadata seq 5), app1 keeps 261013, pristine 7.6.8 is only in the backups now. The redacted
+dump boots to Home in refresh 1, PSR 3B, no unknown panel commands. Every Licorice test runs on both builds
+(`stockkit.licorice`, goldens `licorice-v26102901-*`). What differed was the firmware: Home's Bookshelf tab is
+now "Recent", "Mini Apps" is "Ink App", the probe's `g` lost the three `ttf_` functions, LEDC is left alone
+until the light is first used, a wake shows Recent instead of resuming the book (not checked on the device),
+and the DEK1 mark moved to RAM 0x3fca26d4. The package format and the unlock are unchanged.
+
+**`redact` was not enough for this dump.** 26102901 keeps the WiFi network in the driver's own NVS keys too
+(`nvs.net80211/sta.ssid`, `sta.pswd`, `sta.apinfo`), a passcode digest (`fw/boot_pin_fw`), a Bluetooth identity
+key (`nimble_bond`) and `fw/wifi_on` = 1. A "redacted" copy still held the password three times, counting an
+erased NVS slot's leftover bytes, and started WiFi at boot: the PHY bring-up and WDEV reads first taken for a
+new radio feature, and the Wi-Fi glyph in the first goldens. `redact` now erases those keys, turns `fw/wifi_on`
+off and blanks every erased slot; a test checks that no credential value the dump held is left anywhere in the
+image. The leaky copies never left `images/`, the scratchpad or pytest's temp folders and were deleted; the
+goldens were regenerated from the clean image. The older dumps were already clean (checked: 0 copies). `list`
+now hides `pswd`, `pin`, `irk` and `apinfo` keys too (it would have printed `boot_pin_fw`).

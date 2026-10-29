@@ -17,8 +17,8 @@ import json
 import re
 
 import parity                                          # tools/ (conftest puts it on sys.path): landscape()
-from stockkit import (DUMP_768, DUMP_LICORICE, HAMBURGER, SKIP_IDLE, booted, boot_to_home,  # noqa: F401
-                      golden_check, settle, state, stock_card, tap, wait_for, x4emu)
+from stockkit import (DUMP_768, HAMBURGER, SKIP_IDLE, booted, boot_to_home,  # noqa: F401
+                      golden_check, licorice, settle, state, stock_card, tap, wait_for, x4emu)
 
 OTG = '/machine/x4pro-usb-otg'
 LICORICE_MENU = (94, 33)                    # the ≡ at the right of the Bookshelf tabs (test_licorice.py)
@@ -70,11 +70,11 @@ def no_tinyusb_failure(name):
     return log
 
 
-def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card):
+def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card, licorice):
     """≡ → USB mode: Licorice restarts into the mode and shows "On" with no error; the core waits for a
     host; the built-in host reads the device descriptor without changing the screen; Exit restarts to
     the Bookshelf with the PHY back on the USB Serial/JTAG."""
-    with booted(request, tmp_path, stock_card, dump=DUMP_LICORICE, icount=SKIP_IDLE) as s:
+    with booted(request, tmp_path, stock_card, dump=licorice.dump, icount=SKIP_IDLE) as s:
         n = s.name
         x4emu(n, 'wait-refresh', '--total', 1, '--timeout', 90)
         settle(n, 2, 60)
@@ -85,7 +85,7 @@ def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card):
         settle(n, 2, 60)
         shot = tmp_path / 'licorice-usb-mode.png'
         x4emu(n, 'screenshot', shot)
-        golden_check(shot, 'licorice-usb-mode.png', why=' (USB mode "On": no "Could not start USB disk mode")')
+        golden_check(shot, licorice.golden('licorice-usb-mode.png'), why=' (USB mode "On": no "Could not start USB disk mode")')
         no_tinyusb_failure(n)
         check_waiting_for_a_host(otg(n))
 
@@ -93,7 +93,7 @@ def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card):
         assert u['host']['descriptor'] == DEVICE_DESCRIPTOR, u['host']
         settle(n, 1, 60)
         x4emu(n, 'screenshot', shot)
-        golden_check(shot, 'licorice-usb-mode.png', why=' (after the built-in host enumerated)')
+        golden_check(shot, licorice.golden('licorice-usb-mode.png'), why=' (after the built-in host enumerated)')
 
         refreshes = state(n)['refresh_count']
         tap(n, *LICORICE_EXIT)
@@ -102,7 +102,7 @@ def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card):
         settle(n, 2, 60)
         home = tmp_path / 'licorice-home.png'
         x4emu(n, 'screenshot', home)
-        golden_check(home, 'licorice-home.png', why=' (Exit restarts to the Bookshelf)')
+        golden_check(home, licorice.golden('licorice-home.png'), why=' (Exit restarts to the Bookshelf)')
         assert otg(n)['dp_pullup'] is False
         no_tinyusb_failure(n)
 

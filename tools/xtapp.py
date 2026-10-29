@@ -10,9 +10,9 @@ Two container generations share the `.xtapp` name and the `XTAP` magic:
 
 * **classic** (stock `xteink_app` 7.2.4-7.6.8): a plain 0x80-byte header + a plain-JSON manifest,
   no signature, no key. This is the default and the sections after this list describe it.
-* **licorice** (XTOS Licorice 261013, the device's current firmware): a mandatory-encrypted,
+* **licorice** (XTOS Licorice 261013 and 26102901, the device's current firmware): a mandatory-encrypted,
   device-key-wrapped package its installer accepts from All Files, and that runs from its Mini Apps
-  page. `--format licorice` builds one; the whole format, with addresses and what is proven, is
+  page ("Ink App" on 26102901). `--format licorice` builds one; the whole format, with addresses and what is proven, is
   **docs/licorice-apps.md**. In short:
 
       0x00  "XTAP", u16 1, u16 0x80, u32 total size, u32 feature mask (0x2 = code encrypted)
@@ -115,17 +115,20 @@ MAX_DIR = 190                        # the `%s/%.190s/app.xtapp` format truncate
 
 # ---- XTOS Licorice (261013) mini-app package (docs/licorice-apps.md; v261013 FUN_ addresses) ----
 # The installer (FUN_42108f68) requires a P256-ECDH-HKDF-SHA256-AESKW wrapped DEK in the manifest.
-# The "device key" is NOT device-unique: it is the firmware scalar d at DROM LICORICE_SCALAR_VA
-# (FUN_421d7118 reads 0x20 bytes, mbedtls big-endian), so any firmware reader can wrap a DEK the
+# The "device key" is NOT device-unique: it is the firmware scalar d in DROM (LICORICE_SCALAR_VA per
+# build; FUN_421d7118 reads 0x20 bytes, mbedtls big-endian), so any firmware reader can wrap a DEK the
 # device will unwrap -- confirmed by a successful install in the emulator (the "DEK1" cache entry at
 # RAM 0x3fc9e0f8 appears and the package reaches the "Installed" toast). Only the device PUBLIC key
 # Q = d*G is needed to wrap; d itself stays on the device, so nothing secret is embedded here --
 # `licorice_device_pubkey()` derives Q from the firmware image at build time.
 LICORICE_ALG = 'P256-ECDH-HKDF-SHA256-AESKW'      # dek_wrap_alg (checked verbatim, FUN_4210a908)
 LICORICE_KEY_ID = '36036010c7bd05af'              # dek_wrap_key_id (checked verbatim)
-LICORICE_SCALAR_VA = 0x3c32c674                   # DROM: the ECDH scalar d (FUN_421d7118)
+# DROM address of the ECDH scalar d, per build (stockver.release_tag). 26102901 keeps the same key
+# (same id) at a new address; licorice_device_pubkey checks the scalar against the id either way.
+LICORICE_SCALAR_VA = {'v261013': 0x3c32c674,      # FUN_421d7118
+                      'v26102901': 0x3c3a4918}
 LICORICE_IMAGE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              'images', 'device', 'stock-app1-v261013.bin')     # gitignored
+                              'images', 'device', 'stock-app0-v26102901.bin')   # gitignored; the device's
 LICORICE_WRAP_SALT = ('xteink.xtapp.wrap.' + LICORICE_KEY_ID).encode()   # HKDF-Extract salt (FUN_4210a908)
 LICORICE_WRAP_INFO = b'xteink.xtapp.appdek.wrap.v2'                      # HKDF-Expand info, then a 0x01 block
 LICORICE_PERMISSIONS = ('sys.battery', 'sys.status', 'net.http', 'net.https', 'storage.app',
@@ -291,12 +294,32 @@ def _esp_segment_read(image, va, length):
 
 def licorice_device_pubkey(image=LICORICE_IMAGE):
     """The device ECDH public key Q = d*G, uncompressed SEC1 (65 bytes). `d` is the firmware scalar
-    at LICORICE_SCALAR_VA, read big-endian (mbedtls convention; confirmed by a successful install).
-    Only Q is needed to wrap a DEK, so no secret key material leaves the firmware image."""
+    at the build's LICORICE_SCALAR_VA, read big-endian (mbedtls convention; confirmed by a successful
+    install). Only Q is needed to wrap a DEK, so no secret key material leaves the firmware image."""
+    import stockver                                                          # noqa: E402
     ec, Encoding, PublicFormat, _, _ = _crypto()
-    d = int.from_bytes(_esp_segment_read(image, LICORICE_SCALAR_VA, 32), 'big') % _P256_N
+    try:
+        with open(image, 'rb') as fh:
+            tag = stockver.release_tag(fh.read(0x10000))
+    except OSError as e:
+        raise XtappError(f'{e}') from None
+    va = LICORICE_SCALAR_VA.get(tag)
+    if va is None:
+        raise XtappError(f'{image}: Licorice build {tag!r} has no known key address (known: '
+                         f'{", ".join(LICORICE_SCALAR_VA)}; docs/licorice-apps.md says how to find one)')
+    d = int.from_bytes(_esp_segment_read(image, va, 32), 'big') % _P256_N
+    if d == 0:
+        raise XtappError(f'{image}: no ECDH scalar at {va:#x}')
     pub = ec.derive_private_key(d, ec.SECP256R1()).public_key()
-    return pub.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    q = pub.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    # The key id the firmware checks verbatim is sha256(Q)[:8]: a scalar that does not hash to it is
+    # not the key (another Licorice build moved or changed it), and a package wrapped for it would
+    # fail to install with no reason given.
+    if hashlib.sha256(q).hexdigest()[:16] != LICORICE_KEY_ID:
+        raise XtappError(f'{image}: the scalar at {va:#x} is not the key {LICORICE_KEY_ID} '
+                         f'(sha256(Q) starts {hashlib.sha256(q).hexdigest()[:16]}): {tag} moved or '
+                         f'changed it (docs/licorice-apps.md)')
+    return q
 
 
 def licorice_kek(shared_x):
@@ -623,7 +646,7 @@ def pack_licorice(app_dir, out=None, image=LICORICE_IMAGE, code=True):
             'app_id': obj['app_id'], 'display_name': obj['display_name'],
             'permissions': list(obj.get('permissions', [])), 'dek': dek.hex(), 'warnings': warnings,
             'note': ('runnable: install it from All Files, then open it from the drawer\'s Mini Apps '
-                     '(docs/licorice-apps.md)') if files else
+                     '("Ink App" on 26102901; docs/licorice-apps.md)') if files else
                     'manifest-only: installs through Licorice, but "Launch failed" when opened'}
 
 

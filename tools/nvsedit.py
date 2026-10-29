@@ -5,7 +5,9 @@
   nvsedit.py IMAGE set-u8 NAMESPACE KEY VALUE    write KEY=VALUE (u8) into the active page, retire the old entry
   nvsedit.py IMAGE set-str NAMESPACE KEY VALUE   the same for a string (header + data entries, both CRCs)
   nvsedit.py IMAGE erase NAMESPACE KEY           mark every copy of KEY erased, on every page (span included)
-  nvsedit.py IMAGE redact                        erase user_config/{sta_ssid,sta_pwd,wifi_creds}, net_en = 0, and
+  nvsedit.py IMAGE redact                        erase every stored credential (user_config/{sta_ssid,sta_pwd,
+                                                 wifi_creds}; on Licorice also the WiFi driver's, the passcode
+                                                 digest, nimble_bond), WiFi off, erased slots blanked, and
                                                  blank a LittleFS radio store (XTOS Licorice, below)
 
 Every writing command edits the image in place unless `-o/--out FILE` is given, and is idempotent.
@@ -44,6 +46,14 @@ XTOS Licorice (stock 261013, 2026-10-13) keeps known WiFi networks and Bluetooth
 dump has a SPIFFS there holding only `/README.md`). `redact` reads the partition table at 0x8000 and
 blanks (0xff) every spiffs/littlefs partition that holds either file; without that, a "redacted"
 Licorice image would still carry the WiFi password.
+
+XTOS Licorice 26102901 (2026-10-29) adds more: the WiFi driver persists the network itself
+(`nvs.net80211/sta.ssid`, `sta.pswd`, `sta.apinfo`), the startup passcode leaves a digest in
+`fw/boot_pin_fw`, Bluetooth keeps its identity key under `nimble_bond`, and `fw/wifi_on` starts WiFi at
+boot. `redact` erases those keys and the whole `nimble_bond` namespace, sets `fw/wifi_on` = 0 where the
+key exists, and blanks the bytes of every entry NVS had already marked erased (older copies of a value
+stay in the page until it is garbage-collected: after the old redact a 26102901 dump still held the
+password three times).
 """
 import argparse, binascii, struct, sys
 
@@ -51,9 +61,12 @@ PAGE = 4096
 STATE_ACTIVE, STATE_FULL, STATE_UNINIT = 0xfffffffe, 0xfffffffc, 0xffffffff
 TYPES = {0x01: 'u8', 0x02: 'u16', 0x04: 'u32', 0x08: 'u64', 0x11: 'i8', 0x12: 'i16', 0x14: 'i32', 0x18: 'i64',
          0x21: 'str', 0x41: 'blob', 0x42: 'blob_data', 0x48: 'blob_idx'}
-HIDE = ('ssid', 'pwd', 'creds', 'psk', 'pass')
+HIDE = ('ssid', 'pwd', 'pswd', 'creds', 'psk', 'pass', 'pin', 'irk', 'apinfo')
 ENTRIES = 126                       # data entries per page (4096 - 64 header/bitmap bytes) / 32
-REDACT = ('sta_ssid', 'sta_pwd', 'wifi_creds')      # user_config keys holding the owner's WiFi credentials
+REDACT = (('user_config', 'sta_ssid'), ('user_config', 'sta_pwd'), ('user_config', 'wifi_creds'),   # 7.x on
+          ('nvs.net80211', 'sta.ssid'), ('nvs.net80211', 'sta.pswd'), ('nvs.net80211', 'sta.apinfo'),
+          ('nvs.net80211', 'sta.sae_h2e_id'), ('fw', 'boot_pin'), ('fw', 'boot_pin_fw'))  # Licorice 26102901
+REDACT_NAMESPACES = ('nimble_bond',)                # every key: Bluetooth identity and bond keys
 RADIO_FILES = (b'wifi_known.bin', b'bt_bonds.bin')  # XTOS Licorice's /radio store (LittleFS, spiffs partition)
 
 def crc32_le(data, init=0xFFFFFFFF):
@@ -190,25 +203,55 @@ class Nvs:
               f'retired {old} old cop{"y" if old == 1 else "ies"}')
 
     def erase(self, nsname, key, quiet=False):
-        """Mark every copy of NS/KEY erased (all pages, span entries included). Returns the count."""
+        """Mark every copy of NS/KEY erased (all pages, span entries included). Returns the count;
+        with `quiet`, a namespace the image does not have is 0 rather than an error."""
+        if quiet and nsname not in self.ns.values():
+            return 0
         old = self.retire(self.ns_index(nsname), key.encode())
         if not quiet:
             print(f'{nsname}/{key}: erased {old} cop{"y" if old == 1 else "ies"}'
                   + ('' if old else ' (key not present)'))
         return old
 
+    def keys(self, nsname):
+        """The distinct keys written under namespace `nsname` (none when it is absent)."""
+        nsi = next((k for k, v in self.ns.items() if v == nsname), None)
+        return sorted({e[8:24].split(b'\0')[0].decode(errors='replace') for pg in self.pages
+                       for _, e in self.entries(pg) if nsi is not None and e[0] == nsi})
+
+    def scrub_erased(self):
+        """Blank (0xff) the 32-byte slot of every entry already marked erased: NVS never reads one
+        again, but the value it held is still in the page. Returns the number of slots blanked."""
+        n = 0
+        for pg in self.pages:
+            if self.state(pg) == STATE_UNINIT:
+                continue
+            for j in range(ENTRIES):
+                slot = pg[64 + 32 * j:64 + 32 * (j + 1)]
+                if entry_state(pg, j) == 0 and slot != b'\xff' * 32:
+                    pg[64 + 32 * j:64 + 32 * (j + 1)] = b'\xff' * 32
+                    n += 1
+        return n
+
     def redact(self):
-        """Make the image shareable: drop the WiFi credentials of user_config, turn WiFi off, and blank
-        a LittleFS radio store."""
+        """Make the image shareable: drop every stored credential (WiFi, passcode, Bluetooth keys), turn
+        WiFi off, blank what erased entries still hold, and blank a LittleFS radio store."""
         total = 0
-        for key in REDACT:
-            total += self.erase('user_config', key)
+        for nsname, key in REDACT:
+            total += self.erase(nsname, key, quiet=nsname != 'user_config')
+        for nsname in REDACT_NAMESPACES:
+            for key in self.keys(nsname):
+                total += self.erase(nsname, key, quiet=True)
         self.set_u8('user_config', 'net_en', 0)
+        if 'wifi_on' in self.keys('fw'):
+            self.set_u8('fw', 'wifi_on', 0)
+        scrubbed = self.scrub_erased()
         self.img = bytearray(self.img)
         blanked = blank_radio_store(self.img)
         for label in blanked:
             print(f'{label}: blanked (it held the /radio store: known WiFi networks, Bluetooth bonds)')
-        print(f'redacted: {total} credential entr{"y" if total == 1 else "ies"} erased, user_config/net_en = 0'
+        print(f'redacted: {total} credential entr{"y" if total == 1 else "ies"} erased, user_config/net_en = 0, '
+              f'{scrubbed} erased slot{"" if scrubbed == 1 else "s"} blanked'
               + (f', {len(blanked)} radio store{"" if len(blanked) == 1 else "s"} blanked' if blanked else ''))
 
     def save(self, path):

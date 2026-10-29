@@ -22,7 +22,7 @@ access at any offset included), hmac_code over the ciphertext, the section table
 hmac_code fields. They need the `cryptography` package and skip without it; the live install and
 launch are tests/test_licorice_apps.py (emulator) and the format is docs/licorice-apps.md.
 """
-import collections, json, os, shutil, struct, subprocess, sys
+import collections, hashlib, json, os, shutil, struct, subprocess, sys
 import pytest
 from conftest import ROOT, PY
 
@@ -320,6 +320,34 @@ def test_licorice_device_pubkey_is_on_curve():
     pub = xtapp.licorice_device_pubkey()
     assert len(pub) == 65 and pub[0] == 0x04
     ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)   # raises if off-curve
+    assert hashlib.sha256(pub).hexdigest()[:16] == xtapp.LICORICE_KEY_ID   # the id is sha256(Q)[:8]
+
+
+def test_licorice_device_pubkey_refuses_a_scalar_that_is_not_the_key(tmp_path):
+    """A build keeps something else at its table address (26102901 moved the scalar): a valid-looking
+    scalar whose Q does not hash to the key id is refused, not used to wrap a package the device
+    cannot open; a build the table does not know is refused by name."""
+    pytest.importorskip('cryptography')
+    def image(tag):
+        seg = bytes(range(1, 33))
+        return (bytes([0xE9, 1]) + bytes(22) + struct.pack('<II', xtapp.LICORICE_SCALAR_VA['v261013'], 32)
+                + seg + b'\0XTOS Licorice ' + tag + b'\0')
+    (tmp_path / 'moved.bin').write_bytes(image(b'261013'))
+    with pytest.raises(xtapp.XtappError, match='is not the key 36036010c7bd05af'):
+        xtapp.licorice_device_pubkey(str(tmp_path / 'moved.bin'))
+    (tmp_path / 'new.bin').write_bytes(image(b'26123101'))
+    with pytest.raises(xtapp.XtappError, match="'v26123101' has no known key address"):
+        xtapp.licorice_device_pubkey(str(tmp_path / 'new.bin'))
+
+
+@pytest.mark.parametrize('app', ['stock-app1-v261013.bin', 'stock-app0-v26102901.bin'])
+def test_licorice_builds_share_one_device_key(app):
+    """Every known build's table address holds the same key: the one the id names."""
+    path = os.path.join(ROOT, 'images', 'device', app)
+    if not os.path.exists(path):
+        pytest.skip(f'{path} not available')
+    pytest.importorskip('cryptography')
+    assert hashlib.sha256(xtapp.licorice_device_pubkey(path)).hexdigest()[:16] == xtapp.LICORICE_KEY_ID
 
 
 # ---------------------------------------------------------------- Licorice code section (launch)

@@ -16,9 +16,9 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
 
 - **Run the real firmware.** The stock app boots to Home, opens and pages books, runs its menu,
   light panel and settings, fades its front light, and its WiFi start comes up and stops itself
-  cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. The stock's rewrite, XTOS Licorice 261013,
-  reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes, and enters its USB
-  disk mode; installing apps on it is not mapped yet ([docs/stock-licorice.md](docs/stock-licorice.md)).
+  cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. The stock's rewrite, XTOS Licorice (builds
+  261013 and 26102901), reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes,
+  enters its USB disk mode, and installs and runs mini apps ([docs/stock-licorice.md](docs/stock-licorice.md)).
   A raw 16 MB flash dump runs as it comes off the device; so does a fresh build.
 - **Drive it like a device.** `x4emu tap`, `swipe`, `press`, `hold`, `chord`, `home`, `battery`,
   `light`, `screenshot --diff`, `wait-text`, `wait-refresh`, `state` — every command can print JSON.
@@ -103,7 +103,8 @@ from the device's own dump: the Bookshelf, the side drawer, the Desktop, All fil
 side buttons, the front light, Dark mode, Wi-Fi and Bluetooth toggles, sleep and wake, auto power-off
 and USB mode (`tests/test_licorice.py`, `tests/test_usb_otg.py`). One panel-model fix was needed:
 Licorice scans the panel the other way up from every earlier firmware. Its signed mini-app packages
-install and run too (below). What changed, what runs and
+install and run too (below). The build of 2026-10-29, **26102901** (a Recent tab on Home, "Ink App" for
+mini apps), ran with no model change; every Licorice test runs on both builds. What changed, what runs and
 what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook
@@ -117,9 +118,9 @@ XTOS Licorice installs apps from a signed `.xtapp` package instead. Its format i
 [docs/licorice-apps.md](docs/licorice-apps.md): `tools/xtapp.py pack --format licorice` builds a package
 its installer accepts, and the emulator takes it from All Files to the **"Installed"** confirmation
 and on to running it: Mini Apps lists it, a tap launches it, it takes taps and leaves cleanly
-(`tests/test_licorice_apps.py`). Licorice's Lua host exposes more than 7.x's (a `ctx.data` file API,
-TrueType text; not exercised yet), and its Mini Apps entry stays hidden until ten taps on Settings →
-About → "Model".
+(`tests/test_licorice_apps.py`, on 261013 and 26102901). Licorice's Lua host exposes more than 7.x's (a
+`ctx.data` file API; TrueType text on 261013 only; not exercised yet), and its Mini Apps entry ("Ink App"
+on 26102901) stays hidden until ten taps on Settings → About → "Model".
 
 **The Keeper of Gull Rock** is a choose-your-own-adventure written and drawn for this project: 13
 passages, five endings, and eight 1-bit pixel-art plates drawn in code. `tools/gamebook.py` builds it

@@ -1,6 +1,6 @@
 # Mini apps on XTOS Licorice: the package format, the launch, the Mini Apps entry
 
-XTOS Licorice 261013 (the device's current stock firmware, `docs/stock-licorice.md`) replaced the
+XTOS Licorice (261013, and 26102901, the device's since 2026-10-29; `docs/stock-licorice.md`) replaced the
 7.x "put a folder in `/sdcard/XTApps`" scheme with an **installer**: you drop a `.xtapp` package in
 All Files, tap it, and confirm *Install this package?*. The old folder form is ignored, and `tools/xtapp.py
 install` (the classic form) produces *Install failed*. This page is the reverse-engineering of the
@@ -9,6 +9,13 @@ Mini Apps page, how it is built, and what is proven versus inferred.
 
 All addresses are the v261013 image (`images/device/stock-app1-v261013.bin`), read with
 `tools/ghidra_stock.py --version v261013`. The strings table is `images/ghidra/stock-v261013/`.
+
+**26102901 takes the same packages.** Its key is the same (id `36036010c7bd05af`) at a new address, DROM
+`0x3c3a4918`; `tools/xtapp.py` keeps one address per build (`LICORICE_SCALAR_VA`, chosen by
+`stockver.release_tag`) and refuses a build it does not know. The DEK1 mark sits at RAM `0x3fca26d4`. The
+UI calls the page **"Ink App"** ("Install Ink App", "Leave this Ink App?"); the About → "Model" unlock is
+unchanged; `g` lost its three `ttf_` functions. `tests/test_licorice_apps.py` runs on both builds. The
+function addresses on this page are 261013's and have not been re-located.
 Several functions on the launch path were never made functions by Ghidra's analysis (the open at
 0x4210944c, the Lua searcher at 0x420c7eb8, the drawer dispatch at 0x420e78e4); they were read as
 raw disassembly (`tools/appdis.py`), where the shipped Xtensa SLEIGH also stops at the ESP32-S3's
@@ -110,8 +117,10 @@ decoder: exactly 2n hex digits then the NUL):
 
 The scheme (fully reversed from `FUN_4210a908`):
 
-1. **ECDH.** The device scalar `d` is a **fixed 32-byte constant at DROM `0x3c32c674`** (loaded by
-   `FUN_421d7118`, read big-endian — mbedtls convention, confirmed by a live install). It computes
+1. **ECDH.** The device scalar `d` is a **fixed 32-byte constant at DROM `0x3c32c674`** (26102901:
+   `0x3c3a4918`; loaded by `FUN_421d7118`, read big-endian — mbedtls convention, confirmed by a live
+   install). The key id is the first 8 bytes of `sha256(Q)`, `Q` uncompressed, which lets
+   `licorice_device_pubkey` check that the scalar it read is the key. It computes
    `shared = (d · E).x`, `E` the ephemeral public key from the manifest. To *build* a package you need
    only `Q = d · G` (the device public key); `tools/xtapp.py` derives `Q` from the firmware image and
    wraps with `shared = (e · Q).x`, `e` a fresh ephemeral — the device recovers the same `shared`.
@@ -123,7 +132,7 @@ The scheme (fully reversed from `FUN_4210a908`):
    `FUN_4210ae98`), with the standard default IV `a6a6a6a6a6a6a6a6` at DROM `0x3c32c66c`. 24 bytes in,
    16-byte DEK out.
 
-A successful unwrap is cached in RAM at `0x3fc9e0f8` (and RTC-fast `0x5000005c`) tagged `"DEK1"` +
+A successful unwrap is cached in RAM at `0x3fc9e0f8` (26102901: `0x3fca26d4`; and RTC-fast `0x5000005c`) tagged `"DEK1"` +
 the app_id — the oracle `tests/test_licorice_apps.py` reads to prove the wrap verified.
 
 ## The code section and the launch
@@ -200,7 +209,8 @@ files) and fonts — read from the disassembly, not exercised (`tools/xtapp.py` 
 What the probe shows of Licorice's Lua API (page 1 and 2, `tests/golden/licorice-app-running.png`,
 `-page2.png`): `g` has `arc circle clear fill_pattern image layer line measure measure_text
 pattern_rect polygon polyline rect round_rect size text text_box ttf_measure ttf_text ttf_text_box`
-(the luaL_Reg at DROM 0x3c320d38), `g:size()` → 480, 800; `ctx` has `api assets capabilities data
+(the luaL_Reg at DROM 0x3c320d38; 26102901 drops the three `ttf_` functions, the rest of page 1 is the
+same, `tests/golden/licorice-v26102901-app-running.png`), `g:size()` → 480, 800; `ctx` has `api assets capabilities data
 display fonts gc i18n input layers lock longtask perf screen state system ui watchdog` and the
 functions `invalidate quit request_refresh save set_tick_rate` (0x3c320d08). The 7.x names exist
 under the same spelling (`g:clear` and `g:text` drew the probe's pages; the others' arguments were

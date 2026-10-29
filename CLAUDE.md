@@ -4,9 +4,9 @@ Linux/macOS-hosted emulator for unmodified Xteink X4 Pro firmware images, driven
 buttons, touch, console, panel screenshots, JSON state. CrossPoint 1.6.0 boots to its home screen,
 opens books, pages, sleeps and wakes in it; the stock `xteink_app` (7.2.4, 7.5.4, 7.6.8) boots to its home
 screen, paints, lights the frontlight, takes touch, runs its Lua apps, and its WiFi start comes up and
-stops itself (no radio). The stock's new generation, **XTOS Licorice 261013** (the device's since
-2026-10-13), reads, lights, sleeps, wakes, enters USB mode, and installs and runs a mini app `tools/xtapp.py`
-builds (`docs/stock-licorice.md`, `docs/licorice-apps.md`). `README.md` is the public overview, `docs/README.md` the index of every document.
+stops itself (no radio). The stock's new generation, **XTOS Licorice** (261013 from 2026-10-13; **26102901**,
+the device's since 2026-10-29), reads, lights, sleeps, wakes, enters USB mode, and installs and runs a mini app
+`tools/xtapp.py` builds (`docs/stock-licorice.md`, `docs/licorice-apps.md`). `README.md` is the public overview, `docs/README.md` the index of every document.
 Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`**, §0 (resume) and §10 (the
 work runs as squads: the coordinator forms agents per milestone, and since 2026-10-12 **Opus 5.5 does all of
 it** — coordination, well-specified tasks, symbol-less firmware reading and new models alike; Fable 5.1 only
@@ -60,8 +60,9 @@ The efuse file is generated from `docs/device/efuse-dump.txt` (real MAC, rev v0.
 `--fast-epd` for real refresh timing. A raw 16 MB device dump runs as-is.
 
 The stock firmware, from a scratch copy of a dump (`flash-2026-09-06-a.bin` = 7.2.4, what `tests/test_stock.py`
-uses; `flash-2026-10-12-a.bin` = 7.6.8; `flash-2026-10-13-v261013-a.bin` = Licorice, the device's, which logs
-nothing on the console and paints Home in refresh 1):
+uses; `flash-2026-10-12-a.bin` = 7.6.8; `flash-2026-10-13-v261013-a.bin` = Licorice 261013;
+`flash-2026-10-29-v26102901-a.bin` = Licorice 26102901, the device's; Licorice logs nothing on the console and
+paints Home in refresh 1):
 
 ```
 .venv/bin/python tools/mkflash.py images/stock.bin --raw images/device/flash-2026-09-06-a.bin
@@ -118,8 +119,8 @@ two cores keep TSO on any host (`docs/smp.md`).
   (Screen Capture) is compiled out of every version; `tools/stockdev.py` / `tools/stockpatch.py` patch a copy.
 - **Lua apps** need no firmware change on 7.5.4 and 7.6.8: the Mini Apps row appears once `/XTApps` on the card
   holds an app (7.2.4 needs the `lua-apps-row` patch). On the device an app is a card copy (`docs/lua-apps.md`).
-  Licorice ignores the folder and installs a signed `.xtapp` from All Files instead; its Mini Apps entry stays
-  hidden until NVS `fw/lua_nav` = 1 (ten taps on About → "Model", or `nvsedit set-u8 fw lua_nav 1` on a
+  Licorice ignores the folder and installs a signed `.xtapp` from All Files instead; its Mini Apps entry ("Ink
+  App" on 26102901) stays hidden until NVS `fw/lua_nav` = 1 (ten taps on About → "Model", or `nvsedit set-u8 fw lua_nav 1` on a
   scratch copy) (`docs/licorice-apps.md`).
 - **Oracles.** The stock's screen goldens (`tests/golden/stock-*.png`) are emulator-made; the owner judged Home,
   menu, light panel, Settings, All Files and reader 1:1 with the device by eye (session 5), and 7.6.8 passed a
@@ -136,20 +137,22 @@ a mass-storage personality ("XTEink X4 Pro", 0x303A:0x4002) in USB mode.
 
 1. Nothing is written to the device without a verified double backup on disk
    (`tools/device.py backup`: two 16 MB reads, SHA-256 equal). Current backups:
-   `images/device/flash-2026-10-13-v261013-{a,b}.bin` (the newest: XTOS Licorice in app1, booting; pristine
+   `images/device/flash-2026-10-29-v26102901-{a,b}.bin` (the newest: Licorice 26102901 in app0, booting;
+   261013 in app1), `flash-2026-10-13-v261013-{a,b}.bin` (Licorice 261013 in app1, booting; pristine
    7.6.8 in app0), `flash-2026-10-13-pre-parity-{a,b}.bin` (7.6.8 in app0 booting, 7.5.4 in app1; taken
    before the parity session), `flash-2026-10-12-{a,b}.bin` (the same slots),
    `flash-2026-09-07-{a,b}.bin` (stock 7.5.4 in app1, booting) and `flash-2026-09-06-{a,b}.bin`
    (7.2.4 era), `docs/device/flash-backup-sha256.txt`.
 2. Never `erase-flash`, never `espefuse burn-*`, never write 0x0..0x10000 (bootloader, partition
    table, otadata) except to restore the verified backup byte for byte. Writing an OTA app slot
-   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-10-13, after the
-   owner's OTA to Licorice): app0 = pristine stock 7.6.8 (sha256 f68533a8…), **app1 = XTOS Licorice 261013**,
-   otadata entry 1 seq 4 → **app1 boots** (`tools/device.py slots`); the efuses read as in
-   `docs/device/efuse-dump.txt` after the update too (no flash encryption, secure boot or anti-rollback). `flash-crosspoint` / `restore-stock` read otadata and refuse to write a slot the bootloader
+   (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-10-29, after the
+   owner's OTA to 26102901): **app0 = XTOS Licorice 26102901**, app1 = Licorice 261013, otadata entry 0 seq 5 →
+   **app0 boots** (`tools/device.py slots`); pristine 7.6.8 is only in the backups now. The efuses read as in
+   `docs/device/efuse-dump.txt` after the 261013 update (no flash encryption, secure boot or anti-rollback);
+   not re-read after 26102901. `flash-crosspoint` / `restore-stock` read otadata and refuse to write a slot the bootloader
    does not start (a patched stock app goes to the booting slot with `flash-crosspoint --firmware APP.bin --slot
-   app0`, `docs/parity.md`). Their default slot, app0, is **not** the booting one now, so they refuse it;
-   `--slot app1` would overwrite Licorice. No tool here writes otadata.
+   app0`, `docs/parity.md`). Their default slot, app0, **is** the booting one now: writing it would overwrite
+   Licorice 26102901 (its copy: the 2026-10-29 backup). No tool here writes otadata.
 3. Do not touch the device during a transfer; the magnetic pogo adapter detaches easily. If a
    transfer breaks, check the device state before retrying. After any esptool command (every
    `tools/device.py` read or write resets the chip) the reader keeps its last picture and ignores input
@@ -158,9 +161,10 @@ a mass-storage personality ("XTEink X4 Pro", 0x303A:0x4002) in USB mode.
 5. If the device stops responding, stop, write down what was done, and follow
    `firmware/docs/fix-bricked-xteink.md` and the CrossPoint web tools.
 6. The flash dump contains the owner's WiFi credentials (NVS). It never leaves `images/`
-   (`tools/nvsedit.py IMAGE redact` makes a copy without them for scratch use: the NVS keys and, on
-   Licorice, the LittleFS `/radio` store in the spiffs partition; the app in it is still Xteink's and is
-   never committed).
+   (`tools/nvsedit.py IMAGE redact` makes a copy without them for scratch use: the NVS keys, on 26102901 also
+   the WiFi driver's own copy, the passcode digest and the Bluetooth keys, every erased NVS slot, and on
+   Licorice the LittleFS `/radio` store in the spiffs partition; the app in it is still Xteink's and is never
+   committed). A new firmware can store secrets in new keys: check a new dump's NVS before trusting redact.
 
 `tools/device.py` (subcommands in its docstring) parses the partition table and otadata, never assumes them;
 every write-capable command prints its plan and re-reads the device before writing, and

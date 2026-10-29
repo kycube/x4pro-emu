@@ -358,5 +358,7 @@ def test_release_tag_names_7x_by_version_and_licorice_by_its_identity_string():
     assert stockver.release_tag(image('xteink_app', '7.6.8')) == '7.6.8'
     lic = image('dragon_example', 'e77bdf08-dirty', b'\0XT Licorice 261013\0XTOS Licorice 261013\0')
     assert stockver.release_tag(lic) == 'v261013'
+    lic2 = image('dragon_example', 'x', b'\0XTOS Licorice 26102901\0')     # date + build number, all of it
+    assert stockver.release_tag(lic2) == 'v26102901'
     assert stockver.release_tag(image('other', '1.0')) == '1.0'
     assert stockver.release_tag(b'\0' * 0x200) is None

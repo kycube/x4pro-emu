@@ -575,13 +575,13 @@ def app_desc(data, base=0):
             'elf_sha256': bytes(data[off + DESC_ELF:off + DESC_ELF + 32]).hex()}
 
 
-LICORICE_ID = re.compile(rb'XTOS Licorice (\d{6})')   # the identity string of the stock's rewrite
+LICORICE_ID = re.compile(rb'XTOS Licorice (\d{6,8})')   # the stock's rewrite: a date, or date + build (26102901)
 
 
 def release_tag(data, desc=None):
     """The name a stock image goes by in file names and Ghidra projects: an `xteink_app` image's
     version ("7.6.8"); an XTOS Licorice image's "v" + the build date in its identity string
-    ("v261013": its esp_app_desc says only `dragon_example` `e77bdf08-dirty`); otherwise the
+    ("v261013", "v26102901": its esp_app_desc says only `dragon_example` `e77bdf08-dirty`); otherwise the
     descriptor's version, or None without one. `data` is the image (its first ~0x5000 bytes hold
     Licorice's identity string)."""
     desc = desc or app_desc(data)

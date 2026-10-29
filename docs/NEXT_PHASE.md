@@ -8,8 +8,10 @@ Read `CLAUDE.md` first (build, device rules, where things are), then this file, 
 
 ## 0. Resume here (2026-10-13, after the world-class pass)
 
-**First: the device now runs XTOS Licorice 261013** (the owner's OTA of 2026-10-13; app1 boots, 7.6.8 stays
-in app0). Licorice is the stock's rewrite, not a 7.x (`docs/stock-licorice.md`). **The owner's direction, the
+**First: the device now runs XTOS Licorice 26102901** (the owner's OTA of 2026-10-29; app0 boots, 261013 stays
+in app1; the first Licorice, 261013, came with the OTA of 2026-10-13, and 7.6.8 is now only in the backups).
+26102901 ran with no model change and every Licorice test runs on both builds; `nvsedit redact` had to learn its
+new secrets (`docs/stock-licorice.md`, "26102901"). Licorice is the stock's rewrite, not a 7.x (`docs/stock-licorice.md`). **The owner's direction, the
 same day: make this a fully functional emulator; the old plan (items b–d below: the keyboard, native patches,
 the lock screen, all against 7.6.8) matters less now — do not start them unless the owner brings them back.**
 Licorice in the emulator: reader, files, light panel and frontlight, Dark mode, Wi-Fi and Bluetooth toggles,
@@ -21,7 +23,7 @@ the Licorice app sections beyond code (assets / data / fonts). WiFi and BLE traf
 and a project of its own: take it on deliberately.
 
 **Where things stand.** Every firmware runs unpatched: CrossPoint 1.6.0, the stock `xteink_app` 7.2.4, 7.5.4
-and 7.6.8, and Licorice 261013; the device runs **Licorice in app1** (7.6.8 in app0). `make test` is 252 tests in
+and 7.6.8, and Licorice 261013 and 26102901; the device runs **Licorice 26102901 in app0** (261013 in app1). `make test` is 272 tests in
 about two minutes on eight workers, with no input retries anywhere. On 7.5.4–7.6.8 Lua apps reach the device as a
 card copy and keep `ctx.state` in the emulator as on the reader; the gamebook was played on the device under 7.6.8.
 The owner's items:

@@ -21,7 +21,10 @@ from conftest import (x4emu, ROOT, PY, TOOLS, count_pixels, copy_image, emu_stat
 
 DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')        # stock 7.2.4
 DUMP_768 = os.path.join(ROOT, 'images', 'device', 'flash-2026-10-12-a.bin')    # stock 7.6.8
-DUMP_LICORICE = os.path.join(ROOT, 'images', 'device', 'flash-2026-10-13-v261013-a.bin')   # XTOS Licorice 261013
+LICORICE_DUMPS = {                                                              # XTOS Licorice, by build
+    'v261013': os.path.join(ROOT, 'images', 'device', 'flash-2026-10-13-v261013-a.bin'),
+    'v26102901': os.path.join(ROOT, 'images', 'device', 'flash-2026-10-29-v26102901-a.bin'),   # the device's
+}
 SD_FILES = os.path.join(ROOT, 'images', 'device', 'sd-files')
 GOLDEN_DIR = os.path.join(ROOT, 'tests', 'golden')
 GOLDEN = os.path.join(GOLDEN_DIR, 'stock-home.png')     # 7.2.4's Home, the empty bookshelf
@@ -67,6 +70,19 @@ state = emu_state          # the name test_stock.py's importers use
 
 # --- images ---------------------------------------------------------------------------------------
 _card = {}
+
+
+@pytest.fixture(params=list(LICORICE_DUMPS))
+def licorice(request):
+    """One Licorice build per test run: its dump and its goldens. 261013's keep their names
+    (tests/golden/licorice-*.png, the ones the owner judged); a later build's carry its tag
+    (licorice-v26102901-*.png), since each redesign moves pixels. Skips a build without its dump."""
+    tag = request.param
+    if not os.path.exists(LICORICE_DUMPS[tag]):
+        pytest.skip(f'{LICORICE_DUMPS[tag]} not available')
+    prefix = 'licorice-' if tag == 'v261013' else f'licorice-{tag}-'
+    return SimpleNamespace(tag=tag, dump=LICORICE_DUMPS[tag],
+                           golden=lambda name: prefix + name.removeprefix('licorice-'))
 
 
 @pytest.fixture(scope='session')

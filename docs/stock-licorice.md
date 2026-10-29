@@ -1,4 +1,4 @@
-# XTOS Licorice (stock 261013): the stock firmware's new generation
+# XTOS Licorice (stock 261013, 26102901): the stock firmware's new generation
 
 On 2026-10-13 the owner took the OTA update offered as "v261013" (released the evening before). It is not
 a 7.x point release: the image calls itself **XTOS Licorice 261013** and was built from a different
@@ -84,6 +84,58 @@ USB mode, the sleep screen, an app install) and judged all of them right.
 Licorice prints nothing through ESP-IDF's log on the console, but plain `printf` does reach it (the
 TinyUSB asserts above), so the console is wired; the firmware's log level is simply off.
 
+## 26102901 (2026-10-29): the second build
+
+The owner took the OTA of 2026-10-29 ("26102901", released that day). It is a Licorice build, not a new
+generation: same project and IDF, a new commit, the identity string now carrying a build number.
+
+| | 261013 (app1, kept) | **26102901** (app0, booting) |
+|---|---|---|
+| `esp_app_desc` | `dragon_example` / `e77bdf08-dirty` | `dragon_example` / `87a73a0e-dirty` |
+| built, IDF | Oct 13 2026 11:18:34, v6.1-dirty | Oct 29 2026 12:53:50, v6.1-dirty |
+| size | 5,821,312 bytes | 6,446,912 bytes, 8 segments (DROM now from 0x3c2d0020) |
+| identity strings | `XTOS Licorice 261013` | `XTOS Licorice 26102901` (eight digits: `stockver.release_tag` → `v26102901`) |
+
+`images/device/stock-app0-v26102901.bin` (sha256 ea26cc60…, ELF sha256 df08a73f…). Backup
+`images/device/flash-2026-10-29-v26102901-{a,b}.bin` (sha256 5ca66d1c…, both reads equal).
+
+**On the device.** The OTA wrote the other slot as always: **app0 = 26102901**, otadata entry 0 seq 5 →
+app0 boots; app1 still holds 261013 byte for byte; the pristine 7.6.8 that was in app0 is gone from the
+device (it stays in the 2026-10-12/13 backups). Bootloader, partition table and coredump are unchanged.
+NVS was rewritten throughout (all five sectors), and the `/radio` store gains `wifi_last.bin` and
+`excerpt_digest.bin`.
+
+**New secrets in NVS, now redacted.** 26102901 stores the WiFi network in the WiFi driver's own keys too
+(`nvs.net80211/sta.ssid`, `sta.pswd`, `sta.apinfo`), a 16-hex-digit digest beside the new **startup
+passcode** (`fw/boot_pin_fw`), a Bluetooth identity key (`nimble_bond/local_irk_1`), and `fw/wifi_on`.
+The `redact` of 2026-10-13 knew none of them: a "redacted" copy of the new dump still held the password
+three times (two live keys plus an erased NVS copy) and started WiFi at boot. `tools/nvsedit.py redact`
+now erases them, sets `fw/wifi_on` = 0, and blanks every erased NVS slot; `tests/test_nvsedit.py` checks
+on both Licorice dumps that no credential value the dump held is left anywhere in the image. No copy left
+`images/`, the session scratchpad or pytest's temporary folders, and the leaky ones were deleted.
+
+**In the emulator: it runs as 261013 does.** No model change. Home in refresh 1, PSR `3B 48`,
+`epd_unknown_cmds` 0, and the same peripheral footprint (only the IO_MUX lines in `iolog_hot`; with WiFi
+left on, the boot starts the PHY, which the radio stubs answer). Every Licorice test runs on both builds
+(`stockkit.licorice`; 26102901's goldens are `tests/golden/licorice-v26102901-*.png`): Home and the
+drawer, All files, the reader paging with the side buttons, the light panel driving both LEDC channels,
+Settings, deep sleep and wake, USB mode, and a mini app installed, unlocked, launched, paged and left.
+
+What the build changed, as the emulator shows it:
+
+| | 261013 | 26102901 |
+|---|---|---|
+| Home | the **Bookshelf** tab | a **Recent ⌄** tab (a sort menu), "NEW" on an unread cover |
+| Frontlight at boot | LEDC set up, duty 0 | LEDC untouched until the light is first used |
+| Wake from deep sleep | resumes the last book | **Recent**, the book on top (not yet seen on the device) |
+| Mini apps | "Mini Apps" | **"Ink App"** ("Install Ink App", "Leave this Ink App?"); the same package and unlock |
+| App API | `g.ttf_measure`, `ttf_text`, `ttf_text_box` | gone (`docs/licorice-apps.md`) |
+| App key | DROM 0x3c32c674 | the same key at DROM 0x3c3a4918 |
+
+New strings point at what else arrived: a startup passcode, collections, dictionaries, phone pairing, an
+Ink App lock, "Back to previous spot", and translations (about 16,000 new strings, a CA bundle among them).
+None of that is walked yet. The owner has not compared 26102901's emulator screens with the reader.
+
 ## What the stock tools make of it
 
 `tools/stockver.py identify` refuses it (no `stockver.d` file; project `dragon_example` is none of
@@ -111,6 +163,9 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
+- 26102901 on the device: whether a wake really shows Recent rather than the book, and the owner's look at its
+  screens beside the reader; its new features (passcode, collections, dictionaries, phone pairing) are
+  not walked.
 - Mini apps beyond the code section: the assets / data / fonts sections are read but not yet built, and
   the >512 KB streamed code path is untested (`docs/licorice-apps.md` "Open").
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no
