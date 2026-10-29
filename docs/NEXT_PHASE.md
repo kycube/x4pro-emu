@@ -520,8 +520,9 @@ re-rendering as you change things.
 3. **Two Lua capability probes** (`apps/probe/` is the vehicle): can Lua read a *binary* file
    (`ctx.data.open_text` / `read_text` across NUL bytes), and what does `g:image` actually take?
    Together they decide whether 11.4 is possible at all. Cheap: one app, one boot.
-4. **7.6.8**: the device runs 7.6.8, whose label pack has new font-picker groups (§0.e); the reading path
-   was booted on neither 7.5.4 nor 7.6.8, so nothing ships until this is re-verified there.
+4. **7.6.8**: the device ran 7.6.8 when this was written (it runs XTOS Licorice now, where none of §11 has
+   been looked at); 7.6.8's label pack has new font-picker groups (§0.e); the reading path was booted on
+   neither 7.5.4 nor 7.6.8, so nothing ships until this is re-verified there.
 
 ### 11.3 Stage 1 — the set (no code, no risk, most of the value)
 

@@ -7,7 +7,7 @@ known so far; everything is from the device backup and the emulator, on 2026-10-
 
 ## The image
 
-| | 7.6.8 (app0, still on the device) | Licorice (app1, booting) |
+| | 7.6.8 (app0 until 2026-10-29) | Licorice 261013 (app1, booting until 2026-10-29) |
 |---|---|---|
 | `esp_app_desc` project / version | `xteink_app` / `7.6.8` | **`dragon_example` / `e77bdf08-dirty`** |
 | built, IDF | Sep 22 2026, v6.0.1 | Oct 13 2026 11:18:34, **v6.1-dirty** |

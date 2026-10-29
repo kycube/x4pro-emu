@@ -12,7 +12,8 @@ file offset = VA − segment load address + segment file offset (table below).
 Scratch material (disassembly windows, string lists, vtable dumps) is in the session's scratchpad
 under `survey/` and is not needed to use this document.
 
-> **Status (2026-10-13).** Every address below is **7.2.4**'s; the device runs 7.6.8. What moved, and the
+> **Status (2026-10-29).** Every address below is **7.2.4**'s; the device ran 7.6.8 until 2026-10-13 and runs
+> XTOS Licorice now, a rewrite this map does not cover (`docs/stock-licorice.md`). What moved, and the
 > re-located sites the tools use, are in `docs/stock-7.5.4.md` and `docs/stock-7.6.8.md` (the constants in
 > `tools/stockver.d/`). This survey was written before most of its questions were answered; the answers,
 > where they landed: unwrapped Lua apps load once an `app.xtapp` container sits beside them, unsigned

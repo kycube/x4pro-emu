@@ -27,13 +27,15 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
 - **Let an agent drive it.** `.mcp.json` registers an MCP server with the same tools (boot, tap,
   screenshot inline, state, console, build and flash helpers), so Claude Code can iterate on firmware
   against the emulator by itself.
-- **Change the stock firmware without its source.** Version-aware tools for the stock app:
+- **Change the stock firmware without its source.** Version-aware tools for the stock 7.x app:
   named byte patches (the developer menu with Screen Capture, hidden menu rows, the Mini Apps row),
   UI string editing in all of its languages, system fonts built from any TrueType file, the `.xic`
-  screen-capture format, and a one-minute Ghidra analysis of each version.
-- **Write apps for the stock firmware.** The stock app hosts **Lua apps** from the SD card — on 7.5.4
-  and later with no firmware change at all. The repo maps that API, measures its limits, and ships
-  status screens and a gamebook toolkit (below).
+  screen-capture format, and a one-minute Ghidra analysis of each version (Licorice included; the
+  patch and string tools refuse Licorice, a rewrite without those sites).
+- **Write apps for the stock firmware.** The stock app hosts **Lua apps** — on 7.5.4–7.6.8 straight
+  from the SD card with no firmware change, on XTOS Licorice as signed packages `tools/xtapp.py`
+  builds. The repo maps that API, measures its limits, and ships status screens and a gamebook toolkit
+  (below).
 - **Work with the real device safely.** `tools/device.py` backs up, inspects and restores the reader
   over USB, refuses to write anything below the app slots, and checks which slot the bootloader
   really starts before it writes one.
@@ -45,7 +47,7 @@ macOS or Linux; paths must not contain spaces.
 ```bash
 make setup      # Python venv, Espressif QEMU at a pinned commit + qemu-patches/, CrossPoint submodule
 make build      # qemu-system-xtensa, the panel models, CrossPoint's x4pro image
-make test       # model unit tests, fixture replays, ~220 pytest cases on parallel workers (~2 min)
+make test       # model unit tests, fixture replays, ~270 pytest cases on parallel workers (~2 min)
 ```
 
 Packages: git, ninja, meson, pkg-config, glib, pixman, libgcrypt, libslirp, libpng, mtools,
@@ -96,7 +98,10 @@ The models are checked against the desk unit, not just against datasheets:
 
 ## XTOS Licorice, the stock's new generation
 
-![XTOS Licorice in the emulator: its Bookshelf, the side drawer, a book page and the light panel](docs/images/licorice.png)
+![XTOS Licorice 261013 in the emulator: its Bookshelf, the side drawer, a book page and the light panel](docs/images/licorice.png)
+
+<sub>Licorice 261013, the screens the owner compared with the reader by eye. The device's current build,
+26102901, has its own goldens (`tests/golden/licorice-v26102901-*.png`), not yet compared with the reader.</sub>
 
 In October 2026 Xteink replaced the 7.x firmware with a rewrite, **XTOS Licorice**. The emulator runs it
 from the device's own dump: the Bookshelf, the side drawer, the Desktop, All files and the reader, the
@@ -145,12 +150,12 @@ with what a firmware sees, are in [docs/hardware.md](docs/hardware.md#what-is-no
 | [CLAUDE.md](CLAUDE.md) | build and test, the stock boot recipe, the device rules, where things are — the entry point for people and agents alike |
 | [docs/x4emu.md](docs/x4emu.md) | the `x4emu` CLI and its JSON shapes; installing it with pipx |
 | [docs/hardware.md](docs/hardware.md) | the X4 Pro as the emulator models it, with sources; what is not emulated |
-| [docs/lua-apps.md](docs/lua-apps.md) · [docs/gamebook.md](docs/gamebook.md) | writing apps for the stock firmware |
+| [docs/lua-apps.md](docs/lua-apps.md) · [docs/licorice-apps.md](docs/licorice-apps.md) · [docs/gamebook.md](docs/gamebook.md) | writing apps for the stock firmware: 7.x's folder apps, Licorice's signed packages, gamebooks |
 | [docs/stock-firmware.md](docs/stock-firmware.md) · [7.5.4](docs/stock-7.5.4.md) · [7.6.8](docs/stock-7.6.8.md) · [Licorice](docs/stock-licorice.md) | the stock app's internals, version by version, and its new generation |
 | [docs/README.md](docs/README.md) | every other document, with a line each |
 | [docs/smp.md](docs/smp.md) · [docs/heap.md](docs/heap.md) | two emulator-vs-firmware investigations: the two cores' memory order (an emulator bug, fixed) and a 7.2.4 heap corruption (the firmware's own race) |
 | [docs/parity.md](docs/parity.md) | device parity: the same steps on the emulator and the reader, the stock's own Screen Captures compared pixel by pixel |
-| [docs/upstream-qemu.md](docs/upstream-qemu.md) | the generic ESP32-S3 models split out for Espressif's QEMU: the series, the proposed PRs, what awaits the owner |
+| [docs/upstream-qemu.md](docs/upstream-qemu.md) | the generic ESP32-S3 models split out for Espressif's QEMU: the series and the PR drafts, kept for a later day (not submitted) |
 | [docs/upstream.md](docs/upstream.md) | the weekly upstream watch: new CrossPoint releases, Espressif QEMU, PlatformIO and Homebrew drift |
 | [docs/log.md](docs/log.md) | the engineering log: what was done, what failed, and why |
 
@@ -179,8 +184,8 @@ Lua apps, and the gamebook's story and art. Three parts keep their own licences:
 - `firmware/` is [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader), a
   submodule with its own MIT licence and copyright.
 
-The stock `xteink_app` firmware belongs to Xteink; it is not distributed here, and the tools work
-on images you take from your own device.
+The stock firmware (`xteink_app` 7.x and XTOS Licorice) belongs to Xteink; it is not distributed here,
+and the tools work on images you take from your own device.
 
 ## Credits
 

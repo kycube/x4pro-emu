@@ -10,14 +10,14 @@ the [project README](../README.md) is the overview.
 | [x4emu.md](x4emu.md) | the `x4emu` CLI: every command, its JSON shape, installing it with pipx |
 | [hardware.md](hardware.md) | the X4 Pro as the emulator models it: pins, buses, panel variants, with sources; the full list of what is not emulated; the keys of `x4emu state` |
 | [grayscale.md](grayscale.md) | the waveform-level grey model of the UC8279 and how it was calibrated |
-| [upstream-qemu.md](upstream-qemu.md) | contributing the generic ESP32-S3 work to Espressif's QEMU: the split, the PR drafts, QEMU's AI-content policy |
+| [upstream-qemu.md](upstream-qemu.md) | the generic ESP32-S3 work split out for Espressif's QEMU: the split, the PR drafts, QEMU's AI-content policy (not submitted: the owner's call, 2026-10-13) |
 | [heap.md](heap.md) | the stock 7.2.4 `CORRUPT HEAP`: a race between two of its own tasks over a font file, not the emulator's |
 | [usb-otg.md](usb-otg.md) | the USB OTG (DWC2) core in device mode: why the stock's USB mode needs it, the register values, the built-in host that reads the device descriptor |
 | [smp.md](smp.md) | the two emulated cores and the memory order: the `spinlock.h:141` assert, TSO, the cache bits |
 | [parity.md](parity.md) | the device-parity harness (`tools/parity.py`): step scripts, the owner's runbook, the capture comparison |
 | [audit.md](audit.md) | every claim of the original build brief, confirmed or corrected, with evidence |
 
-## The stock firmware (`xteink_app`)
+## The stock firmware (`xteink_app` 7.x and XTOS Licorice)
 
 | document | what it covers |
 |---|---|
@@ -47,8 +47,8 @@ Every tool's module docstring (`--help`) is its manual; the page named here has 
 | `x4emu` (shim), `x4emu_mcp.py` | the emulator CLI and its MCP server | [x4emu.md](x4emu.md) |
 | `mkflash.py`, `mksd.py`, `mkefuse.py` | a 16 MB flash image (from a build or a raw dump), a FAT32 card image, the efuse file | [x4emu.md](x4emu.md) |
 | `device.py` | the desk reader: backup, slots, console, the guarded slot writers | `../CLAUDE.md`, "The real device" |
-| `nvsedit.py` | read and edit NVS in a flash image; `redact` blanks the WiFi credentials | [hardware.md](hardware.md) |
-| `stockver.py` (+ `stockver.d/`) | the per-version offsets the stock tools read; `identify IMAGE` | [stock-7.5.4.md](stock-7.5.4.md), [stock-7.6.8.md](stock-7.6.8.md) |
+| `nvsedit.py` | read and edit NVS in a flash image; `redact` removes every stored credential (WiFi, Licorice's passcode digest and Bluetooth keys, its `/radio` store) | [stock-licorice.md](stock-licorice.md), [hardware.md](hardware.md) |
+| `stockver.py` (+ `stockver.d/`) | the per-version offsets the stock tools read; `identify IMAGE`; a Licorice image's build tag (`v26102901`) | [stock-7.5.4.md](stock-7.5.4.md), [stock-7.6.8.md](stock-7.6.8.md) |
 | `stockdev.py`, `stockpatch.py` | the developer menu; named byte patches (`developer-menu`, `hidden-menu-rows`, `lua-apps-row`) | [xic.md](xic.md), [lua-apps.md](lua-apps.md) |
 | `stockstrings.py` | read and relabel the stock's UI string packs | [stock-firmware.md](stock-firmware.md) §6 |
 | `xic2png.py` | decode and encode the stock's `.xic` captures | [xic.md](xic.md) |

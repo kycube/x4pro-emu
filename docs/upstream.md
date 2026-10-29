@@ -34,7 +34,10 @@ That check now runs by itself every Monday: `tools/upstream_check.py` for the qu
 the device's own update prompt, so nothing here can see a new version coming. When the device offers
 one: back up first (`tools/device.py backup`, CLAUDE.md "The real device"), let the owner update, back up
 again, and re-baseline the way the 7.6.8 entry in docs/log.md did (`tools/stockver.d/<version>.json`,
-`docs/stock-<version>.md`, the patch sites, the string packs). The report repeats this line every week.
+`docs/stock-<version>.md`, the patch sites, the string packs). For a new XTOS Licorice build, follow the
+26102901 entry instead (`docs/stock-licorice.md`): its build tag, the app key's address
+(`xtapp.LICORICE_SCALAR_VA`) and the DEK1 mark, `stockkit.LICORICE_DUMPS`, and first of all its NVS: a new
+build can keep secrets in keys `nvsedit redact` does not know yet. The report repeats this line every week.
 
 Also manual: moving the CrossPoint pin (below), and anything the device must confirm.
 

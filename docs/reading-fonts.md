@@ -227,7 +227,7 @@ the reading list and the UI font are independent otherwise.
 
 ## 7. 7.5.4 and 7.6.8
 
-**7.6.8** (what the device runs since 2026-10-12) was not booted on this path either. Its label pack has new
+**7.6.8** (what the device ran from 2026-10-12 to 2026-10-13) was not booted on this path either. Its label pack has new
 font-picker groups — "All", "No fonts available", "No TTF fonts", "No XTF fonts", "No BIN fonts",
 "Please put font files in the Fonts folder", "Size" — and "TTF" / "XTF" / "BIN" labels, plus a
 font-download set (`docs/stock-7.6.8.md` §1): the picker probably changed, and a size control and TTF files

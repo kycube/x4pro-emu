@@ -209,7 +209,7 @@ the block; nothing in QEMU needs fixing. The same tasks, priorities and pinning 
 so the race is there too; whether the device ever meets the timing that triggers a second restore
 during the UI's check is not known (no device log of it).
 
-7.6.8 (what the device runs now) did not crash in 183 boots under the same stalls, where 7.2.4
+7.6.8 (what the device ran then) did not crash in 183 boots under the same stalls, where 7.2.4
 crashed 3 times in 371; at 7.2.4's rate 1.5 crashes were expected, so this does not show a fix by
 itself (p = 0.2). Its restore was rewritten (`FUN_42204b80`: the slot reopen `FUN_421265fc` is
 retried up to twice after a 40-tick delay call, `FUN_4237ddf4(0x28)`, while it reports result 3),
