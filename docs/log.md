@@ -1554,3 +1554,11 @@ advances).
 
 The efuses, re-read on 26102901 (`tools/device.py efuse-summary`), are byte for byte the committed dump: no flash
 encryption, no secure boot, `SECURE_VERSION` 0, so the update burned nothing.
+
+The owner closed the by-eye check of 26102901's screens and its wake to Recent. The README's Licorice picture
+now shows 26102901 (`tools/readme_images.py` reads `licorice-v26102901-*`; its Home is Recent, not the
+Bookshelf). The build's new features, walked by hand in the emulator: the startup passcode (set, asked at a
+wake and at a cold boot, a wrong code refused), collections (created with the on-screen keyboard, a book added
+from its hold menu), dictionaries (a hand-made StarDict ZIP in `/dictionaries/` imports, and a held word opens
+its definition; double tap and the first, cached page did not answer) and phone pairing (Bluetooth comes up,
+a QR code, "Waiting for phone"). `docs/stock-licorice.md` has the table; no test pins them yet.

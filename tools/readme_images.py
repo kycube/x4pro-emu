@@ -10,8 +10,9 @@ Every picture is something a test already pins, so the README shows what the emu
                  panel; test_device_screenshot.py sets the battery to the device's and holds the two
                  at 0 differing pixels (the golden shown here is at the default 63 %)
   plates.png     the gamebook's eight plates, as tools/gamebook.py renders them
-  licorice.png   XTOS Licorice, the stock's rewrite: its Bookshelf, the side drawer, a book page and
-                 the light panel (tests/golden/licorice-*, pinned by tests/test_licorice.py)
+  licorice.png   XTOS Licorice 26102901, the stock's rewrite as the device runs it: its Home (Recent), the
+                 side drawer, a book page and the light panel (tests/golden/licorice-v26102901-*,
+                 pinned by tests/test_licorice.py)
 Run it after a golden or a plate changes; captions use Inter (fonts/inter/, OFL, fetched locally per
 fonts/README.md) and fall back to PIL's default font.
 """
@@ -105,10 +106,10 @@ def plates():
 
 
 def licorice():
-    cells = [(framed(upright('licorice-home.png')), 'XTOS Licorice: the Bookshelf'),
-             (framed(upright('licorice-drawer.png')), 'Licorice: the side drawer'),
-             (framed(upright('licorice-reader.png')), 'Licorice: reading'),
-             (framed(upright('licorice-light.png')), 'Licorice: the light panel')]
+    cells = [(framed(upright('licorice-v26102901-home.png')), 'XTOS Licorice 26102901: Home'),
+             (framed(upright('licorice-v26102901-drawer.png')), 'Licorice: the side drawer'),
+             (framed(upright('licorice-v26102901-reader.png')), 'Licorice: reading'),
+             (framed(upright('licorice-v26102901-light.png')), 'Licorice: the light panel')]
     return grid(cells, 4)
 
 

@@ -128,14 +128,28 @@ What the build changed, as the emulator shows it:
 |---|---|---|
 | Home | the **Bookshelf** tab | a **Recent ⌄** tab (a sort menu), "NEW" on an unread cover |
 | Frontlight at boot | LEDC set up, duty 0 | LEDC untouched until the light is first used |
-| Wake from deep sleep | resumes the last book | **Recent**, the book on top (not yet seen on the device) |
+| Wake from deep sleep | resumes the last book | **Recent**, the book on top |
 | Mini apps | "Mini Apps" | **"Ink App"** ("Install Ink App", "Leave this Ink App?"); the same package and unlock |
 | App API | `g.ttf_measure`, `ttf_text`, `ttf_text_box` | gone (`docs/licorice-apps.md`) |
 | App key | DROM 0x3c32c674 | the same key at DROM 0x3c3a4918 |
 
 New strings point at what else arrived: a startup passcode, collections, dictionaries, phone pairing, an
 Ink App lock, "Back to previous spot", and translations (about 16,000 new strings, a CA bundle among them).
-None of that is walked yet. The owner has not compared 26102901's emulator screens with the reader.
+The owner closed the by-eye check of 26102901's screens and of the wake to Recent (2026-10-29).
+
+The four headline features, walked by hand in the emulator on a redacted copy of the device's dump
+(2026-10-29; no test pins them yet):
+
+| Feature | Where | What the emulator does |
+|---|---|---|
+| Startup passcode | Settings → General → Startup passcode | a 4-digit keypad, "Enter passcode again", the row turns **On**; a wake from deep sleep and a cold boot both stop at "Enter passcode"; a wrong code shows "Wrong passcode", the right one opens Home. The digest is NVS `fw/boot_pin_fw` (`tools/nvsedit.py redact` erases it) |
+| Collections | Home → Recent ⌄ → Collections → New collection; hold a book → Add to collection | the on-screen keyboard names it ("Collection 1"), Home shows it ("Empty. Hold a book to add it here"); holding a cover gives Mark as finished / Add to collection / Delete book; adding shows "Added to Collection 1", "1 book" |
+| Dictionaries | Settings → Reading → Dictionary lookup | StarDict ZIPs (wikdict's downloads) in `/dictionaries/`; *Current dictionary* lists one ("Tap to import"), imports it ("Ready"); with lookup on long press, holding a word in the reader boxes it and opens a pop-up with its definition. Long press is the excerpts' gesture by default ("Already used for excerpts"), so lookup takes double tap unless excerpts are moved off it; the emulator's taps did not make a double tap (two GT911 touches about 120 ms each, held until read); the first page opened from a cached image did not answer a hold, the next page did |
+| Phone pairing | Settings → Account → Bind | "Bluetooth setup": Bluetooth and Wi-Fi come up, a QR code and the name `XTEPD_BLE_` + the MAC's last bytes + 2, "Waiting for phone"; no BLE traffic is modelled, so it waits (Cancel / Retry) |
+
+A dictionary for a test: a `.ifo` (`StarDict's dict ifo file`, `wordcount`, `idxfilesize`, `bookname`,
+`sametypesequence=m`), a `.idx` (word, NUL, big-endian offset and size) and a `.dict.dz` (dictzip: gzip with
+an `RA` chunk table) zipped flat; the firmware also takes a plain `.dict` and a `.syn`.
 
 ## What the stock tools make of it
 
@@ -164,9 +178,9 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
-- 26102901 on the device: whether a wake really shows Recent rather than the book, and the owner's look at its
-  screens beside the reader; its new features (passcode, collections, dictionaries, phone pairing) are
-  not walked.
+- 26102901's new features have no test yet (the walk above was by hand); dictionary lookup by double tap
+  and on a first page opened from its cached image did not answer in the emulator; the Ink App lock and
+  "Back to previous spot" are not walked.
 - Mini apps beyond the code section: the assets / data / fonts sections are read but not yet built, and
   the >512 KB streamed code path is untested (`docs/licorice-apps.md` "Open").
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no

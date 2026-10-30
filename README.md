@@ -98,10 +98,10 @@ The models are checked against the desk unit, not just against datasheets:
 
 ## XTOS Licorice, the stock's new generation
 
-![XTOS Licorice 261013 in the emulator: its Bookshelf, the side drawer, a book page and the light panel](docs/images/licorice.png)
+![XTOS Licorice 26102901 in the emulator: its Home, the side drawer, a book page and the light panel](docs/images/licorice.png)
 
-<sub>Licorice 261013, the screens the owner compared with the reader by eye. The device's current build,
-26102901, has its own goldens (`tests/golden/licorice-v26102901-*.png`), not yet compared with the reader.</sub>
+<sub>Licorice 26102901, the device's build, as the emulator draws it; the owner compared the emulator's screens
+of both builds with the reader by eye (`tests/golden/licorice-*.png`).</sub>
 
 In October 2026 Xteink replaced the 7.x firmware with a rewrite, **XTOS Licorice**. The emulator runs it
 from the device's own dump: the Bookshelf, the side drawer, the Desktop, All files and the reader, the
@@ -109,7 +109,9 @@ side buttons, the front light, Dark mode, Wi-Fi and Bluetooth toggles, sleep and
 and USB mode (`tests/test_licorice.py`, `tests/test_usb_otg.py`). One panel-model fix was needed:
 Licorice scans the panel the other way up from every earlier firmware. Its signed mini-app packages
 install and run too (below). The build of 2026-10-29, **26102901** (a Recent tab on Home, "Ink App" for
-mini apps), ran with no model change; every Licorice test runs on both builds. What changed, what runs and
+mini apps), ran with no model change; every Licorice test runs on both builds. Its new startup passcode,
+collections, StarDict dictionary lookup and phone-pairing screen work in the emulator too (walked by hand;
+pairing waits for a phone, as no Bluetooth traffic is modelled). What changed, what runs and
 what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook
