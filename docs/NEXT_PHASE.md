@@ -6,7 +6,7 @@ Goal of this phase, in the owner's words: run the **stock Xteink firmware** in t
 Read `CLAUDE.md` first (build, device rules, where things are), then this file, then the last entries of
 `docs/log.md`.
 
-## 0. Resume here (2026-10-13, after the world-class pass)
+## 0. Resume here (2026-10-29, after the 26102901 update)
 
 **First: the device now runs XTOS Licorice 26102901** (the owner's OTA of 2026-10-29; app0 boots, 261013 stays
 in app1; the first Licorice, 261013, came with the OTA of 2026-10-13, and 7.6.8 is now only in the backups).
@@ -17,7 +17,10 @@ the lock screen, all against 7.6.8) matters less now — do not start them unles
 Licorice in the emulator: reader, files, light panel and frontlight, Dark mode, Wi-Fi and Bluetooth toggles,
 sleep and wake, auto power-off, battery, USB mode (the OTG core, `docs/usb-otg.md`), and installing a signed
 package `tools/xtapp.py --format licorice` builds and running it from Mini Apps (`docs/licorice-apps.md`); the
-owner judged twelve of its screens 1:1 with the device by eye. **Next: USB mass storage past the device
+owner judged twelve of its screens 1:1 with the device by eye, and closed the same check for 26102901. **On the
+device (2026-10-29): a package xtapp.py builds installs and runs under 26102901** — the first mini app from
+here on the hardware. 26102901's new features (startup passcode, collections, StarDict dictionaries, phone
+pairing) work in the emulator (`docs/stock-licorice.md`); the efuses re-read unchanged after the update. **Next: USB mass storage past the device
 descriptor** (the built-in host's SET_ADDRESS, configuration and bulk-only transport, `docs/usb-otg.md`), then
 the Licorice app sections beyond code (assets / data / fonts). WiFi and BLE traffic is the largest gap left
 and a project of its own: take it on deliberately.

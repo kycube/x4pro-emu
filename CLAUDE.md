@@ -6,7 +6,7 @@ opens books, pages, sleeps and wakes in it; the stock `xteink_app` (7.2.4, 7.5.4
 screen, paints, lights the frontlight, takes touch, runs its Lua apps, and its WiFi start comes up and
 stops itself (no radio). The stock's new generation, **XTOS Licorice** (261013 from 2026-10-13; **26102901**,
 the device's since 2026-10-29), reads, lights, sleeps, wakes, enters USB mode, and installs and runs a mini app
-`tools/xtapp.py` builds (`docs/stock-licorice.md`, `docs/licorice-apps.md`). `README.md` is the public overview, `docs/README.md` the index of every document.
+`tools/xtapp.py` builds — on the real reader too (`docs/stock-licorice.md`, `docs/licorice-apps.md`). `README.md` is the public overview, `docs/README.md` the index of every document.
 Progress and dead ends: `docs/log.md`. **Next agent: read `docs/NEXT_PHASE.md`**, §0 (resume) and §10 (the
 work runs as squads: the coordinator forms agents per milestone, and since 2026-10-12 **Opus 5.5 does all of
 it** — coordination, well-specified tasks, symbol-less firmware reading and new models alike; Fable 5.1 only
