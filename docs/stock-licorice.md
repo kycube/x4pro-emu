@@ -101,7 +101,8 @@ generation: same project and IDF, a new commit, the identity string now carrying
 
 **On the device.** The OTA wrote the other slot as always: **app0 = 26102901**, otadata entry 0 seq 5 →
 app0 boots; app1 still holds 261013 byte for byte; the pristine 7.6.8 that was in app0 is gone from the
-device (it stays in the 2026-10-12/13 backups). Bootloader, partition table and coredump are unchanged.
+device (it stays in the 2026-10-12/13 backups). Bootloader, partition table and coredump are unchanged, and the
+efuses read byte for byte as before (`docs/device/efuse-*.txt` unchanged, re-read the same day).
 NVS was rewritten throughout (all five sectors), and the `/radio` store gains `wifi_last.bin` and
 `excerpt_digest.bin`.
 

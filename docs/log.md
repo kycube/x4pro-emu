@@ -1551,3 +1551,6 @@ codepoint with the basic layout, which renders it as raqm 0.10 did: Arial Bold a
 byte-identical `.xtf` files under Pillow 12.3 and 13.0 and before the change. Switching every glyph to the basic
 layout was measured and rejected: it changes about 270 glyphs per font (combining marks, zero-width marks,
 advances).
+
+The efuses, re-read on 26102901 (`tools/device.py efuse-summary`), are byte for byte the committed dump: no flash
+encryption, no secure boot, `SECURE_VERSION` 0, so the update burned nothing.
