@@ -145,7 +145,7 @@ each from a cold boot, and `tests/mkstardict.py` writes the test dictionary:
 |---|---|---|
 | Startup passcode | Settings → General → Startup passcode | a 4-digit keypad, "Enter passcode again", the row turns **On**; a wake from deep sleep and a cold boot both stop at "Enter passcode"; a wrong code shows "Wrong passcode", the right one opens Home. The digest is NVS `fw/boot_pin_fw` (`tools/nvsedit.py redact` erases it) |
 | Collections | Home → Recent ⌄ → Collections → New collection; hold a book → Add to collection | the on-screen keyboard names it ("Collection 1"), Home shows it ("Empty. Hold a book to add it here"); holding a cover gives Mark as finished / Add to collection / Delete book; adding shows "Added to Collection 1", "1 book" |
-| Dictionaries | Settings → Reading → Dictionary lookup | StarDict ZIPs (wikdict's downloads) in `/dictionaries/`; *Current dictionary* lists one ("Tap to import"), imports it ("Ready"); with lookup on long press, holding a word in the reader boxes it and opens a pop-up with its definition. Long press is the excerpts' gesture by default ("Already used for excerpts"), so lookup takes double tap unless excerpts are moved off it; the emulator's taps did not make a double tap (two GT911 touches about 120 ms each, held until read); the first page opened from a cached image did not answer a hold, the next page did |
+| Dictionaries | Settings → Reading → Dictionary lookup | StarDict ZIPs (wikdict's downloads) in `/dictionaries/`; *Current dictionary* lists one ("Tap to import"), imports it ("Ready"); with lookup on long press, holding a word in the reader boxes it and opens a pop-up with its definition. Long press is the excerpts' gesture by default ("Already used for excerpts"), so lookup takes double tap unless excerpts are moved off it. Double tap works too, with a finger's rhythm: two 40 ms touches 80 or 250 ms apart open the definition, two about 30 ms apart do nothing (the firmware takes them as one gesture and draws nothing); under `--icount shift=2,sleep=off` the idle warp stretches the gap past the 250 ms interval, so a test drives lookup by long press. A page reopened from its cached image answers both |
 | Phone pairing | Settings → Account → Bind | "Bluetooth setup": Bluetooth and Wi-Fi come up, a QR code and the name `XTEPD_BLE_` + the MAC's last bytes + 2, "Waiting for phone"; no BLE traffic is modelled, so it waits (Cancel / Retry) |
 
 A dictionary for a test: a `.ifo` (`StarDict's dict ifo file`, `wordcount`, `idxfilesize`, `bookname`,
@@ -179,8 +179,8 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
-- 26102901: dictionary lookup by double tap, and on a first page opened from its cached image, did not
-  answer in the emulator; the Ink App lock and "Back to previous spot" are not walked.
+- 26102901: the Ink App lock and "Back to previous spot" are not walked; no test drives a double tap
+  (under icount the gap between two taps is not controllable).
 - Mini apps beyond the code section: the assets / data / fonts sections are read but not yet built, and
   the >512 KB streamed code path is untested (`docs/licorice-apps.md` "Open").
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no

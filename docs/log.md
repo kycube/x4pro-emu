@@ -1571,3 +1571,8 @@ mini app built here to run on the hardware; nothing was written to the flash.
 cold boots, 14 goldens, about 15 s each; `tests/mkstardict.py` writes a deterministic wikdict-style ZIP). Two
 things the first run taught: All files' rows move when the card gains a folder (the test opens the book from
 All books instead), and General shows today's date and time (masked).
+
+The two lookup gaps were the emulator's input timing, not the firmware: in real time (no `--icount`) a double
+tap with two 40 ms touches 80 or 250 ms apart opens the definition, and a 1.2 s hold works on a page just
+reopened from its cached image. Touches about 30 ms apart are taken as one gesture; under `sleep=off` the idle
+warp stretches the gap between two host-side taps past the 250 ms interval.

@@ -111,8 +111,8 @@ def test_licorice_collections(request, tmp_path, stock_card):
 def test_licorice_dictionary_lookup(request, tmp_path, stock_card):
     """A StarDict ZIP in /dictionaries/ (tests/mkstardict.py, wikdict's layout): Current dictionary lists
     it, a tap imports it; with excerpts moved off long press, lookup takes it, and a held word in the
-    test book opens its definition. Held on page 2: the first page, drawn from its cached image, does not
-    answer a hold in the emulator (docs/stock-licorice.md)."""
+    test book opens its definition (on page 2; long press because under icount two taps do not land
+    inside the double-tap interval, docs/stock-licorice.md)."""
     zip_path = tmp_path / 'emutest.zip'
     make_stardict(str(zip_path))
 
