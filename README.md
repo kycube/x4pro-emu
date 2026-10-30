@@ -125,7 +125,8 @@ XTOS Licorice installs apps from a signed `.xtapp` package instead. Its format i
 [docs/licorice-apps.md](docs/licorice-apps.md): `tools/xtapp.py pack --format licorice` builds a package
 its installer accepts, and the emulator takes it from All Files to the **"Installed"** confirmation
 and on to running it: Mini Apps lists it, a tap launches it, it takes taps and leaves cleanly
-(`tests/test_licorice_apps.py`, on 261013 and 26102901). Licorice's Lua host exposes more than 7.x's (a
+(`tests/test_licorice_apps.py`, on 261013 and 26102901). The same package installs and runs on the real
+reader under 26102901 too (the owner, 2026-10-29). Licorice's Lua host exposes more than 7.x's (a
 `ctx.data` file API; TrueType text on 261013 only; not exercised yet), and its Mini Apps entry ("Ink App"
 on 26102901) stays hidden until ten taps on Settings → About → "Model".
 

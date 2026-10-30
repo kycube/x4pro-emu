@@ -1562,3 +1562,7 @@ wake and at a cold boot, a wrong code refused), collections (created with the on
 from its hold menu), dictionaries (a hand-made StarDict ZIP in `/dictionaries/` imports, and a held word opens
 its definition; double tap and the first, cached page did not answer) and phone pairing (Bluetooth comes up,
 a QR code, "Waiting for phone"). `docs/stock-licorice.md` has the table; no test pins them yet.
+
+On the device: `apps/probe` packed by `tools/xtapp.py --format licorice`, copied to the card in USB mode,
+installed from All files, Ink App unhidden by the ten taps, and API Probe ran (the owner, 26102901). The first
+mini app built here to run on the hardware; nothing was written to the flash.

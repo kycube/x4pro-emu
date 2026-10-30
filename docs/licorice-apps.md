@@ -302,6 +302,12 @@ Model ten times, then open ≡ → Mini Apps. Only an all-letter `app_id` instal
   "Install failed"; one flipped `iv_code` bit (same ciphertext and HMAC) → "Cannot run yet"; a
   manifest-only package → "Cannot run yet"; the good package still launches after both failures.
 
+**Verified on the device** (2026-10-29, Licorice 26102901): `tools/xtapp.py pack apps/probe --format
+licorice` copied to the card's root installs from All files ("Installed"), the ten taps on About → Model
+unhide Ink App, and API Probe runs from it. So the package format, the key wrap to the device's key
+(`36036010c7bd05af`, read from the image, never from the device) and the code section's AES-CTR all hold on
+the hardware, not only in the emulator.
+
 **Verified off-device** (`tests/test_xtapp.py`): the wrap round-trips; `licorice_ctr` equals the
 block-by-block re-implementation of `FUN_4210ad78` at every offset and across the 128-bit carry; the
 XTCO layout and its refusals; `hmac_code` over the ciphertext; `read_licorice_code` inverts `pack`.
