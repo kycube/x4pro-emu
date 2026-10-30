@@ -1576,3 +1576,15 @@ The two lookup gaps were the emulator's input timing, not the firmware: in real 
 tap with two 40 ms touches 80 or 250 ms apart opens the definition, and a 1.2 s hold works on a page just
 reopened from its cached image. Touches about 30 ms apart are taken as one gesture; under `sleep=off` the idle
 warp stretches the gap between two host-side taps past the 250 ms interval.
+
+"Back to previous spot" (26102901) walked and pinned: after a jump from Contents the reader menu shows a
+"‹ Back to previous spot" pill above its toolbar and a tap returns to the page the jump left
+(`test_licorice_back_to_previous_spot`, two goldens).
+
+The Ink App lock screen, partly: a test app with a manifest `lockscreen` entry installs, and
+`ctx.system.set_as_lockscreen_app()` switches it to `lockscreen.lua` (which gets `ctx.lock`). The "Set as lock
+screen" dialog comes from a `lockscreen.set_default` binding, string index 1198 found by the i18n offset table
+(language descriptor at 0x3c3a7e4c, offsets at 0x3c4638ce, strings at 0x3c4643e2) and a `movi 0x4ae` in
+`FUN_4208a094`; the ctx builder `FUN_42131224` gives `ctx.lockscreen` only when host flag +0x149 is clear, and
+the test app never got it, so the dialog and the Off-wallpaper choice stayed out of reach. A Ghidra project for
+26102901 now exists (`ghidra_stock.py --image images/device/stock-app0-v26102901.bin analyze`, 0.7 min).

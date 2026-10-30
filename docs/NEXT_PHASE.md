@@ -20,13 +20,13 @@ package `tools/xtapp.py --format licorice` builds and running it from Mini Apps 
 owner judged twelve of its screens 1:1 with the device by eye, and closed the same check for 26102901. **On the
 device (2026-10-29): a package xtapp.py builds installs and runs under 26102901** — the first mini app from
 here on the hardware. 26102901's new features (startup passcode, collections, StarDict dictionaries, phone
-pairing) work in the emulator (`docs/stock-licorice.md`); the efuses re-read unchanged after the update. **Next: USB mass storage past the device
+pairing, "Back to previous spot") work in the emulator; the Ink App lock screen is only partly walked (`docs/stock-licorice.md`); the efuses re-read unchanged after the update. **Next: USB mass storage past the device
 descriptor** (the built-in host's SET_ADDRESS, configuration and bulk-only transport, `docs/usb-otg.md`), then
 the Licorice app sections beyond code (assets / data / fonts). WiFi and BLE traffic is the largest gap left
 and a project of its own: take it on deliberately.
 
 **Where things stand.** Every firmware runs unpatched: CrossPoint 1.6.0, the stock `xteink_app` 7.2.4, 7.5.4
-and 7.6.8, and Licorice 261013 and 26102901; the device runs **Licorice 26102901 in app0** (261013 in app1). `make test` is 275 tests in
+and 7.6.8, and Licorice 261013 and 26102901; the device runs **Licorice 26102901 in app0** (261013 in app1). `make test` is 276 tests in
 about two minutes on eight workers, with no input retries anywhere. On 7.5.4–7.6.8 Lua apps reach the device as a
 card copy and keep `ctx.state` in the emulator as on the reader; the gamebook was played on the device under 7.6.8.
 The owner's items:

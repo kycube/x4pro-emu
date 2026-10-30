@@ -23,7 +23,7 @@ the [project README](../README.md) is the overview.
 |---|---|
 | [stock-firmware.md](stock-firmware.md) | the UI layer mapped for modification (a 7.2.4 survey: its addresses are 7.2.4's) |
 | [stock-7.5.4.md](stock-7.5.4.md) · [stock-7.6.8.md](stock-7.6.8.md) | what moved in each update, and the re-located patch sites |
-| [stock-licorice.md](stock-licorice.md) | XTOS Licorice, the stock's rewrite: 261013 (2026-10-13) and 26102901 (the device's since 2026-10-29), what changed, what runs (passcode, collections, dictionaries, pairing), what the tools refuse |
+| [stock-licorice.md](stock-licorice.md) | XTOS Licorice, the stock's rewrite: 261013 (2026-10-13) and 26102901 (the device's since 2026-10-29), what changed, what runs (passcode, collections, dictionaries, pairing, back to previous spot; the Ink App lock screen partly), what the tools refuse |
 | [lua-apps.md](lua-apps.md) | the Lua app host: the container, the API as confirmed at runtime, its measured limits |
 | [licorice-apps.md](licorice-apps.md) | XTOS Licorice's signed mini apps: the container, the device-key wrap, the AES-CTR code section, the hidden Mini Apps entry, a package that installs and runs, in the emulator and on the reader |
 | [gamebook.md](gamebook.md) | gamebooks on the Lua host: writing a story, drawing plates, how the engine works |

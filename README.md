@@ -47,7 +47,7 @@ macOS or Linux; paths must not contain spaces.
 ```bash
 make setup      # Python venv, Espressif QEMU at a pinned commit + qemu-patches/, CrossPoint submodule
 make build      # qemu-system-xtensa, the panel models, CrossPoint's x4pro image
-make test       # model unit tests, fixture replays, ~275 pytest cases on parallel workers (~2 min)
+make test       # model unit tests, fixture replays, ~276 pytest cases on parallel workers (~2 min)
 ```
 
 Packages: git, ninja, meson, pkg-config, glib, pixman, libgcrypt, libslirp, libpng, mtools,
@@ -110,7 +110,8 @@ and USB mode (`tests/test_licorice.py`, `tests/test_usb_otg.py`). One panel-mode
 Licorice scans the panel the other way up from every earlier firmware. Its signed mini-app packages
 install and run too (below). The build of 2026-10-29, **26102901** (a Recent tab on Home, "Ink App" for
 mini apps), ran with no model change; every Licorice test runs on both builds. Its new startup passcode,
-collections and StarDict dictionary lookup work in the emulator too (`tests/test_licorice_features.py`),
+collections, StarDict dictionary lookup and the reader's "Back to previous spot" work in the emulator too
+(`tests/test_licorice_features.py`),
 and its phone-pairing screen comes up and waits for a phone, as no Bluetooth traffic is modelled. What changed, what runs and
 what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 

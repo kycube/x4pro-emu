@@ -98,7 +98,9 @@ Plain JSON at 0x80. `FUN_42108648` extracts into a 0x11c-byte struct, `FUN_42108
   data, fonts at +0x19c..+0x304, 0x48 bytes each).
 
 Other keys the extractor reads: `display.orientation`, `lockscreen` (`enabled`, `entry`,
-`interval_sec`), `splash`, `ttf_reserve_kb`, `required_features`, `optional_features`,
+`interval_sec`; on 26102901 it is accepted with an entry `lockscreen.lua` packed beside `index.lua`, and
+`ctx.system.set_as_lockscreen_app()` switches the app to it: `docs/stock-licorice.md`, "The Ink App lock
+screen"), `splash`, `ttf_reserve_kb`, `required_features`, `optional_features`,
 `preload_assets` (asset names hashed FNV-1a at open), `app_icon_s/l`. A `dek_wrap_alg` of
 `xteink:store-seed-binding:v1` (the app store's form) is refused as `not_supported` by this build.
 

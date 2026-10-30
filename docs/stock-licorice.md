@@ -137,9 +137,10 @@ New strings point at what else arrived: a startup passcode, collections, diction
 Ink App lock, "Back to previous spot", and translations (about 16,000 new strings, a CA bundle among them).
 The owner closed the by-eye check of 26102901's screens and of the wake to Recent (2026-10-29).
 
-The four headline features, walked in the emulator on a redacted copy of the device's dump (2026-10-29);
-`tests/test_licorice_features.py` pins the first three screen by screen (`tests/golden/licorice-v26102901-*`),
-each from a cold boot, and `tests/mkstardict.py` writes the test dictionary:
+The headline features, walked in the emulator on a redacted copy of the device's dump (2026-10-29);
+`tests/test_licorice_features.py` pins the passcode, collections, dictionary lookup and "Back to previous spot"
+screen by screen (`tests/golden/licorice-v26102901-*`), each from a cold boot, and `tests/mkstardict.py` writes
+the test dictionary:
 
 | Feature | Where | What the emulator does |
 |---|---|---|
@@ -147,6 +148,21 @@ each from a cold boot, and `tests/mkstardict.py` writes the test dictionary:
 | Collections | Home → Recent ⌄ → Collections → New collection; hold a book → Add to collection | the on-screen keyboard names it ("Collection 1"), Home shows it ("Empty. Hold a book to add it here"); holding a cover gives Mark as finished / Add to collection / Delete book; adding shows "Added to Collection 1", "1 book" |
 | Dictionaries | Settings → Reading → Dictionary lookup | StarDict ZIPs (wikdict's downloads) in `/dictionaries/`; *Current dictionary* lists one ("Tap to import"), imports it ("Ready"); with lookup on long press, holding a word in the reader boxes it and opens a pop-up with its definition. Long press is the excerpts' gesture by default ("Already used for excerpts"), so lookup takes double tap unless excerpts are moved off it. Double tap works too, with a finger's rhythm: two 40 ms touches 80 or 250 ms apart open the definition, two about 30 ms apart do nothing (the firmware takes them as one gesture and draws nothing); under `--icount shift=2,sleep=off` the idle warp stretches the gap past the 250 ms interval, so a test drives lookup by long press. A page reopened from its cached image answers both |
 | Phone pairing | Settings → Account → Bind | "Bluetooth setup": Bluetooth and Wi-Fi come up, a QR code and the name `XTEPD_BLE_` + the MAC's last bytes + 2, "Waiting for phone"; no BLE traffic is modelled, so it waits (Cancel / Retry) |
+| Back to previous spot | the reader: a jump from Contents (or Progress → Jump to…) | the reader menu then shows a "‹ Back to previous spot" pill above its toolbar; a tap returns to the page the jump left. Progress's chapter arrows (⏮ ⏭) jump too |
+| Ink App lock screen | an Ink App whose manifest has `lockscreen` (`enabled`, `entry`, `interval_sec`) | partly walked: below |
+
+**The Ink App lock screen** (read from the firmware and tried with a test app, not reached end to end). A
+manifest `"lockscreen": {"enabled": true, "entry": "lockscreen.lua", "interval_sec": 60}` is parsed into the
+app's host state (+0xdc enabled, +0xdd the entry's name, +0x14c the interval), and the entry must be in the
+code section. `ctx.system.set_as_lockscreen_app()` (`FUN_42129270`) then switches the running app to that entry:
+`lockscreen.lua` runs and draws, with a `ctx.lock` table (`elapsed_sec`, `flush_once`, `interval_sec`,
+`reason`, `set_interval`). The confirmation, "Set as lock screen" / "Show "%s" when the device locks? Change it
+back in Settings > Off wallpaper." (string 1198/1199, `FUN_4208a094`), is raised by a `lockscreen` table's
+`set_default` (`FUN_42128208`; with `is_default`, `clear_default`, `set_wallpaper`, `is_wallpaper`,
+`clear_wallpaper`, built by `FUN_42128a84`), and the ctx builder `FUN_42131224` gives an app either
+`ctx.lockscreen` or `ctx.lock`, never both. The test app saw `ctx.lock` in both of its entries and no
+`ctx.lockscreen`, so the dialog and the "Ink App lock screen" choice under Settings → Display → Off wallpaper
+(Default / EPUB cover / Custom / Desk) did not appear; the sleep screen stayed the default one.
 
 A dictionary for a test: a `.ifo` (`StarDict's dict ifo file`, `wordcount`, `idxfilesize`, `bookname`,
 `sametypesequence=m`), a `.idx` (word, NUL, big-endian offset and size) and a `.dict.dz` (dictzip: gzip with
@@ -179,8 +195,9 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
-- 26102901: the Ink App lock and "Back to previous spot" are not walked; no test drives a double tap
-  (under icount the gap between two taps is not controllable).
+- 26102901: the Ink App lock screen end to end (what makes the ctx builder give an app `ctx.lockscreen`,
+  so `set_default` can raise its dialog); no test drives a double tap (under icount the gap between two
+  taps is not controllable).
 - Mini apps beyond the code section: the assets / data / fonts sections are read but not yet built, and
   the >512 KB streamed code path is untested (`docs/licorice-apps.md` "Open").
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no

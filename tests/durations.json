@@ -102,6 +102,7 @@
 "tests/test_licorice_apps.py::test_licorice_mini_apps_unlock[v26102901]": 12.4,
 "tests/test_licorice_apps.py::test_licorice_package_installs_through_the_ui[v261013]": 7.4,
 "tests/test_licorice_apps.py::test_licorice_package_installs_through_the_ui[v26102901]": 7.4,
+"tests/test_licorice_features.py::test_licorice_back_to_previous_spot": 8.3,
 "tests/test_licorice_features.py::test_licorice_collections": 9.3,
 "tests/test_licorice_features.py::test_licorice_dictionary_lookup": 14.2,
 "tests/test_licorice_features.py::test_licorice_startup_passcode": 15.0,

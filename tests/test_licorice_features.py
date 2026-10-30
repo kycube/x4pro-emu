@@ -108,6 +108,24 @@ def test_licorice_collections(request, tmp_path, stock_card):
         check(n, tmp_path, 'collection-added', why=' (Collection 1: 1 book, ticked)')
 
 
+def test_licorice_back_to_previous_spot(request, tmp_path, stock_card):
+    """A jump in the reader (Contents → Chapter 3) leaves a "‹ Back to previous spot" pill above the
+    reader menu's toolbar; a tap on it returns to the page the jump left (Chapter 1's first)."""
+    with booted(request, tmp_path, stock_card, dump=DUMP, icount=SKIP_IDLE) as s:
+        n = s.name
+        boot(n)
+        at(n, 80, 80)                                          # Recent ⌄
+        at(n, 355, 145)                                        # All books
+        at(n, 85, 220, quiet=2)                                # the test book: Chapter 1
+        at(n, 240, 400)                                        # the reader menu
+        at(n, 60, 750)                                         # Contents
+        at(n, 100, 285)                                        # Chapter 3
+        at(n, 240, 400)                                        # the menu again
+        check(n, tmp_path, 'back-pill', why=' (Chapter 3, "Back to previous spot" above the toolbar)')
+        at(n, 175, 665)                                        # Back to previous spot
+        check(n, tmp_path, 'back-returned', READER_COLS, ' (Chapter 1 again)')
+
+
 def test_licorice_dictionary_lookup(request, tmp_path, stock_card):
     """A StarDict ZIP in /dictionaries/ (tests/mkstardict.py, wikdict's layout): Current dictionary lists
     it, a tap imports it; with excerpts moved off long press, lookup takes it, and a held word in the
