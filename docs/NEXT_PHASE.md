@@ -26,7 +26,7 @@ the Licorice app sections beyond code (assets / data / fonts). WiFi and BLE traf
 and a project of its own: take it on deliberately.
 
 **Where things stand.** Every firmware runs unpatched: CrossPoint 1.6.0, the stock `xteink_app` 7.2.4, 7.5.4
-and 7.6.8, and Licorice 261013 and 26102901; the device runs **Licorice 26102901 in app0** (261013 in app1). `make test` is 272 tests in
+and 7.6.8, and Licorice 261013 and 26102901; the device runs **Licorice 26102901 in app0** (261013 in app1). `make test` is 275 tests in
 about two minutes on eight workers, with no input retries anywhere. On 7.5.4–7.6.8 Lua apps reach the device as a
 card copy and keep `ctx.state` in the emulator as on the reader; the gamebook was played on the device under 7.6.8.
 The owner's items:

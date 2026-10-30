@@ -137,8 +137,9 @@ New strings point at what else arrived: a startup passcode, collections, diction
 Ink App lock, "Back to previous spot", and translations (about 16,000 new strings, a CA bundle among them).
 The owner closed the by-eye check of 26102901's screens and of the wake to Recent (2026-10-29).
 
-The four headline features, walked by hand in the emulator on a redacted copy of the device's dump
-(2026-10-29; no test pins them yet):
+The four headline features, walked in the emulator on a redacted copy of the device's dump (2026-10-29);
+`tests/test_licorice_features.py` pins the first three screen by screen (`tests/golden/licorice-v26102901-*`),
+each from a cold boot, and `tests/mkstardict.py` writes the test dictionary:
 
 | Feature | Where | What the emulator does |
 |---|---|---|
@@ -178,9 +179,8 @@ package?", "Installed", "Install failed", "Cannot run yet", "Launch failed", "Un
 
 ## Open
 
-- 26102901's new features have no test yet (the walk above was by hand); dictionary lookup by double tap
-  and on a first page opened from its cached image did not answer in the emulator; the Ink App lock and
-  "Back to previous spot" are not walked.
+- 26102901: dictionary lookup by double tap, and on a first page opened from its cached image, did not
+  answer in the emulator; the Ink App lock and "Back to previous spot" are not walked.
 - Mini apps beyond the code section: the assets / data / fonts sections are read but not yet built, and
   the >512 KB streamed code path is untested (`docs/licorice-apps.md` "Open").
 - USB mode beyond the device descriptor (SET_ADDRESS, configuration, the mass-storage traffic): no

@@ -1566,3 +1566,8 @@ a QR code, "Waiting for phone"). `docs/stock-licorice.md` has the table; no test
 On the device: `apps/probe` packed by `tools/xtapp.py --format licorice`, copied to the card in USB mode,
 installed from All files, Ink App unhidden by the ten taps, and API Probe ran (the owner, 26102901). The first
 mini app built here to run on the hardware; nothing was written to the flash.
+
+`tests/test_licorice_features.py` now pins the passcode, collections and dictionary lookup on 26102901 (three
+cold boots, 14 goldens, about 15 s each; `tests/mkstardict.py` writes a deterministic wikdict-style ZIP). Two
+things the first run taught: All files' rows move when the card gains a folder (the test opens the book from
+All books instead), and General shows today's date and time (masked).
