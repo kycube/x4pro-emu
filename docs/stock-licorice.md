@@ -225,6 +225,20 @@ spot" walks (`tests/test_licorice_features.py`, now on 26102901 and 26110701).
 | Wake from deep sleep | Recent, the book on top | the Desktop, the book on it |
 | First boot after the update | — | "Install recommended apps" (needs the network; `/lfs/rec_apps.tried` records it) |
 
+**The clock: Licorice keeps the RTC chip at local time.** The owner's photo of the reader's Desktop (2026-11-10,
+06:33 PM) matched the emulator's in every element but the time: the emulator said 11:32 PM, five hours
+ahead. The firmware read the BM8563 (I2C 0x51) once at boot and showed its 23:35 as 11:35 PM, under its own
+Time zone UTC-05:00; picking UTC-06:00 made it rewrite the chip an hour back (`02 59 38 22 …`) and the
+clock followed, and Daylight saving on wrote it an hour forward and added NVS `fw/dst` = 1. So the chip holds
+UTC + `fw/tz_min` minutes (+60 with `fw/dst`), set from network time on the device, and the clock shows it as
+it is. 261013 and 26102901 do the same (a chip at UTC showed as 11:37 PM under UTC-5). Stock 7.6.8 is the
+other way round: it read 23:36 and showed 18:36, applying `user_config/timeZone` (−5) to a chip at UTC.
+The emulator's BM8563 model started from the host's UTC for every firmware; `x4emu run` now seeds it with
+local time for a Licorice image (`nvsedit.rtc_local_offset`), and the Desktop shows the reader's time.
+`test_licorice_boots_upright_and_opens_the_drawer` checks the chip the firmware reads is at UTC-5. The other
+differences in the photo are the setting, not the emulation: the reader was charging (100 %) with Wi-Fi
+connected, the emulator runs on battery (63 %, `x4emu battery`) with Wi-Fi off (`redact`).
+
 General gained Keyboards, Power button, Start at, Default home and SD card rows; Dictionary lookup gained Manage
 dictionaries, Import guide, Double-tap interval and Touch long press. The app API (`g`'s twenty methods, Lua 5.5)
 is unchanged. New strings point at what else arrived, not walked yet: Bionic reading, folders on the Bookshelf

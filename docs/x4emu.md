@@ -108,7 +108,7 @@ rotated on it.
 
 | Command | Arguments | `--json` object |
 |---|---|---|
-| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count and the RTC starts from a fixed epoch, see below), `--trace-epd F`, `--trace-i2c F`, `--icount N` (QEMU's `-icount` value, e.g. `shift=2,sleep=off`, see below), `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag; 3000 for the bare flag, the bound of its hold) plus, with the flag, `"boot_hold_held_ms"` (guest ms the button was down) and `"boot_hold_preflight"` (bare flag: whether the preflight line was seen; `null` with an explicit MS); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
+| `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count and the RTC starts from a fixed epoch, see below), `--trace-epd F`, `--trace-i2c F`, `--rtc-offset MIN` (minutes east of UTC the RTC chip starts at; default: what the image's firmware keeps there, see below), `--icount N` (QEMU's `-icount` value, e.g. `shift=2,sleep=off`, see below), `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag; 3000 for the bare flag, the bound of its hold) plus, with the flag, `"boot_hold_held_ms"` (guest ms the button was down) and `"boot_hold_preflight"` (bare flag: whether the preflight line was seen; `null` with an explicit MS); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
 | `stop` | — | `{"name", "pid", "stopped", "running": false}` (`stopped: false` when it was not running) |
 | `reset` | — | `{"name", "reset": true}` |
 | `status` | — | `{"name", "pid", "status", "running", "deep_sleep"}`; not running: `{"name", "pid": null, "status": "not running", "running": false, "deep_sleep": false}` |
@@ -165,7 +165,12 @@ Two limits, both deliberate:
   driver=x4pro.pcf8563,property=base-epoch,value=1767225600` (2026-01-01T00:00:00Z; the constant
   `DETERMINISTIC_RTC_EPOCH` in `x4emu/commands.py`), so the BM8563 model starts from that second on
   every run instead of the host's wall clock and a firmware that *draws* a clock paints the same image
-  run to run. Without the flag the RTC follows host time (`base-epoch` 0).
+  run to run. Without the flag the RTC follows host time, in the convention of the image's firmware:
+  stock 7.x and CrossPoint keep the chip at UTC and add their time zone themselves, while **XTOS Licorice
+  keeps it at local time** (UTC + NVS `fw/tz_min` minutes, + 60 with `fw/dst`) and shows the chip as it is.
+  So for a Licorice image `run` seeds `base-epoch` with host time plus that offset
+  (`nvsedit.rtc_local_offset`; `run.json` records it as `rtc_offset_s`); with the chip at UTC its clock ran
+  five hours ahead of the reader's (`docs/stock-licorice.md`). `--rtc-offset MIN` overrides it.
 - **Idle time is real time.** `-icount 3` leaves QEMU's `sleep=on`: while both cores idle in WAITI
   the virtual clock advances with the host's, so how long the host takes leaks into guest time and
   a minute of idle guest time costs a minute. `--icount shift=3,sleep=off` (explicit `--icount` wins

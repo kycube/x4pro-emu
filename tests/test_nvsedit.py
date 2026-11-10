@@ -246,6 +246,32 @@ def test_redact_leaves_no_wifi_secret_in_a_licorice_dump(tmp_path, tag):
         flash.unlink(missing_ok=True)
 
 
+
+@pytest.mark.parametrize('dump, hours', [('flash-2026-11-10-v26110701-a.bin', -5), ('flash-2026-10-29-v26102901-a.bin', -5),
+                                         ('flash-2026-10-13-v261013-a.bin', -5), ('flash-2026-10-12-a.bin', 0)])
+def test_rtc_local_offset(dump, hours):
+    """Where each firmware keeps the RTC chip: Licorice at local time (fw/tz_min -300 on the device: UTC-5),
+    7.x at UTC (it has no fw/tz_min). `x4emu run` seeds the BM8563 with this."""
+    path = os.path.join(ROOT, 'images', 'device', dump)
+    if not os.path.exists(path):
+        pytest.skip(f'{dump} not available')
+    with open(path, 'rb') as f:
+        assert nvsedit.rtc_local_offset(f.read(0x10000)) == hours * 3600
+
+
+def test_rtc_local_offset_adds_daylight_saving(tmp_path):
+    """fw/dst = 1 puts the chip an hour later: toggling Daylight saving on made Licorice rewrite it so."""
+    dump = os.path.join(ROOT, 'images', 'device', 'flash-2026-11-10-v26110701-a.bin')
+    if not os.path.exists(dump):
+        pytest.skip(f'{dump} not available')
+    flash = tmp_path / 'dst.bin'
+    copy_image(dump, flash)
+    try:
+        run(flash, 'set-u8', 'fw', 'dst', 1)
+        assert nvsedit.rtc_local_offset(flash.read_bytes()) == -4 * 3600
+    finally:
+        flash.unlink(missing_ok=True)
+
 def test_set_str_writes_a_valid_entry_and_replaces_the_old_one(scratch):
     """`set-str` writes a str item (type 0x21) with its data in the span entries and both CRCs right;
     a second write of the same key retires the first. Values of hidden keys stay hidden in `list`."""

@@ -38,6 +38,17 @@ BOOT_PREFLIGHT = re.compile(rb'boot-preflight: source=[^\n]*\n')
 DETERMINISTIC_RTC_EPOCH = 1767225600      # 2026-01-01T00:00:00Z
 
 
+def rtc_local_offset(flash):
+    """tools/nvsedit.py's `rtc_local_offset` of the flash image: seconds east of UTC the RTC chip holds."""
+    sys.path.insert(0, os.path.join(root(), 'tools'))
+    try:
+        import nvsedit
+    finally:
+        sys.path.pop(0)
+    with open(flash, 'rb') as f:
+        return nvsedit.rtc_local_offset(f.read(0x10000))
+
+
 def board(q):
     """The board's state object (`state` is a JSON string property of the board)."""
     return json.loads(q.qom_get(BOARD, 'state'))
@@ -179,10 +190,17 @@ def cmd_run(a):
     icount = a.icount or ('3' if a.deterministic else None)
     if icount:
         cmd += ['-icount', icount]
+    rtc_offset = 0
     if a.deterministic:
         # pin the RTC (see DETERMINISTIC_RTC_EPOCH) so the guest's wall clock is the same on every
         # run instead of following the host's
         cmd += ['-global', f'driver=x4pro.pcf8563,property=base-epoch,value={DETERMINISTIC_RTC_EPOCH}']
+    else:
+        # the BM8563 holds what the image's firmware keeps there: UTC for 7.x and CrossPoint, local time
+        # for XTOS Licorice (nvsedit.rtc_local_offset); the model seeds UTC from the host clock otherwise
+        rtc_offset = a.rtc_offset * 60 if a.rtc_offset is not None else rtc_local_offset(flash)
+        if rtc_offset:
+            cmd += ['-global', f'driver=x4pro.pcf8563,property=base-epoch,value={int(time.time()) + rtc_offset}']
     for k, v in (('panel', a.panel), ('fast-epd', 'on' if a.fast_epd else None),
                  ('trace-epd', os.path.abspath(a.trace_epd) if a.trace_epd else None)):
         if v:
@@ -191,7 +209,7 @@ def cmd_run(a):
         cmd += ['-global', f'driver=esp32s3.i2c,property=trace-i2c,value={os.path.abspath(a.trace_i2c)}']
     cmd += a.extra
     with open(os.path.join(d, 'run.json'), 'w') as f:
-        json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd,
+        json.dump({'cmd': cmd, 'started': time.time(), 'flash': flash, 'sd': a.sd, 'rtc_offset_s': rtc_offset,
                    'boot_hold_power_ms': a.boot_hold_power,
                    'boot_hold_until_preflight': until_preflight}, f, indent=1)
     if a.dry_run:

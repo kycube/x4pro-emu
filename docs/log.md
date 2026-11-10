@@ -1629,3 +1629,25 @@ Bookshelf, which is 26102901's Home. Every new golden (`licorice-v26110701-*`, 3
 
 New in the strings and not walked yet: Bionic reading, Bookshelf folders, InkApp tools, a reading-stats upgrade,
 DRM-licensed books, Show images, Fast smoothing. The README picture now shows 26110701.
+
+## 2026-11-10 — Licorice's clock: the RTC chip holds local time, and the emulator seeded it with UTC
+
+The owner reported 26110701's Home as "completely different" from the emulator's. A copy of the device's
+current SD card (read-only, over USB mode, into `images/device/sd-files-2026-11-10`) and an untouched
+scratch copy of the dump both still drew the same Desktop, so it was neither the card mirror (from September)
+nor `redact`. The owner's photo then showed the same layout and text; what differed was the time (06:33 PM on
+the reader, 11:32 PM in the emulator a minute later), which also made the large clock's digits look like
+another typeface, plus the reader's charging battery and connected Wi-Fi (its setting, not emulation).
+
+The cause, traced on the I2C bus: Licorice reads the BM8563 once at boot and shows that time as it is. Its
+Date & time screen says Time zone UTC-05:00 (NVS `fw/tz_min` = -300) and the same 11:36 PM; picking UTC-06:00
+made the firmware write the chip an hour back and the clock follow, and Daylight saving wrote it an hour on
+(`fw/dst` = 1). The chip holds local time. 261013 and 26102901 behave the same; stock 7.6.8 keeps the chip at
+UTC and adds `user_config/timeZone` itself (read 23:36, showed 18:36). The BM8563 model always started at the
+host's UTC, right for 7.x and CrossPoint, five hours wrong for Licorice on the owner's setting.
+
+`x4emu run` now seeds the chip with host time plus `nvsedit.rtc_local_offset` (UTC + `fw/tz_min` + 60 with
+`fw/dst` when the image has `fw/tz_min`, else 0; `--rtc-offset MIN` overrides, `--deterministic` keeps its
+fixed epoch). The redacted 26110701 then showed 06:37 PM four minutes after the photo. The Licorice boot test
+now checks the chip the firmware reads is at UTC-5, and `test_nvsedit.py` pins the offset per dump and with
+DST. 293 tests pass.

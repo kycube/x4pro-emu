@@ -219,7 +219,7 @@ wallpaper, then deep sleep), not the light toggle CrossPoint has.
 
 | Address | Device |
 |---|---|
-| 0x51 | BM8563 RTC, PCF8563 register-compatible (16 registers 0x00..0x0F, BCD) |
+| 0x51 | BM8563 RTC, PCF8563 register-compatible (16 registers 0x00..0x0F, BCD). Seeded from the host clock: UTC for 7.x and CrossPoint, local time for XTOS Licorice, which keeps the chip there (`x4emu run`, `docs/x4emu.md`) |
 | 0x5D | GT911 touch (only while GPIO2 is LOW) |
 | 0x63 | CW2017 fuel gauge: SoC reg 0x04; VCELL regs 0x02/0x03 (14-bit, mV = (raw·5 + 8) >> 4); reports 0 % until an 80-byte BATINFO profile is written to 0x10..0x5F |
 

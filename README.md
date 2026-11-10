@@ -114,7 +114,9 @@ collections, StarDict dictionary lookup and the reader's "Back to previous spot"
 (`tests/test_licorice_features.py`),
 and its phone-pairing screen comes up and waits for a phone, as no Bluetooth traffic is modelled. The build of
 2026-11-07, **26110701** (a Desktop with a clock as Home, InkApp always in the drawer, a DRM device key, folders on
-the Bookshelf), also ran with no model change, and every Licorice test runs on it as well. What changed, what runs
+the Bookshelf), also ran with no model change, and every Licorice test runs on it as well. Licorice keeps the RTC chip at
+local time where 7.x keeps it at UTC; `x4emu run` seeds it each firmware's way, so the emulator's clock
+shows the reader's. What changed, what runs
 and what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook

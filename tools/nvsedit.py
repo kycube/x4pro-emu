@@ -227,6 +227,18 @@ class Nvs:
                   + ('' if old else ' (key not present)'))
         return old
 
+    def get_int(self, nsname, key):
+        """The value of integer item NS/KEY (u8..i64, signed per its type), or None when it is absent."""
+        nsi = next((k for k, v in self.ns.items() if v == nsname), None)
+        for pg in self.pages:
+            for _, e in self.entries(pg):
+                if nsi is not None and e[0] == nsi and e[8:24].split(b'\0')[0] == key.encode():
+                    t = TYPES.get(e[1], '')
+                    n = {'8': 1, '16': 2, '32': 4, '64': 8}.get(t[1:])
+                    if n:
+                        return int.from_bytes(e[24:24 + n], 'little', signed=t[0] == 'i')
+        return None
+
     def keys(self, nsname):
         """The distinct keys written under namespace `nsname` (none when it is absent)."""
         nsi = next((k for k, v in self.ns.items() if v == nsname), None)
@@ -275,6 +287,19 @@ class Nvs:
         for n, pg in enumerate(self.pages):
             out[self.offset + n * PAGE:self.offset + (n + 1) * PAGE] = pg
         open(path, 'wb').write(out)
+
+def rtc_local_offset(img, offset=0x9000, size=0x5000):
+    """Seconds east of UTC at which the image's firmware keeps the BM8563 RTC. XTOS Licorice keeps the chip
+    at local time, UTC + `fw/tz_min` minutes (+60 with `fw/dst`): a change of time zone rewrites the chip by
+    the difference and the clock shows the chip as it is. Stock 7.x keeps the chip at UTC and adds
+    `user_config/timeZone` itself, and CrossPoint reads UTC: 0 for them (no `fw/tz_min`). `x4emu run` seeds
+    the chip with this, so the guest's clock shows what the device's does (docs/stock-licorice.md)."""
+    nvs = Nvs(img, offset, size)
+    tz = nvs.get_int('fw', 'tz_min')
+    if tz is None:
+        return 0
+    return tz * 60 + (3600 if nvs.get_int('fw', 'dst') else 0)
+
 
 def _rebuilt_littlefs(part):
     """The LittleFS in `part` (bytes) rebuilt from scratch with only its RADIO_KEEP files, as a new

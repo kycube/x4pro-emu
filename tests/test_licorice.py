@@ -8,7 +8,10 @@ on the UC8279 its screens came out upside down and 120 rows short. The ≡ tap o
 (Desktop, Bookshelf, All files, Cloud, USB mode, Settings): touch reaches it through the GT911 model
 unchanged. Skips without the dump (stockkit.stock_flash redacts the copy, NVS and the /radio store).
 """
+import datetime
 import json
+import os
+import time
 
 from stockkit import (SKIP_IDLE, WHOLE, booted, golden_check, licorice, settle, state, stock_card,  # noqa: F401
                       tap, wait_for, x4emu)
@@ -17,10 +20,35 @@ HAMBURGER = (94, 33)                 # portrait (446, 94): the ≡ at the right 
 DRAWER_COLS = (60, 720)              # the drawer draws the date at portrait y 730..760
 
 
+def first_rtc_read(trace):
+    """The BM8563 time (seconds since 1970, as written in its registers) of the firmware's first read of
+    registers 02..08 in an I2C trace."""
+    for line in open(trace):
+        ev = json.loads(line)
+        if ev['addr'] == '0x51' and ev['rw'] == 'r' and len(ev['r'].split()) == 7:
+            sec, mi, hr, day, _, mon, yr = (int(b, 16) for b in ev['r'].split())
+            bcd = lambda v: (v >> 4) * 10 + (v & 15)                       # noqa: E731
+            t = datetime.datetime(2000 + bcd(yr), bcd(mon & 0x1f), bcd(day & 0x3f), bcd(hr & 0x3f),
+                                  bcd(mi & 0x7f), bcd(sec & 0x7f), tzinfo=datetime.timezone.utc)
+            return t.timestamp()
+    raise AssertionError('the firmware never read the RTC')
+
+
 def test_licorice_boots_upright_and_opens_the_drawer(request, tmp_path, stock_card, licorice):
-    with booted(request, tmp_path, stock_card, dump=licorice.dump, icount=SKIP_IDLE) as s:
+    """Home in refresh 1 with PSR 3B, and the drawer. The RTC chip holds what Licorice keeps there, the
+    device's local time (UTC + NVS fw/tz_min, here UTC-5): Licorice shows the chip as it is, so a chip at UTC
+    put the emulator's clock five hours ahead of the reader's (nvsedit.rtc_local_offset)."""
+    import nvsedit
+    started = time.time()
+    with booted(request, tmp_path, stock_card, dump=licorice.dump, icount=SKIP_IDLE, trace_i2c=True) as s:
         x4emu(s.name, 'wait-refresh', '--total', 1, '--timeout', 90)
         settle(s.name, 2, 60)
+        with open(licorice.dump, 'rb') as f:
+            offset = nvsedit.rtc_local_offset(f.read(0x10000))
+        assert offset == -5 * 3600, f'the dump keeps UTC{offset / 3600:+g}, UTC-5 expected'
+        chip = first_rtc_read(tmp_path / 'i2c.jsonl')
+        assert abs(chip - (started + offset)) < 300, \
+            f'the RTC chip read {datetime.datetime.fromtimestamp(chip, datetime.timezone.utc):%H:%M} (UTC-5 expected)'
         psr = [json.loads(ln)['data'] for ln in open(tmp_path / 'epd.jsonl') if '"cmd":"0x00"' in ln]
         assert psr and psr[0].split()[0] == '3b', f'Licorice sent PSR {psr} (3b expected: UD 1, SHL 0)'
         home = tmp_path / 'licorice-home.png'

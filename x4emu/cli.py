@@ -44,6 +44,9 @@ def build_parser():
                    help='guest time follows the instruction count (-icount 3 unless --icount says '
                         'otherwise) and the RTC starts from a fixed epoch, so a replayed script lands '
                         'its inputs at the same guest times and sees the same clock run to run')
+    p.add_argument('--rtc-offset', type=int, metavar='MINUTES',
+                   help='minutes east of UTC the RTC chip starts at (default: what the image\'s firmware keeps '
+                        'there: local time from NVS fw/tz_min and fw/dst on XTOS Licorice, UTC otherwise)')
     p.add_argument('--boot-hold-power', nargs='?', type=int, const=c.BOOT_HOLD_AUTO, default=None, metavar='MS',
                    help='start halted, hold the power button from reset, then release: the stock firmware '
                         'boots cold instead of deep-sleeping in its boot-preflight. Without MS the button '
