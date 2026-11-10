@@ -130,9 +130,10 @@ def test_redact_erases_the_credentials_and_turns_wifi_off(scratch):
     assert items(scratch)['net_en'][2][24] == 0
 
 
-def test_redact_blanks_a_littlefs_radio_store_and_nothing_else():
+def test_redact_blanks_an_unreadable_radio_store_and_nothing_else():
     """XTOS Licorice keeps /radio/wifi_known.bin and bt_bonds.bin in a LittleFS on the spiffs partition:
-    `redact` blanks such a partition and leaves an old-style SPIFFS (only /README.md) and the rest alone."""
+    `redact` blanks such a partition when it does not mount as a LittleFS, and leaves an old-style SPIFFS
+    (only /README.md) and the rest alone."""
     def entry(kind, sub, off, size, label):
         return struct.pack('<HBBII16sI', 0x50AA, kind, sub, off, size, label.encode(), 0)
     img = bytearray(b'\xff' * 0x20000)
@@ -141,17 +142,62 @@ def test_redact_blanks_a_littlefs_radio_store_and_nothing_else():
     img[0xE000:0xE000 + 34] = b'\x01\x00\x00\x00littlefs/radio  wifi_known.bin'
     img[0x12000:0x12000 + 17] = b'spiffs /README.md'
     keep = bytes(img[0x12000:0x16000])
-    assert nvsedit.blank_radio_store(img) == ['spiffs']
+    assert nvsedit.clean_radio_store(img) == [('spiffs', None)]           # not a LittleFS: blanked
     assert img[0xE000:0x12000] == b'\xff' * 0x4000 and img[0x12000:0x16000] == keep
-    assert nvsedit.blank_radio_store(img) == []                       # idempotent
-    assert nvsedit.blank_radio_store(bytearray(0x5000)) == []          # a bare NVS: no partition table
+    assert nvsedit.clean_radio_store(img) == []                       # idempotent
+    assert nvsedit.clean_radio_store(bytearray(0x5000)) == []          # a bare NVS: no partition table
 
+
+
+def lfs_files(part):
+    """{path: bytes} of the LittleFS in `part`, read with esp_littlefs's geometry."""
+    import littlefs
+    fs = littlefs.LittleFS(mount=False, block_size=4096, block_count=len(part) // 4096, read_size=128,
+                           prog_size=128, cache_size=512, lookahead_size=128, block_cycles=512)
+    fs.context.buffer[:] = part
+    fs.mount()
+    out = {}
+    for root, _, files in fs.walk('/'):
+        for f in files:
+            path = root.rstrip('/') + '/' + f
+            with fs.open(path, 'rb') as fh:
+                out[path] = fh.read()
+    return out
+
+
+def test_redact_rebuilds_a_littlefs_radio_store_with_only_its_flags():
+    """A readable /radio store is rebuilt, not blanked: the flags in RADIO_KEEP survive (26110701's
+    /rec_apps.tried, without which a redacted copy opens with "Install recommended apps"), every other
+    file is gone, and no byte of a dropped file is left in the partition."""
+    littlefs = pytest.importorskip('littlefs')
+    def entry(kind, sub, off, size, label):
+        return struct.pack('<HBBII16sI', 0x50AA, kind, sub, off, size, label.encode(), 0)
+    img = bytearray(b'\xff' * 0x20000)
+    img[0x8000:0x8000 + 32] = entry(1, 0x82, 0xC000, 0x14000, 'spiffs')
+    fs = littlefs.LittleFS(block_size=4096, block_count=20, read_size=128, prog_size=128, cache_size=512,
+                           lookahead_size=128, block_cycles=512)
+    fs.makedirs('/radio', exist_ok=True)
+    fs.makedirs('/desk', exist_ok=True)
+    secret = b'not-a-real-password-0123456789'
+    for path, data in (('/radio/wifi_known.bin', secret * 4), ('/radio/bt_bonds.bin', secret[::-1]),
+                       ('/desk/excerpt_digest.bin', b'digest' * 20), ('/rec_apps.tried', b'XT Licorice 26110701'),
+                       ('/radio/legacy_wifi.done', b'1\n')):
+        with fs.open(path, 'wb') as fh:
+            fh.write(data)
+    fs.unmount()
+    img[0xC000:0x20000] = fs.context.buffer
+    assert nvsedit.clean_radio_store(img) == [('spiffs', ['/radio/legacy_wifi.done', '/rec_apps.tried'])]
+    assert lfs_files(bytes(img[0xC000:0x20000])) == {'/rec_apps.tried': b'XT Licorice 26110701',
+                                                     '/radio/legacy_wifi.done': b'1\n'}
+    assert secret not in img and secret[::-1] not in img and b'digest' * 20 not in img
+    assert nvsedit.clean_radio_store(img) == []                       # nothing left to clean
 
 LICORICE = {'v261013': os.path.join(ROOT, 'images/device/flash-2026-10-13-v261013-a.bin'),
-            'v26102901': os.path.join(ROOT, 'images/device/flash-2026-10-29-v26102901-a.bin')}
+            'v26102901': os.path.join(ROOT, 'images/device/flash-2026-10-29-v26102901-a.bin'),
+            'v26110701': os.path.join(ROOT, 'images/device/flash-2026-11-10-v26110701-a.bin')}
 SECRETS = {('user_config', 'sta_ssid'), ('user_config', 'sta_pwd'), ('user_config', 'wifi_creds'),
            ('nvs.net80211', 'sta.ssid'), ('nvs.net80211', 'sta.pswd'), ('fw', 'boot_pin_fw'),
-           ('nimble_bond', 'local_irk_1')}
+           ('nimble_bond', 'local_irk_1'), ('drm_os_prod', 'keys')}
 
 
 def secret_values(image):
@@ -175,7 +221,8 @@ def test_redact_leaves_no_wifi_secret_in_a_licorice_dump(tmp_path, tag):
     """On the device's Licorice dumps: after `redact` no credential the dump held is anywhere in the image
     (not in a live key, not in an erased slot NVS left behind, not in the /radio store), and WiFi is off.
     26102901 keeps the network in the WiFi driver's own keys too, a passcode digest and a Bluetooth
-    identity key; before redact knew them, its "redacted" copy held the password three times."""
+    identity key; before redact knew them, its "redacted" copy held the password three times. 26110701
+    adds a DRM device key (drm_os_prod/keys)."""
     if not os.path.exists(LICORICE[tag]):
         pytest.skip(f'the XTOS Licorice {tag} dump is not on this machine')
     flash = tmp_path / 'licorice.bin'
@@ -184,14 +231,17 @@ def test_redact_leaves_no_wifi_secret_in_a_licorice_dump(tmp_path, tag):
         held = secret_values(flash)
         assert {'user_config/sta_pwd', 'user_config/wifi_creds'} <= set(held), sorted(held)
         out = run(flash, 'redact')
-        assert 'spiffs: blanked' in out, out
+        assert 'spiffs: rebuilt with only' in out, out
         data = flash.read_bytes()
-        assert data[0xFD0000:0xFE4000] == b'\xff' * 0x14000, 'the spiffs partition (the /radio store) is not blank'
+        files = lfs_files(data[0xFD0000:0xFE4000])
+        assert set(files) <= set(nvsedit.RADIO_KEEP), f'the /radio store kept {sorted(files)}'
         assert not [k for k in CREDS if k in items(flash)], 'a credential key is still in NVS'
         left = sorted(k for k, v in held.items() if v in data)
         assert not left, f'still in the redacted image (values not shown): {left}'
-        if tag == 'v26102901':
+        if tag != 'v261013':
             assert 'fw/wifi_on = 0' in out and not nvs(flash).keys('nimble_bond'), out
+        if tag == 'v26110701':     # the DRM device key (26110701 on): held before, gone after
+            assert 'drm_os_prod/keys' in held and not nvs(flash).keys('drm_os_prod'), out
     finally:
         flash.unlink(missing_ok=True)
 

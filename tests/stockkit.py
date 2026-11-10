@@ -23,8 +23,25 @@ DUMP = os.path.join(ROOT, 'images', 'device', 'flash-2026-09-06-a.bin')        #
 DUMP_768 = os.path.join(ROOT, 'images', 'device', 'flash-2026-10-12-a.bin')    # stock 7.6.8
 LICORICE_DUMPS = {                                                              # XTOS Licorice, by build
     'v261013': os.path.join(ROOT, 'images', 'device', 'flash-2026-10-13-v261013-a.bin'),
-    'v26102901': os.path.join(ROOT, 'images', 'device', 'flash-2026-10-29-v26102901-a.bin'),   # the device's
+    'v26102901': os.path.join(ROOT, 'images', 'device', 'flash-2026-10-29-v26102901-a.bin'),
+    'v26110701': os.path.join(ROOT, 'images', 'device', 'flash-2026-11-10-v26110701-a.bin'),   # the device's
 }
+# Home's moving parts per build, as golden_check bands: 26110701's Desktop draws a large clock (landscape
+# columns 162..231) and the date (265..287) in the middle of the page
+LICORICE_HOME_BANDS = {'v26110701': ((150, 300),)}
+# The builds whose drawer always lists InkApp: 26110701 dropped the About -> "Model" easter egg and its
+# NVS key fw/lua_nav (the string is gone from the image). The rows below it sit one lower than in a locked drawer
+LICORICE_INK_APP_SHOWN = ('v26110701',)
+
+
+def licorice_drawer_row(label, ink_app=False):
+    """The landscape panel point of a row of Licorice's side drawer (≡), by its label. The InkApp row
+    ("Mini Apps" on 261013) is there once NVS fw/lua_nav != 0 and pushes USB mode and Settings down."""
+    rows = ['Desktop', 'Bookshelf', 'All files', 'Cloud'] + (['InkApp'] if ink_app else []) + ['USB mode', 'Settings']
+    ys = (148, 233, 318, 403, 488, 573, 658) if ink_app else (150, 236, 322, 408, 494, 580)
+    return ys[rows.index(label)], 479 - 330                  # portrait (330, y) as the landscape pixel
+
+
 SD_FILES = os.path.join(ROOT, 'images', 'device', 'sd-files')
 GOLDEN_DIR = os.path.join(ROOT, 'tests', 'golden')
 GOLDEN = os.path.join(GOLDEN_DIR, 'stock-home.png')     # 7.2.4's Home, the empty bookshelf
@@ -77,12 +94,18 @@ def licorice(request):
     """One Licorice build per test run: its dump and its goldens. 261013's keep their names
     (tests/golden/licorice-*.png, the ones the owner judged); a later build's carry its tag
     (licorice-v26102901-*.png), since each redesign moves pixels. Skips a build without its dump."""
-    tag = request.param
+    return licorice_build(request.param)
+
+
+def licorice_build(tag):
+    """The `licorice` fixture's namespace for one build: tag, dump, golden(name), home_bands, drawer(label)."""
     if not os.path.exists(LICORICE_DUMPS[tag]):
         pytest.skip(f'{LICORICE_DUMPS[tag]} not available')
     prefix = 'licorice-' if tag == 'v261013' else f'licorice-{tag}-'
     return SimpleNamespace(tag=tag, dump=LICORICE_DUMPS[tag],
-                           golden=lambda name: prefix + name.removeprefix('licorice-'))
+                           golden=lambda name: prefix + name.removeprefix('licorice-'),
+                           home_bands=LICORICE_HOME_BANDS.get(tag, ()),
+                           drawer=lambda label, ink_app=tag in LICORICE_INK_APP_SHOWN: licorice_drawer_row(label, ink_app))
 
 
 @pytest.fixture(scope='session')

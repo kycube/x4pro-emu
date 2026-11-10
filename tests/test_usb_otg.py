@@ -22,7 +22,6 @@ from stockkit import (DUMP_768, HAMBURGER, SKIP_IDLE, booted, boot_to_home,  # n
 
 OTG = '/machine/x4pro-usb-otg'
 LICORICE_MENU = (94, 33)                    # the ≡ at the right of the Bookshelf tabs (test_licorice.py)
-LICORICE_USB_ROW = parity.landscape(330, 493)    # the drawer's "USB mode" row
 LICORICE_EXIT = parity.landscape(240, 760)       # "Exit" under the picture
 USB_ROW_768 = parity.landscape(329, 330)         # 7.x nav menu: Read, All Files, USB Mode, Cloud, Settings
 
@@ -80,7 +79,7 @@ def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card, licor
         settle(n, 2, 60)
         tap(n, *LICORICE_MENU)
         settle(n, 1.5, 60)
-        tap(n, *LICORICE_USB_ROW)
+        tap(n, *licorice.drawer('USB mode'))
         wait_for(lambda: in_usb_mode(n), 90, 'Licorice to start TinyUSB')
         settle(n, 2, 60)
         shot = tmp_path / 'licorice-usb-mode.png'
@@ -102,7 +101,7 @@ def test_licorice_usb_mode_waits_for_a_host(request, tmp_path, stock_card, licor
         settle(n, 2, 60)
         home = tmp_path / 'licorice-home.png'
         x4emu(n, 'screenshot', home)
-        golden_check(home, licorice.golden('licorice-home.png'), why=' (Exit restarts to the Bookshelf)')
+        golden_check(home, licorice.golden('licorice-home.png'), bands=licorice.home_bands, why=' (Exit restarts to the Bookshelf)')
         assert otg(n)['dp_pullup'] is False
         no_tinyusb_failure(n)
 

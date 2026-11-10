@@ -17,7 +17,7 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
 - **Run the real firmware.** The stock app boots to Home, opens and pages books, runs its menu,
   light panel and settings, fades its front light, and its WiFi start comes up and stops itself
   cleanly. CrossPoint 1.6 boots, reads, sleeps and wakes. The stock's rewrite, XTOS Licorice (builds
-  261013 and 26102901), reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes,
+  261013, 26102901 and 26110701), reads books, drives its front light, toggles Wi-Fi and Bluetooth, sleeps and wakes,
   enters its USB disk mode, and installs and runs mini apps ([docs/stock-licorice.md](docs/stock-licorice.md)).
   A raw 16 MB flash dump runs as it comes off the device; so does a fresh build.
 - **Drive it like a device.** `x4emu tap`, `swipe`, `press`, `hold`, `chord`, `home`, `battery`,
@@ -98,10 +98,10 @@ The models are checked against the desk unit, not just against datasheets:
 
 ## XTOS Licorice, the stock's new generation
 
-![XTOS Licorice 26102901 in the emulator: its Home, the side drawer, a book page and the light panel](docs/images/licorice.png)
+![XTOS Licorice 26110701 in the emulator: its Desktop, the side drawer, a book page and the light panel](docs/images/licorice.png)
 
-<sub>Licorice 26102901, the device's build, as the emulator draws it; the owner compared the emulator's screens
-of both builds with the reader by eye (`tests/golden/licorice-*.png`).</sub>
+<sub>Licorice 26110701, the device's build, as the emulator draws it (`tests/golden/licorice-v26110701-*.png`); the
+owner compared the emulator's screens of 261013 and 26102901 with the reader by eye.</sub>
 
 In October 2026 Xteink replaced the 7.x firmware with a rewrite, **XTOS Licorice**. The emulator runs it
 from the device's own dump: the Bookshelf, the side drawer, the Desktop, All files and the reader, the
@@ -112,8 +112,10 @@ install and run too (below). The build of 2026-10-29, **26102901** (a Recent tab
 mini apps), ran with no model change; every Licorice test runs on both builds. Its new startup passcode,
 collections, StarDict dictionary lookup and the reader's "Back to previous spot" work in the emulator too
 (`tests/test_licorice_features.py`),
-and its phone-pairing screen comes up and waits for a phone, as no Bluetooth traffic is modelled. What changed, what runs and
-what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
+and its phone-pairing screen comes up and waits for a phone, as no Bluetooth traffic is modelled. The build of
+2026-11-07, **26110701** (a Desktop with a clock as Home, InkApp always in the drawer, a DRM device key, folders on
+the Bookshelf), also ran with no model change, and every Licorice test runs on it as well. What changed, what runs
+and what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook
 
@@ -126,10 +128,10 @@ XTOS Licorice installs apps from a signed `.xtapp` package instead. Its format i
 [docs/licorice-apps.md](docs/licorice-apps.md): `tools/xtapp.py pack --format licorice` builds a package
 its installer accepts, and the emulator takes it from All Files to the **"Installed"** confirmation
 and on to running it: Mini Apps lists it, a tap launches it, it takes taps and leaves cleanly
-(`tests/test_licorice_apps.py`, on 261013 and 26102901). The same package installs and runs on the real
+(`tests/test_licorice_apps.py`, on 261013, 26102901 and 26110701). The same package installs and runs on the real
 reader under 26102901 too (the owner, 2026-10-29). Licorice's Lua host exposes more than 7.x's (a
-`ctx.data` file API; TrueType text on 261013 only; not exercised yet), and its Mini Apps entry ("Ink App"
-on 26102901) stays hidden until ten taps on Settings → About → "Model".
+`ctx.data` file API; TrueType text on 261013 only; not exercised yet). Its Mini Apps entry ("Ink App"
+on 26102901) stays hidden until ten taps on Settings → About → "Model"; 26110701 always lists it, as "InkApp".
 
 **The Keeper of Gull Rock** is a choose-your-own-adventure written and drawn for this project: 13
 passages, five endings, and eight 1-bit pixel-art plates drawn in code. `tools/gamebook.py` builds it

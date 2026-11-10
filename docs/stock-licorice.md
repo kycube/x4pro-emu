@@ -1,4 +1,4 @@
-# XTOS Licorice (stock 261013, 26102901): the stock firmware's new generation
+# XTOS Licorice (stock 261013, 26102901, 26110701): the stock firmware's new generation
 
 On 2026-10-13 the owner took the OTA update offered as "v261013" (released the evening before). It is not
 a 7.x point release: the image calls itself **XTOS Licorice 261013** and was built from a different
@@ -167,6 +167,68 @@ back in Settings > Off wallpaper." (string 1198/1199, `FUN_4208a094`), is raised
 A dictionary for a test: a `.ifo` (`StarDict's dict ifo file`, `wordcount`, `idxfilesize`, `bookname`,
 `sametypesequence=m`), a `.idx` (word, NUL, big-endian offset and size) and a `.dict.dz` (dictzip: gzip with
 an `RA` chunk table) zipped flat; the firmware also takes a plain `.dict` and a `.syn`.
+
+## 26110701 (2026-11-10): the third build
+
+The owner took the OTA released 2026-11-09 (the build is dated Nov 7; its identity string says
+`XTOS Licorice 26110701`). Again a Licorice build: same project and IDF, a new commit.
+
+| | 26102901 (app0, kept) | **26110701** (app1, booting) |
+|---|---|---|
+| `esp_app_desc` | `dragon_example` / `87a73a0e-dirty` | `dragon_example` / `0262eae0` (no `-dirty`) |
+| built, IDF | Oct 29 2026 12:53:50, v6.1-dirty | Nov 7 2026 17:15:09, v6.1-dirty |
+| size | 6,446,912 bytes | 6,137,296 bytes |
+| identity strings | `XTOS Licorice 26102901` | `XTOS Licorice 26110701` (`stockver.release_tag` → `v26110701`) |
+
+`images/device/stock-app1-v26110701.bin` (sha256 6ed15d47…, ELF sha256 27386d14…). Backup
+`images/device/flash-2026-11-10-v26110701-{a,b}.bin` (sha256 6c7bf46d…, both reads equal).
+
+**On the device.** The OTA wrote the other slot: **app1 = 26110701**, otadata entry 1 seq 6 → app1 boots;
+app0 still holds 26102901 byte for byte, 261013 is now only in the backups. Below 0x10000 only NVS and
+otadata's second sector changed (bootloader and partition table unchanged); the coredump partition is still
+blank. The efuses were not re-read yet: after the backup's reset the reader deep-slept and its port went away.
+
+**New secrets, now redacted.** 26110701 brings a DRM system: a device key it generates and registers with
+Xteink's servers (`/drm/keys/candidate`, `/drm/keys/confirm`, `/drm/identity/session`) is kept in NVS
+`drm_os_prod/keys` (473 hex characters on the device; `drm_os_dev`, `drm_cn_prod` and `drm_cn_dev` are the
+other environments), licences for DRM books under `/sdcard/XTData/drm/`. `tools/nvsedit.py redact` erases every
+key of the four namespaces, `list` hides their values, and `tests/test_nvsedit.py` checks the key is gone from a
+redacted copy of the dump. The update dropped the WiFi driver's own `nvs.net80211` copy of the network; the
+`user_config` keys, the passcode digest and the Bluetooth key are still there (redacted as before). New
+non-secret keys: `fw/home` (`sys.desk`), `fw/boot_ver`, `fw/epd_chip`.
+
+**`redact` keeps the store's flags now.** The LittleFS on the `spiffs` partition gained `/rec_apps.tried` (the
+build tag, written once the first boot after an update has offered to "Install recommended apps"),
+`/radio/legacy_wifi.done` and `/desk/excerpt_digest.bin`. Blanking the partition, as `redact` did, threw the
+flag away, so every boot of a redacted copy opened with that dialog ("Couldn't connect; recommended apps were not
+installed", OK). `redact` now formats a fresh LittleFS of the same geometry and copies in only
+`/rec_apps.tried`, `/rec_apps.done` and `/radio/legacy_wifi.done` (`nvsedit.RADIO_KEEP`), so no byte of a
+dropped file (the known networks, the bonds, the excerpt digest) survives; without the `littlefs-python` package
+(`make setup` installs it) it blanks the partition as before. A redacted 26110701 boots to its Desktop in
+refresh 1.
+
+**In the emulator: it runs as 26102901 does.** No model change: PSR `3B`, `epd_unknown_cmds` 0, only the IO_MUX
+lines in `iolog_hot`, nothing on the console. Every Licorice test runs on it (`stockkit.LICORICE_DUMPS`, goldens
+`tests/golden/licorice-v26110701-*.png`), and so do the passcode, collections, dictionary and "Back to previous
+spot" walks (`tests/test_licorice_features.py`, now on 26102901 and 26110701).
+
+| | 26102901 | 26110701 |
+|---|---|---|
+| Home | a **Recent ⌄** tab | the **Desktop**: a large clock and the date, "No reading yet" / the last books, an InkApp card ("Explore more in XTEINK App"); the Recent ⌄ / Stats page is the drawer's **Bookshelf**; Settings → General → Default home chooses (NVS `fw/home`) |
+| Drawer | Desktop, Bookshelf, All files, Cloud, USB mode, Settings (+ Ink App once unlocked) | **InkApp** always listed, between Cloud and USB mode; USB mode and Settings one row lower |
+| Mini apps | "Ink App", hidden until ten taps on About → "Model" (`fw/lua_nav`) | **"InkApp"**, always shown: no easter egg, and no `lua_nav` string in the image |
+| Installing a package | OK → "Installed" | OK → an "Install InkApp" pill → "Installed / API Probe" (two refreshes) |
+| App key, DEK1 mark | DROM 0x3c3a4918, RAM 0x3fca26d4 | the same key at DROM **0x3c3d8140**, the mark at RAM **0x3fca3074** |
+| Reader footer | the book's title | the chapter |
+| Wake from deep sleep | Recent, the book on top | the Desktop, the book on it |
+| First boot after the update | — | "Install recommended apps" (needs the network; `/lfs/rec_apps.tried` records it) |
+
+General gained Keyboards, Power button, Start at, Default home and SD card rows; Dictionary lookup gained Manage
+dictionaries, Import guide, Double-tap interval and Touch long press. The app API (`g`'s twenty methods, Lua 5.5)
+is unchanged. New strings point at what else arrived, not walked yet: Bionic reading, folders on the Bookshelf
+(New / Rename / Move to folder), InkApp "tools" (recommended tools, "This tool is not supported on this
+device"), a reading-stats upgrade, DRM-licensed books ("Authorization unavailable. Connect and sync, then
+retry."), Show images and Fast smoothing.
 
 ## What the stock tools make of it
 

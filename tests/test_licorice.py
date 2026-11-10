@@ -25,12 +25,14 @@ def test_licorice_boots_upright_and_opens_the_drawer(request, tmp_path, stock_ca
         assert psr and psr[0].split()[0] == '3b', f'Licorice sent PSR {psr} (3b expected: UD 1, SHL 0)'
         home = tmp_path / 'licorice-home.png'
         x4emu(s.name, 'screenshot', home)
-        golden_check(home, licorice.golden('licorice-home.png'), why=' (Bookshelf, "Open a book to start")')
+        golden_check(home, licorice.golden('licorice-home.png'), bands=licorice.home_bands,
+                     why=' (Bookshelf, "Open a book to start")')
         tap(s.name, *HAMBURGER)
         settle(s.name, 1.5, 60)
         drawer = tmp_path / 'licorice-drawer.png'
         x4emu(s.name, 'screenshot', drawer)
-        golden_check(drawer, licorice.golden('licorice-drawer.png'), cols=DRAWER_COLS, why=' (the side drawer)')
+        golden_check(drawer, licorice.golden('licorice-drawer.png'), cols=DRAWER_COLS, bands=licorice.home_bands,
+                     why=' (the side drawer)')
 
 
 def P(px, py):
@@ -58,7 +60,7 @@ def test_licorice_walk(request, tmp_path, stock_card, licorice):
         x4emu(n, 'wait-refresh', '--total', 1, '--timeout', 90)
         settle(n, 2, 60)
         tap(n, *HAMBURGER)
-        tap(n, *P(330, 320))                                   # All files
+        tap(n, *licorice.drawer('All files'))
         settle(n, 1.5, 60)
         golden_check(shot(n, tmp_path, 'files'), licorice.golden('licorice-files.png'), why=' (All files at the card root)')
         tap(n, *P(150, 245))                                   # Test Book.epub (the second row)
@@ -94,7 +96,7 @@ def test_licorice_walk(request, tmp_path, stock_card, licorice):
         x4emu(n, 'home', '--quiet', 1, '--wait', 20)           # the Home pad: back to the Bookshelf
         settle(n, 1.5, 60)
         tap(n, *HAMBURGER)
-        tap(n, *P(330, 580))                                   # Settings
+        tap(n, *licorice.drawer('Settings'))
         settle(n, 1.5, 60)
         golden_check(shot(n, tmp_path, 'settings'), licorice.golden('licorice-settings.png'), why=' (Settings)')
 
@@ -114,6 +116,6 @@ def test_licorice_walk(request, tmp_path, stock_card, licorice):
         if licorice.tag == 'v261013':
             golden_check(shot(n, tmp_path, 'woken'), licorice.golden('licorice-reader.png'), cols=READER_COLS,
                          why=' (a wake resumes the last book, page 1, not the screen it slept on)')
-        else:   # 26102901 wakes to Home's Recent tab, the book on top (docs/stock-licorice.md)
-            golden_check(shot(n, tmp_path, 'woken'), licorice.golden('licorice-woken.png'),
-                         why=' (a wake shows Recent with the book just read)')
+        else:   # 26102901 wakes to Home's Recent tab, 26110701 to its Desktop, the book on top (docs/stock-licorice.md)
+            golden_check(shot(n, tmp_path, 'woken'), licorice.golden('licorice-woken.png'), bands=licorice.home_bands,
+                         why=' (a wake shows Home with the book just read: Recent, or the Desktop on 26110701)')

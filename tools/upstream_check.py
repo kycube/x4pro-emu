@@ -61,8 +61,8 @@ CRASH_MARKERS = (
 MANUAL_STOCK = ('Stock firmware (xteink_app, XTOS Licorice): not watched. Its OTA packages are encrypted and '
                 'arrive only through the device; check the device\'s own update prompt. A new version needs a '
                 'backup (tools/device.py backup), then a re-baseline: a 7.x one as the 7.6.8 entry of '
-                'docs/log.md describes, a Licorice build as docs/stock-licorice.md "26102901" does (its NVS '
-                'first: redact must know every key that holds a secret).')
+                'docs/log.md describes, a Licorice build as docs/stock-licorice.md "26102901" and "26110701" do '
+                '(its NVS first: redact must know every key that holds a secret).')
 
 
 class NetError(Exception):

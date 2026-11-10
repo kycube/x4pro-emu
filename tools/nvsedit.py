@@ -44,8 +44,11 @@ the MAC (docs/device/partitions.md).
 XTOS Licorice (stock 261013, 2026-10-13) keeps known WiFi networks and Bluetooth bonds outside NVS too:
 `/radio/wifi_known.bin` and `bt_bonds.bin` in a LittleFS on the `spiffs` data partition (every earlier
 dump has a SPIFFS there holding only `/README.md`). `redact` reads the partition table at 0x8000 and
-blanks (0xff) every spiffs/littlefs partition that holds either file; without that, a "redacted"
-Licorice image would still carry the WiFi password.
+rebuilds every spiffs/littlefs partition that holds one of them as a fresh LittleFS with only the
+store's harmless flags (RADIO_KEEP: 26110701's `/rec_apps.tried`, without which every boot of a
+redacted copy opens with "Install recommended apps"), or blanks it (0xff) when the `littlefs-python`
+package is missing or the partition does not mount. Without that, a "redacted" Licorice image would
+still carry the WiFi password.
 
 XTOS Licorice 26102901 (2026-10-29) adds more: the WiFi driver persists the network itself
 (`nvs.net80211/sta.ssid`, `sta.pswd`, `sta.apinfo`), the startup passcode leaves a digest in
@@ -54,6 +57,12 @@ boot. `redact` erases those keys and the whole `nimble_bond` namespace, sets `fw
 key exists, and blanks the bytes of every entry NVS had already marked erased (older copies of a value
 stay in the page until it is garbage-collected: after the old redact a 26102901 dump still held the
 password three times).
+
+XTOS Licorice 26110701 (2026-11-07) adds a DRM system: a device key it generates and registers with
+Xteink's servers (`/drm/keys/candidate`, `/drm/keys/confirm`) lives in NVS `drm_os_prod/keys` (473 hex
+characters on the device; `drm_os_dev`, `drm_cn_prod` and `drm_cn_dev` are the other environments), and
+the /radio store gains `ble_keys.bin`. `redact` erases every key in the four DRM namespaces and `list`
+shows none of their values. (The OTA dropped the WiFi driver's `nvs.net80211` copy of the network.)
 """
 import argparse, binascii, struct, sys
 
@@ -66,8 +75,12 @@ ENTRIES = 126                       # data entries per page (4096 - 64 header/bi
 REDACT = (('user_config', 'sta_ssid'), ('user_config', 'sta_pwd'), ('user_config', 'wifi_creds'),   # 7.x on
           ('nvs.net80211', 'sta.ssid'), ('nvs.net80211', 'sta.pswd'), ('nvs.net80211', 'sta.apinfo'),
           ('nvs.net80211', 'sta.sae_h2e_id'), ('fw', 'boot_pin'), ('fw', 'boot_pin_fw'))  # Licorice 26102901
-REDACT_NAMESPACES = ('nimble_bond',)                # every key: Bluetooth identity and bond keys
-RADIO_FILES = (b'wifi_known.bin', b'bt_bonds.bin')  # XTOS Licorice's /radio store (LittleFS, spiffs partition)
+REDACT_NAMESPACES = ('nimble_bond',                 # every key: Bluetooth identity and bond keys
+                     'drm_os_prod', 'drm_os_dev', 'drm_cn_prod', 'drm_cn_dev')   # Licorice 26110701: the DRM device key
+HIDE_NAMESPACES = REDACT_NAMESPACES                 # `list` shows none of their values
+RADIO_FILES = (b'wifi_known.bin', b'bt_bonds.bin', b'ble_keys.bin')  # Licorice's /radio store (LittleFS, spiffs partition)
+RADIO_KEEP = ('/rec_apps.tried', '/rec_apps.done', '/radio/legacy_wifi.done')  # flags a redacted store keeps
+LFS_BLOCK = 4096
 
 def crc32_le(data, init=0xFFFFFFFF):
     """ESP-IDF's esp_crc32_le(init, data): zlib's CRC-32 continued from `init`."""
@@ -112,6 +125,7 @@ class Nvs:
             print(f'page {n}: state 0x{self.state(pg):08x} seq {self.seq(pg)}')
             for i, e in self.entries(pg):
                 key = e[8:24].split(b'\0')[0].decode(errors='replace')
+                hide = any(h in key.lower() for h in HIDE) or self.ns.get(e[0]) in HIDE_NAMESPACES
                 if e[0] == 0:
                     print(f'  [{i:3}] namespace {e[24]} = {key}'); continue
                 t = TYPES.get(e[1], hex(e[1]))
@@ -120,9 +134,9 @@ class Nvs:
                 elif t in ('u32', 'i32'): v = struct.unpack('<I', e[24:28])[0]
                 elif t == 'str':
                     n_ = struct.unpack('<H', e[24:26])[0]; raw = pg[64 + 32 * (i + 1):64 + 32 * (i + 1) + n_].split(b'\0')[0]
-                    v = f'<{len(raw)} chars hidden>' if any(h in key.lower() for h in HIDE) else raw.decode(errors='replace')
+                    v = f'<{len(raw)} chars hidden>' if hide else raw.decode(errors='replace')
                 else: v = f'<{t} {struct.unpack("<H", e[24:26])[0]} bytes>'
-                if any(h in key.lower() for h in HIDE) and t not in ('str',): v = '<hidden>'
+                if hide and t not in ('str',): v = '<hidden>'
                 print(f'  [{i:3}] {self.ns.get(e[0], "ns%d" % e[0])}/{key} ({t}) = {v}')
 
     # --- writing -------------------------------------------------------------------------------
@@ -247,12 +261,14 @@ class Nvs:
             self.set_u8('fw', 'wifi_on', 0)
         scrubbed = self.scrub_erased()
         self.img = bytearray(self.img)
-        blanked = blank_radio_store(self.img)
-        for label in blanked:
-            print(f'{label}: blanked (it held the /radio store: known WiFi networks, Bluetooth bonds)')
+        blanked = clean_radio_store(self.img)
+        for label, kept in blanked:
+            print(f'{label}: ' + ('blanked' if kept is None else
+                                  f'rebuilt with only {", ".join(kept) or "no files"}')
+                  + ' (it held the /radio store: known WiFi networks, Bluetooth bonds)')
         print(f'redacted: {total} credential entr{"y" if total == 1 else "ies"} erased, user_config/net_en = 0, '
               f'{scrubbed} erased slot{"" if scrubbed == 1 else "s"} blanked'
-              + (f', {len(blanked)} radio store{"" if len(blanked) == 1 else "s"} blanked' if blanked else ''))
+              + (f', {len(blanked)} radio store{"" if len(blanked) == 1 else "s"} cleaned' if blanked else ''))
 
     def save(self, path):
         out = bytearray(self.img)
@@ -260,22 +276,62 @@ class Nvs:
             out[self.offset + n * PAGE:self.offset + (n + 1) * PAGE] = pg
         open(path, 'wb').write(out)
 
-def blank_radio_store(img):
-    """Blank (0xff), in the bytearray `img`, every spiffs/littlefs data partition holding one of
-    RADIO_FILES; returns their labels. An image without a partition table (a bare NVS) has none."""
+def _rebuilt_littlefs(part):
+    """The LittleFS in `part` (bytes) rebuilt from scratch with only its RADIO_KEEP files, as a new
+    bytes of the same size, or None when it cannot be read (the `littlefs-python` package missing, or
+    not a LittleFS). A fresh format, not a delete: littlefs leaves a deleted file's blocks behind."""
+    try:
+        import littlefs
+    except ImportError:
+        return None
+    geometry = dict(block_size=LFS_BLOCK, block_count=len(part) // LFS_BLOCK, read_size=128, prog_size=128,
+                    cache_size=512, lookahead_size=128, block_cycles=512)   # esp_littlefs's defaults
+    try:
+        src = littlefs.LittleFS(mount=False, **geometry)
+        src.context.buffer[:] = part
+        src.mount()
+        st = src.fs_stat()
+        kept = {}
+        for path in RADIO_KEEP:
+            try:
+                with src.open(path, 'rb') as fh:
+                    kept[path] = fh.read()
+            except FileNotFoundError:
+                pass
+    except (littlefs.errors.LittleFSError, OSError):
+        return None
+    dst = littlefs.LittleFS(mount=False, name_max=st.name_max, file_max=st.file_max, attr_max=st.attr_max,
+                            disk_version=st.disk_version, **geometry)
+    dst.format()
+    dst.mount()
+    for path, data in kept.items():
+        if '/' in path.strip('/'):
+            dst.makedirs(path.rsplit('/', 1)[0], exist_ok=True)
+        with dst.open(path, 'wb') as fh:
+            fh.write(data)
+    dst.unmount()
+    return bytes(dst.context.buffer), sorted(kept)
+
+
+def clean_radio_store(img):
+    """In the bytearray `img`, every spiffs/littlefs data partition holding one of RADIO_FILES is
+    rebuilt as a fresh LittleFS with only its RADIO_KEEP files (`_rebuilt_littlefs`), or blanked
+    (0xff) where it cannot be read. Returns [(label, kept paths or None when blanked)]. An image without
+    a partition table (a bare NVS) has none."""
     from device import parse_partition_table, PART_TABLE_OFF, PART_TABLE_SIZE
     try:
         parts = parse_partition_table(bytes(img[PART_TABLE_OFF:PART_TABLE_OFF + PART_TABLE_SIZE]))
     except ValueError:
         return []
-    blanked = []
+    done = []
     for p in parts:
         lo, hi = p['offset'], p['offset'] + p['size']
         if p['kind'] in ('data/spiffs', 'data/littlefs') and hi <= len(img) \
                 and any(f in img[lo:hi] for f in RADIO_FILES):
-            img[lo:hi] = b'\xff' * p['size']
-            blanked.append(p['label'])
-    return blanked
+            rebuilt = _rebuilt_littlefs(bytes(img[lo:hi]))
+            img[lo:hi] = rebuilt[0] if rebuilt else b'\xff' * p['size']
+            done.append((p['label'], rebuilt[1] if rebuilt else None))
+    return done
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

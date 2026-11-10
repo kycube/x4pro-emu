@@ -1588,3 +1588,42 @@ screen" dialog comes from a `lockscreen.set_default` binding, string index 1198 
 `FUN_4208a094`; the ctx builder `FUN_42131224` gives `ctx.lockscreen` only when host flag +0x149 is clear, and
 the test app never got it, so the dialog and the Off-wallpaper choice stayed out of reach. A Ghidra project for
 26102901 now exists (`ghidra_stock.py --image images/device/stock-app0-v26102901.bin analyze`, 0.7 min).
+
+## 2026-11-10 — XTOS Licorice 26110701: no model change; redact learns the DRM key and keeps the store's flags
+
+The owner took the OTA released 2026-11-09. The build calls itself `XTOS Licorice 26110701` (built Nov 7,
+`esp_app_desc` `0262eae0`, no `-dirty` this time). A double backup (`flash-2026-11-10-v26110701-{a,b}.bin`,
+sha256 6c7bf46d…, equal; the backup was first tagged with the number as given, 261100701, and renamed to the
+image's own tag). The OTA wrote **app1** (otadata entry 1, seq 6, boots); app0 keeps 26102901 byte for byte. Below
+0x10000 only NVS and otadata's second sector changed. After the backup's reset the reader deep-slept and its
+port disappeared, so the efuses are not re-read yet.
+
+**NVS first.** Names only, compared with 26102901's: the WiFi driver's `nvs.net80211` copy of the network is
+gone; new are `fw/home` (`sys.desk`), `fw/boot_ver`, `fw/epd_chip` and **`drm_os_prod/keys`**, a 473-character
+hex string. The image's strings explain it: a DRM system that generates a device key and registers it with
+Xteink (`/drm/keys/candidate`, `/drm/keys/confirm`, `/drm/identity/session`), with `drm_os_dev`, `drm_cn_prod` and
+`drm_cn_dev` for the other environments. `redact` now erases every key of the four namespaces and `list` hides
+their values; the Licorice redact test checks the key is gone on the new dump. The value was never printed.
+
+**The first boot of a redacted copy stopped at "Install recommended apps"** ("Couldn't connect; recommended apps
+were not installed", OK). The firmware records that offer in `/lfs/rec_apps.tried` (the build tag), in the same
+LittleFS as the `/radio` store, and `redact` blanked the whole partition. It now formats a fresh LittleFS of the
+partition's geometry (read from its superblock; esp_littlefs's 128-byte read/prog, 512-byte cache) and copies in
+only `/rec_apps.tried`, `/rec_apps.done` and `/radio/legacy_wifi.done`: a fresh format rather than deletes, since
+littlefs leaves a deleted file's blocks in place. The known networks, the Bluetooth bonds and
+`/desk/excerpt_digest.bin` go. This uses `littlefs-python` (added to `make setup`); without it `redact` blanks as
+before. A redacted 26110701 boots to its Desktop in refresh 1.
+
+**In the emulator: no model change.** PSR 3B, no unknown panel commands, only the IO_MUX lines in `iolog_hot`.
+What the tests needed was the firmware's own changes: Home is a **Desktop** with a large clock and the date (masked
+as bands, `stockkit.LICORICE_HOME_BANDS`, in Home, the drawer over it and the wake); the drawer always lists
+**InkApp** (`lua_nav` is gone from the image, so the unlock test skips this build), which moves USB mode and
+Settings one row down (`stockkit.licorice_drawer_row`; the first run's "Settings" golden showed USB mode, caught
+by looking at every new golden before trusting it); installing a package passes through an "Install InkApp" pill
+before "Installed"; the app key moved to DROM 0x3c3d8140 (the same 32 bytes, found by searching the image) and the
+DEK1 mark to RAM 0x3fca3074 (found by searching DRAM after an install). The feature walks (passcode, collections,
+dictionary, Back to previous spot) run on both 26102901 and 26110701 now; on 26110701 they start from the drawer's
+Bookshelf, which is 26102901's Home. Every new golden (`licorice-v26110701-*`, 32 of them) was looked at.
+
+New in the strings and not walked yet: Bionic reading, Bookshelf folders, InkApp tools, a reading-stats upgrade,
+DRM-licensed books, Show images, Fast smoothing. The README picture now shows 26110701.

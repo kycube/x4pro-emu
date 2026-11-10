@@ -41,8 +41,8 @@ import time
 import pytest
 
 pytest.importorskip('cryptography')
-from stockkit import (FAT_OFFSET, SD_FILES, SKIP_IDLE, WHOLE, booted,  # noqa: F401,E402
-                      golden_check, licorice, settle, tap, tool, x4emu)
+from stockkit import (FAT_OFFSET, LICORICE_INK_APP_SHOWN, SD_FILES, SKIP_IDLE, WHOLE, booted,  # noqa: F401,E402
+                      golden_check, licorice, settle, state, tap, tool, x4emu)
 from conftest import PY, ROOT, TOOLS, emu_log                                  # noqa: E402
 
 import xtapp                                                                    # noqa: E402
@@ -56,7 +56,9 @@ OK_BUTTON = (430, 400)               # the "OK" of the Install dialog
 DIALOG_COLS = (360, 560)             # the dialog pill (no clock/file-size text in this band)
 TOAST_COLS = (360, 500)              # the "Installed" toast pill
 DEK_CACHE = {'v261013': 0x3fc9e0f8,  # FUN_4210a908 writes "DEK1"+app_id here on a valid unwrap
-             'v26102901': 0x3fca26d4}    # found by searching DRAM after an install
+             'v26102901': 0x3fca26d4,    # found by searching DRAM after an install
+             'v26110701': 0x3fca3074}
+INSTALL_REFRESHES = {'v26110701': 2}  # OK -> "Installed": 26110701 first shows an "Install InkApp" pill
 
 SETTINGS = (580, 149)                # the drawer's "Settings" (portrait 330, 580)
 ABOUT = (735, 300)                   # Settings -> About, the seventh row
@@ -116,7 +118,10 @@ def _install_through_the_ui(s, lic):
     tap(s.name, *PACKAGE_ROW); settle(s.name, 1.2, 60)
     golden_check(_shot(s.name, s.tmp, 'dialog'), lic.golden('licorice-app-install-dialog.png'), cols=DIALOG_COLS,
                  why=' (the "Install this package?" dialog for our .xtapp)')
-    tap(s.name, *OK_BUTTON); settle(s.name, 2, 60)
+    before = state(s.name)['refresh_count']
+    tap(s.name, *OK_BUTTON)
+    x4emu(s.name, 'wait-refresh', '--total', before + INSTALL_REFRESHES.get(lic.tag, 1), '--timeout', 60)
+    settle(s.name, 2, 60)
     golden_check(_shot(s.name, s.tmp, 'installed'), lic.golden('licorice-app-installed.png'), cols=TOAST_COLS,
                  why=' (the "Installed" toast: the package was accepted)')
     # the firmware caches a successful DEK unwrap as "DEK1" + the app_id; empty means the wrap was
@@ -156,7 +161,7 @@ def _prepare_unlocked(flash, sd):
     """`_prepare` plus NVS fw/lua_nav = 1, what the About easter egg writes (test_licorice_mini_apps_
     unlock proves that), so the launch test reaches Mini Apps without ten timed taps."""
     _prepare(flash, sd)
-    tool('nvsedit.py', flash, 'set-u8', 'fw', 'lua_nav', 1)
+    tool('nvsedit.py', flash, 'set-u8', 'fw', 'lua_nav', 1)      # 26110701 no longer reads it: harmless there
 
 
 def test_licorice_mini_apps_unlock(request, tmp_path, licorice_card, licorice):
@@ -166,6 +171,9 @@ def test_licorice_mini_apps_unlock(request, tmp_path, licorice_card, licorice):
     guest time. The burst starts right after the status bar's minute repaint has finished: a tap that
     lands while the panel repaints is read and dropped, and that repaint's place relative to the burst
     would otherwise follow the host's load. One burst, no retry. The drawer then lists Mini Apps."""
+    if licorice.tag in LICORICE_INK_APP_SHOWN:
+        pytest.skip(f'{licorice.tag} lists InkApp with no easter egg (no lua_nav in the image; test_licorice_walk\'s '
+                    'drawer golden shows it)')
     with booted(request, tmp_path, licorice_card, dump=licorice.dump, icount=SKIP_IDLE) as s:
         n = s.name
         x4emu(n, 'wait-refresh', '--total', 1, '--timeout', 90)
@@ -194,6 +202,7 @@ def test_licorice_mini_apps_unlock(request, tmp_path, licorice_card, licorice):
         x4emu(n, 'home', '--quiet', 1, '--wait', 20); settle(n, 1, 60)     # Settings -> Bookshelf
         tap(n, *HAMBURGER); settle(n, 1.2, 60)
         golden_check(_shot(n, tmp_path, 'drawer'), licorice.golden('licorice-app-drawer.png'), cols=DRAWER_COLS,
+                     bands=licorice.home_bands,
                      why=' (the drawer with "Mini Apps", once the easter egg set fw/lua_nav)')
 
 

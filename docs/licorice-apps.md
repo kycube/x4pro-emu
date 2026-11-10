@@ -1,6 +1,6 @@
 # Mini apps on XTOS Licorice: the package format, the launch, the Mini Apps entry
 
-XTOS Licorice (261013, and 26102901, the device's since 2026-10-29; `docs/stock-licorice.md`) replaced the
+XTOS Licorice (261013, 26102901, and 26110701, the device's since 2026-11-10; `docs/stock-licorice.md`) replaced the
 7.x "put a folder in `/sdcard/XTApps`" scheme with an **installer**: you drop a `.xtapp` package in
 All Files, tap it, and confirm *Install this package?*. The old folder form is ignored, and `tools/xtapp.py
 install` (the classic form) produces *Install failed*. This page is the reverse-engineering of the
@@ -16,6 +16,11 @@ All addresses are the v261013 image (`images/device/stock-app1-v261013.bin`), re
 UI calls the page **"Ink App"** ("Install Ink App", "Leave this Ink App?"); the About → "Model" unlock is
 unchanged; `g` lost its three `ttf_` functions. `tests/test_licorice_apps.py` runs on both builds. The
 function addresses on this page are 261013's and have not been re-located.
+
+**26110701 takes them too.** The same key at DROM `0x3c3d8140`, the DEK1 mark at RAM `0x3fca3074`, the same API.
+The page is **"InkApp"** and the drawer always lists it: the About → "Model" easter egg and its NVS key
+`fw/lua_nav` are gone (no `lua_nav` string in the image), so `test_licorice_mini_apps_unlock` skips it. The
+install shows an "Install InkApp" pill before "Installed / API Probe".
 Several functions on the launch path were never made functions by Ghidra's analysis (the open at
 0x4210944c, the Lua searcher at 0x420c7eb8, the drawer dispatch at 0x420e78e4); they were read as
 raw disassembly (`tools/appdis.py`), where the shipped Xtensa SLEIGH also stops at the ESP32-S3's
@@ -120,7 +125,7 @@ decoder: exactly 2n hex digits then the NUL):
 The scheme (fully reversed from `FUN_4210a908`):
 
 1. **ECDH.** The device scalar `d` is a **fixed 32-byte constant at DROM `0x3c32c674`** (26102901:
-   `0x3c3a4918`; loaded by `FUN_421d7118`, read big-endian — mbedtls convention, confirmed by a live
+   `0x3c3a4918`; 26110701: `0x3c3d8140`; loaded by `FUN_421d7118`, read big-endian — mbedtls convention, confirmed by a live
    install). The key id is the first 8 bytes of `sha256(Q)`, `Q` uncompressed, which lets
    `licorice_device_pubkey` check that the scalar it read is the key. It computes
    `shared = (d · E).x`, `E` the ephemeral public key from the manifest. To *build* a package you need
@@ -134,7 +139,7 @@ The scheme (fully reversed from `FUN_4210a908`):
    `FUN_4210ae98`), with the standard default IV `a6a6a6a6a6a6a6a6` at DROM `0x3c32c66c`. 24 bytes in,
    16-byte DEK out.
 
-A successful unwrap is cached in RAM at `0x3fc9e0f8` (26102901: `0x3fca26d4`; and RTC-fast `0x5000005c`) tagged `"DEK1"` +
+A successful unwrap is cached in RAM at `0x3fc9e0f8` (26102901: `0x3fca26d4`; 26110701: `0x3fca3074`; and RTC-fast `0x5000005c`) tagged `"DEK1"` +
 the app_id — the oracle `tests/test_licorice_apps.py` reads to prove the wrap verified.
 
 ## The code section and the launch

@@ -23,7 +23,7 @@ the [project README](../README.md) is the overview.
 |---|---|
 | [stock-firmware.md](stock-firmware.md) | the UI layer mapped for modification (a 7.2.4 survey: its addresses are 7.2.4's) |
 | [stock-7.5.4.md](stock-7.5.4.md) · [stock-7.6.8.md](stock-7.6.8.md) | what moved in each update, and the re-located patch sites |
-| [stock-licorice.md](stock-licorice.md) | XTOS Licorice, the stock's rewrite: 261013 (2026-10-13) and 26102901 (the device's since 2026-10-29), what changed, what runs (passcode, collections, dictionaries, pairing, back to previous spot; the Ink App lock screen partly), what the tools refuse |
+| [stock-licorice.md](stock-licorice.md) | XTOS Licorice, the stock's rewrite: 261013 (2026-10-13), 26102901 (2026-10-29) and 26110701 (the device's since 2026-11-10), what changed, what runs (passcode, collections, dictionaries, pairing, back to previous spot; the Ink App lock screen partly), what the tools refuse |
 | [lua-apps.md](lua-apps.md) | the Lua app host: the container, the API as confirmed at runtime, its measured limits |
 | [licorice-apps.md](licorice-apps.md) | XTOS Licorice's signed mini apps: the container, the device-key wrap, the AES-CTR code section, the hidden Mini Apps entry, a package that installs and runs, in the emulator and on the reader |
 | [gamebook.md](gamebook.md) | gamebooks on the Lua host: writing a story, drawing plates, how the engine works |
@@ -47,8 +47,8 @@ Every tool's module docstring (`--help`) is its manual; the page named here has 
 | `x4emu` (shim), `x4emu_mcp.py` | the emulator CLI and its MCP server | [x4emu.md](x4emu.md) |
 | `mkflash.py`, `mksd.py`, `mkefuse.py` | a 16 MB flash image (from a build or a raw dump), a FAT32 card image, the efuse file | [x4emu.md](x4emu.md) |
 | `device.py` | the desk reader: backup, slots, console, the guarded slot writers | `../CLAUDE.md`, "The real device" |
-| `nvsedit.py` | read and edit NVS in a flash image; `redact` removes every stored credential (WiFi, Licorice's passcode digest and Bluetooth keys, its `/radio` store) | [stock-licorice.md](stock-licorice.md), [hardware.md](hardware.md) |
-| `stockver.py` (+ `stockver.d/`) | the per-version offsets the stock tools read; `identify IMAGE`; a Licorice image's build tag (`v26102901`) | [stock-7.5.4.md](stock-7.5.4.md), [stock-7.6.8.md](stock-7.6.8.md) |
+| `nvsedit.py` | read and edit NVS in a flash image; `redact` removes every stored credential (WiFi, Licorice's passcode digest, Bluetooth and DRM keys, its `/radio` store, rebuilt with only its flags) | [stock-licorice.md](stock-licorice.md), [hardware.md](hardware.md) |
+| `stockver.py` (+ `stockver.d/`) | the per-version offsets the stock tools read; `identify IMAGE`; a Licorice image's build tag (`v26110701`) | [stock-7.5.4.md](stock-7.5.4.md), [stock-7.6.8.md](stock-7.6.8.md) |
 | `stockdev.py`, `stockpatch.py` | the developer menu; named byte patches (`developer-menu`, `hidden-menu-rows`, `lua-apps-row`) | [xic.md](xic.md), [lua-apps.md](lua-apps.md) |
 | `stockstrings.py` | read and relabel the stock's UI string packs | [stock-firmware.md](stock-firmware.md) §6 |
 | `xic2png.py` | decode and encode the stock's `.xic` captures | [xic.md](xic.md) |

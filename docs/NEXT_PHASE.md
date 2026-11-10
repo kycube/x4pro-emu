@@ -6,9 +6,19 @@ Goal of this phase, in the owner's words: run the **stock Xteink firmware** in t
 Read `CLAUDE.md` first (build, device rules, where things are), then this file, then the last entries of
 `docs/log.md`.
 
-## 0. Resume here (2026-10-29, after the 26102901 update)
+## 0. Resume here (2026-11-10, after the 26110701 update)
 
-**First: the device now runs XTOS Licorice 26102901** (the owner's OTA of 2026-10-29; app0 boots, 261013 stays
+**Newest: the device runs XTOS Licorice 26110701** (the owner's OTA of 2026-11-10, released the day before; app1
+boots, otadata seq 6; app0 keeps 26102901). It ran with no model change; every Licorice test, the feature walks
+included, runs on it. `nvsedit redact` learned its DRM device key (`drm_os_prod`) and now rebuilds the LittleFS
+store with only its flags instead of blanking it (else every redacted boot opens with "Install recommended apps").
+Its Home is a Desktop with a clock, InkApp is always in the drawer (the easter egg is gone), and its new features
+(Bionic reading, Bookshelf folders, InkApp tools, DRM books) are only seen in its strings so far
+(`docs/stock-licorice.md`, "26110701"). Still to do from this update: re-read the efuses on 26110701 (the port
+was gone after the backup's reset), the owner's by-eye check of its goldens, and the same mini app on the reader
+under 26110701.
+
+**Before that: the device ran XTOS Licorice 26102901** (the owner's OTA of 2026-10-29; app0 boots, 261013 stays
 in app1; the first Licorice, 261013, came with the OTA of 2026-10-13, and 7.6.8 is now only in the backups).
 26102901 ran with no model change and every Licorice test runs on both builds; `nvsedit redact` had to learn its
 new secrets (`docs/stock-licorice.md`, "26102901"). Licorice is the stock's rewrite, not a 7.x (`docs/stock-licorice.md`). **The owner's direction, the
@@ -26,7 +36,7 @@ the Licorice app sections beyond code (assets / data / fonts). WiFi and BLE traf
 and a project of its own: take it on deliberately.
 
 **Where things stand.** Every firmware runs unpatched: CrossPoint 1.6.0, the stock `xteink_app` 7.2.4, 7.5.4
-and 7.6.8, and Licorice 261013 and 26102901; the device runs **Licorice 26102901 in app0** (261013 in app1). `make test` is 276 tests in
+and 7.6.8, and Licorice 261013, 26102901 and 26110701; the device runs **Licorice 26110701 in app1** (26102901 in app0). `make test` is 291 tests in
 about two minutes on eight workers, with no input retries anywhere. On 7.5.4–7.6.8 Lua apps reach the device as a
 card copy and keep `ctx.state` in the emulator as on the reader; the gamebook was played on the device under 7.6.8.
 The owner's items:

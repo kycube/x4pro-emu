@@ -10,9 +10,9 @@ Two container generations share the `.xtapp` name and the `XTAP` magic:
 
 * **classic** (stock `xteink_app` 7.2.4-7.6.8): a plain 0x80-byte header + a plain-JSON manifest,
   no signature, no key. This is the default and the sections after this list describe it.
-* **licorice** (XTOS Licorice 261013 and 26102901, the device's current firmware): a mandatory-encrypted,
+* **licorice** (XTOS Licorice 261013, 26102901 and 26110701, the device's current firmware): a mandatory-encrypted,
   device-key-wrapped package its installer accepts from All Files, and that runs from its Mini Apps
-  page ("Ink App" on 26102901). `--format licorice` builds one; the whole format, with addresses and what is proven, is
+  page ("Ink App" on 26102901, "InkApp" and always shown on 26110701). `--format licorice` builds one; the whole format, with addresses and what is proven, is
   **docs/licorice-apps.md**. In short:
 
       0x00  "XTAP", u16 1, u16 0x80, u32 total size, u32 feature mask (0x2 = code encrypted)
@@ -126,9 +126,10 @@ LICORICE_KEY_ID = '36036010c7bd05af'              # dek_wrap_key_id (checked ver
 # DROM address of the ECDH scalar d, per build (stockver.release_tag). 26102901 keeps the same key
 # (same id) at a new address; licorice_device_pubkey checks the scalar against the id either way.
 LICORICE_SCALAR_VA = {'v261013': 0x3c32c674,      # FUN_421d7118
-                      'v26102901': 0x3c3a4918}
+                      'v26102901': 0x3c3a4918,
+                      'v26110701': 0x3c3d8140}
 LICORICE_IMAGE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              'images', 'device', 'stock-app0-v26102901.bin')   # gitignored; the device's
+                              'images', 'device', 'stock-app1-v26110701.bin')   # gitignored; the device's
 LICORICE_WRAP_SALT = ('xteink.xtapp.wrap.' + LICORICE_KEY_ID).encode()   # HKDF-Extract salt (FUN_4210a908)
 LICORICE_WRAP_INFO = b'xteink.xtapp.appdek.wrap.v2'                      # HKDF-Expand info, then a 0x01 block
 LICORICE_PERMISSIONS = ('sys.battery', 'sys.status', 'net.http', 'net.https', 'storage.app',
@@ -646,7 +647,7 @@ def pack_licorice(app_dir, out=None, image=LICORICE_IMAGE, code=True):
             'app_id': obj['app_id'], 'display_name': obj['display_name'],
             'permissions': list(obj.get('permissions', [])), 'dek': dek.hex(), 'warnings': warnings,
             'note': ('runnable: install it from All Files, then open it from the drawer\'s Mini Apps '
-                     '("Ink App" on 26102901; docs/licorice-apps.md)') if files else
+                     '("InkApp" on 26110701; docs/licorice-apps.md)') if files else
                     'manifest-only: installs through Licorice, but "Launch failed" when opened'}
 
 

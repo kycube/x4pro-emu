@@ -340,7 +340,8 @@ def test_licorice_device_pubkey_refuses_a_scalar_that_is_not_the_key(tmp_path):
         xtapp.licorice_device_pubkey(str(tmp_path / 'new.bin'))
 
 
-@pytest.mark.parametrize('app', ['stock-app1-v261013.bin', 'stock-app0-v26102901.bin'])
+@pytest.mark.parametrize('app', ['stock-app1-v261013.bin', 'stock-app0-v26102901.bin',
+                                 'stock-app1-v26110701.bin'])
 def test_licorice_builds_share_one_device_key(app):
     """Every known build's table address holds the same key: the one the id names."""
     path = os.path.join(ROOT, 'images', 'device', app)
