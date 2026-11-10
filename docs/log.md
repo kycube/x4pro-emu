@@ -1596,7 +1596,9 @@ The owner took the OTA released 2026-11-09. The build calls itself `XTOS Licoric
 sha256 6c7bf46d…, equal; the backup was first tagged with the number as given, 261100701, and renamed to the
 image's own tag). The OTA wrote **app1** (otadata entry 1, seq 6, boots); app0 keeps 26102901 byte for byte. Below
 0x10000 only NVS and otadata's second sector changed. After the backup's reset the reader deep-slept and its
-port disappeared, so the efuses are not re-read yet.
+port disappeared; once the owner woke it, the efuses re-read byte for byte as the committed dump (no flash
+encryption, no secure boot, `SECURE_VERSION` 0, key blocks blank): the update burned nothing, and the DRM key has
+no eFuse key behind it.
 
 **NVS first.** Names only, compared with 26102901's: the WiFi driver's `nvs.net80211` copy of the network is
 gone; new are `fw/home` (`sys.desk`), `fw/boot_ver`, `fw/epd_chip` and **`drm_os_prod/keys`**, a 473-character

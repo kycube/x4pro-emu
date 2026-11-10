@@ -150,8 +150,8 @@ a mass-storage personality ("XTEink X4 Pro", 0x303A:0x4002) in USB mode.
    (0x10000 or 0x7F0000 under the stock table) is allowed after the backup. Current state (2026-11-10, after the
    owner's OTA to 26110701): **app1 = XTOS Licorice 26110701**, app0 = Licorice 26102901, otadata entry 1 seq 6 →
    **app1 boots** (`tools/device.py slots`); 261013 and pristine 7.6.8 are only in the backups now. The efuses read
-   as in `docs/device/efuse-dump.txt` after the first two Licorice updates, last re-read 2026-10-29 on 26102901
-   (no flash encryption, secure boot or anti-rollback; not yet re-read on 26110701). `flash-crosspoint` /
+   as in `docs/device/efuse-dump.txt` after all three Licorice updates, last re-read 2026-11-10 on 26110701
+   (no flash encryption, secure boot or anti-rollback; key blocks blank). `flash-crosspoint` /
    `restore-stock` read otadata and refuse to write a slot the bootloader does not start (a patched stock app goes
    to the booting slot with `flash-crosspoint --firmware APP.bin --slot app1`, `docs/parity.md`). Their default
    slot, app0, is not the booting one now, so they refuse it; writing app1 would overwrite Licorice 26110701 (its

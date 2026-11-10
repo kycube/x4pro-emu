@@ -186,7 +186,9 @@ The owner took the OTA released 2026-11-09 (the build is dated Nov 7; its identi
 **On the device.** The OTA wrote the other slot: **app1 = 26110701**, otadata entry 1 seq 6 → app1 boots;
 app0 still holds 26102901 byte for byte, 261013 is now only in the backups. Below 0x10000 only NVS and
 otadata's second sector changed (bootloader and partition table unchanged); the coredump partition is still
-blank. The efuses were not re-read yet: after the backup's reset the reader deep-slept and its port went away.
+blank. The efuses, re-read on 26110701 the same day (`tools/device.py efuse-summary`), are byte for byte the
+committed dump: no flash encryption, no secure boot, `SECURE_VERSION` 0, and the six key blocks still blank, so
+the DRM device key below lives in NVS only, with no eFuse key or HMAC peripheral behind it.
 
 **New secrets, now redacted.** 26110701 brings a DRM system: a device key it generates and registers with
 Xteink's servers (`/drm/keys/candidate`, `/drm/keys/confirm`, `/drm/identity/session`) is kept in NVS

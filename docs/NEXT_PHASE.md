@@ -14,9 +14,8 @@ included, runs on it. `nvsedit redact` learned its DRM device key (`drm_os_prod`
 store with only its flags instead of blanking it (else every redacted boot opens with "Install recommended apps").
 Its Home is a Desktop with a clock, InkApp is always in the drawer (the easter egg is gone), and its new features
 (Bionic reading, Bookshelf folders, InkApp tools, DRM books) are only seen in its strings so far
-(`docs/stock-licorice.md`, "26110701"). Still to do from this update: re-read the efuses on 26110701 (the port
-was gone after the backup's reset), the owner's by-eye check of its goldens, and the same mini app on the reader
-under 26110701.
+(`docs/stock-licorice.md`, "26110701"). The efuses re-read unchanged on 26110701. Still to do from this update: the owner's
+by-eye check of its goldens, and the same mini app on the reader under 26110701.
 
 **Before that: the device ran XTOS Licorice 26102901** (the owner's OTA of 2026-10-29; app0 boots, 261013 stays
 in app1; the first Licorice, 261013, came with the OTA of 2026-10-13, and 7.6.8 is now only in the backups).
