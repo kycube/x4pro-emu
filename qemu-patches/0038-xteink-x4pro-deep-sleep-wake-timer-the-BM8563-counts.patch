@@ -1,0 +1,326 @@
+From 16cfd70542b15f63ccbdca84884a6a03310bd24a Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Tue, 10 Nov 2026 18:14:21 -0600
+Subject: [PATCH 38/38] xteink-x4pro: deep-sleep wake timer; the BM8563 counts
+ the time spent asleep
+
+The sleep model keeps SLP_TIMER0/1 and, on a deep sleep with WAKEUP_ENA TIMER
+and MAIN_TIMER_ALARM_EN, works out the alarm's remaining time from the RTC
+counter. The timer fires after that much host time ("host-time", default on)
+or at once when the "wake-timer" property is set, and wakes like a button
+does with SLP_WAKEUP_CAUSE = TIMER. XTOS Licorice 26110701's Desk off-screen
+arms one to the next minute and repaints the clock on each wake.
+
+The VM is paused in deep sleep, so guest time stops; the BM8563 now adds the
+sleep model's slept_ns: a timer wake adds the timer's duration, a button wake
+the host time spent paused (nothing with host-time off). The board state's
+sleep object gains timer_ms and slept_ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/x4pro_i2c_devs.c         | 13 +++--
+ hw/misc/x4pro_sleep.c            | 88 ++++++++++++++++++++++++++++++--
+ hw/xtensa/xteink_x4pro.c         |  6 ++-
+ include/hw/misc/x4pro_i2c_devs.h |  1 +
+ include/hw/misc/x4pro_sleep.h    |  8 +++
+ 5 files changed, 107 insertions(+), 9 deletions(-)
+
+diff --git a/hw/misc/x4pro_i2c_devs.c b/hw/misc/x4pro_i2c_devs.c
+index 5bec7d8..5254cf5 100644
+--- a/hw/misc/x4pro_i2c_devs.c
++++ b/hw/misc/x4pro_i2c_devs.c
+@@ -234,10 +234,15 @@ static const TypeInfo gt911_info = {
+ static uint8_t to_bcd(int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
+ static int from_bcd(uint8_t v) { return ((v >> 4) & 0xF) * 10 + (v & 0xF); }
+ 
++/* guest time plus the time spent in deep sleep, which the chip lives through */
++static int64_t pcf_now_ns(X4ProPcf8563State *s)
++{
++    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (s->slept_ns ? *s->slept_ns : 0);
++}
++
+ static void pcf_refresh_time(X4ProPcf8563State *s)
+ {
+-    int64_t now_vt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+-    time_t t = s->base_epoch + (now_vt - s->base_vt_ns) / 1000000000LL;
++    time_t t = s->base_epoch + (pcf_now_ns(s) - s->base_vt_ns) / 1000000000LL;
+     struct tm tm;
+     gmtime_r(&t, &tm);
+     s->regs[2] = to_bcd(tm.tm_sec);              /* VL bit 7 = 0: clock valid */
+@@ -259,7 +264,7 @@ static void pcf_apply_time(X4ProPcf8563State *s)
+     tm.tm_mon = from_bcd(s->regs[7] & 0x1F) - 1;
+     tm.tm_year = 100 + from_bcd(s->regs[8]);
+     s->base_epoch = timegm(&tm);
+-    s->base_vt_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    s->base_vt_ns = pcf_now_ns(s);
+ }
+ 
+ static int pcf_event(I2CSlave *i2c, enum i2c_event event)
+@@ -307,7 +312,7 @@ static void pcf_realize(DeviceState *dev, Error **errp)
+     /* "base-epoch" pins the clock at start (-global driver=x4pro.pcf8563,property=base-epoch,value=N);
+      * 0 = the host's wall clock */
+     s->base_epoch = s->base_epoch_prop ? (int64_t)s->base_epoch_prop : time(NULL);
+-    s->base_vt_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    s->base_vt_ns = pcf_now_ns(s);
+     pcf_refresh_time(s);
+ }
+ 
+diff --git a/hw/misc/x4pro_sleep.c b/hw/misc/x4pro_sleep.c
+index 9ea06e2..c360af5 100644
+--- a/hw/misc/x4pro_sleep.c
++++ b/hw/misc/x4pro_sleep.c
+@@ -9,6 +9,14 @@
+  * records EXT_WAKEUP1_STATUS and SLP_WAKEUP_CAUSE = EXT1, sets both CPUs'
+  * reset cause to DEEPSLEEP (5), requests a system reset and resumes the VM,
+  * so the ROM prints rst:0x5 (DSLEEP) and the app sees ESP_SLEEP_WAKEUP_EXT1.
++ * A wake timer (WAKEUP_ENA TIMER with SLP_TIMER1.MAIN_TIMER_ALARM_EN, the
++ * alarm in RTC slow-clock ticks in SLP_TIMER0/1) fires after its duration of
++ * host time ("host-time", the default) or at once when the "wake-timer"
++ * property is set; it wakes the same way with SLP_WAKEUP_CAUSE = TIMER.
++ * A deep sleep's length is added to "slept-ns", which the BM8563 counts on
++ * top of guest time: a timer wake adds the timer's duration, a button wake the
++ * host time spent paused (nothing when host-time is off, as under
++ * run --deterministic).
+  * Light sleep (no digital power-down) returns at once with SLP_WAKEUP set.
+  *
+  * x4pro-emu, GPL-2.0-or-later.
+@@ -26,6 +34,8 @@
+ #include "exec/memory.h"
+ #include "hw/misc/x4pro_sleep.h"
+ 
++#define R_SLP_TIMER0        0x04
++#define R_SLP_TIMER1        0x08
+ #define R_STATE0            0x18
+ #define R_WAKEUP_STATE      0x3C
+ #define R_INT_ENA           0x40
+@@ -48,6 +58,21 @@
+ #define EXT_WAKEUP1_STATUS_CLR (1u << 22)
+ #define EXT_WAKEUP_CONF_EXT1_LV (1u << 31)
+ #define RTC_EXT1_TRIG_EN    (1u << 1)     /* soc/rtc.h: wakeup trigger bit for EXT1 */
++#define RTC_TIMER_TRIG_EN   (1u << 3)     /* soc/rtc.h: wakeup trigger bit for the RTC timer */
++#define SLP_TIMER1_ALARM_EN (1u << 16)    /* RTC_CNTL_MAIN_TIMER_ALARM_EN */
++
++/* the armed wake timer's remaining guest time in ns, -1 when none is armed */
++static int64_t x4pro_sleep_alarm_ns(X4ProSleepState *s)
++{
++    if (!(s->wakeup_state >> 15 & RTC_TIMER_TRIG_EN) || !(s->slp_timer1 & SLP_TIMER1_ALARM_EN)) {
++        return -1;
++    }
++    uint64_t alarm = ((uint64_t)(s->slp_timer1 & 0xFFFF) << 32) | s->slp_timer0;
++    uint32_t f = s->rtc->rtc_slowclk_freq;
++    uint64_t now = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->rtc->time_base_ns, f,
++                            NANOSECONDS_PER_SECOND);
++    return alarm <= now ? 0 : (int64_t)muldiv64(alarm - now, NANOSECONDS_PER_SECOND, f);
++}
+ 
+ static bool x4pro_sleep_ext1_condition(X4ProSleepState *s)
+ {
+@@ -60,6 +85,7 @@ static bool x4pro_sleep_ext1_condition(X4ProSleepState *s)
+     return any_high ? (lv != 0) : ((lv ^ sel) != 0);   /* any selected pin low */
+ }
+ 
++/* rtc_io >= 0: an EXT1 wake by that pin; -1: the wake timer */
+ static void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io)
+ {
+     if (!s->sleeping) {
+@@ -67,9 +93,15 @@ static void x4pro_sleep_wake(X4ProSleepState *s, int rtc_io)
+     }
+     s->sleeping = false;
+     s->wake_count++;
++    timer_del(s->host_timer);
+     s->ext_wakeup1_status = (rtc_io >= 0) ? (1u << rtc_io) : 0;
+-    s->wakeup_cause = RTC_EXT1_TRIG_EN;
++    s->wakeup_cause = (rtc_io >= 0) ? RTC_EXT1_TRIG_EN : RTC_TIMER_TRIG_EN;
+     if (s->deep) {
++        if (rtc_io < 0) {
++            s->slept_ns += s->timer_ns;
++        } else if (s->host_time) {
++            s->slept_ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->entered_host_ns;
++        }
+         for (int i = 0; i < ESP32S3_CPU_COUNT; i++) {
+             s->rtc->reset_cause[i] = ESP32_DEEPSLEEP_RESET;
+         }
+@@ -96,6 +128,11 @@ static void x4pro_sleep_gpio_in(void *opaque, int n, int level)
+     }
+ }
+ 
++static void x4pro_sleep_timer_fire(void *opaque)
++{
++    x4pro_sleep_wake(X4PRO_SLEEP(opaque), -1);
++}
++
+ static void x4pro_sleep_enter(X4ProSleepState *s)
+ {
+     s->deep = (s->dig_pwc & DIG_PWC_DG_WRAP_PD_EN) != 0;
+@@ -111,6 +148,12 @@ static void x4pro_sleep_enter(X4ProSleepState *s)
+         return;
+     }
+     s->sleeping = true;
++    s->entered_host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    s->timer_ns = x4pro_sleep_alarm_ns(s);
++    if (s->timer_ns == 0) {
++        x4pro_sleep_wake(s, -1);
++        return;
++    }
+     /* a wake source already active (button held) wakes at once */
+     if ((s->wakeup_state >> 15 & RTC_EXT1_TRIG_EN) && x4pro_sleep_ext1_condition(s)) {
+         uint32_t sel = s->ext_wakeup1 & EXT_WAKEUP1_SEL_MASK;
+@@ -118,9 +161,13 @@ static void x4pro_sleep_enter(X4ProSleepState *s)
+         x4pro_sleep_wake(s, pin);
+         return;
+     }
+-    qemu_log_mask(LOG_GUEST_ERROR, "x4pro.sleep: deep sleep entered (ext1 sel=0x%x, %s); VM paused until a wake source fires\n",
++    qemu_log_mask(LOG_GUEST_ERROR, "x4pro.sleep: deep sleep entered (ext1 sel=0x%x, %s, timer %" PRId64 " ms); VM paused until a wake source fires\n",
+                   s->ext_wakeup1 & EXT_WAKEUP1_SEL_MASK,
+-                  (s->ext_wakeup_conf & EXT_WAKEUP_CONF_EXT1_LV) ? "any-high" : "any-low");
++                  (s->ext_wakeup_conf & EXT_WAKEUP_CONF_EXT1_LV) ? "any-high" : "any-low",
++                  s->timer_ns < 0 ? (int64_t)-1 : s->timer_ns / 1000000);
++    if (s->timer_ns > 0 && s->host_time) {
++        timer_mod(s->host_timer, s->entered_host_ns + s->timer_ns);
++    }
+     qemu_system_vmstop_request_prepare();
+     qemu_system_vmstop_request(RUN_STATE_PAUSED);
+ }
+@@ -130,6 +177,8 @@ static uint64_t x4pro_sleep_read(void *opaque, hwaddr addr, unsigned int size)
+     X4ProSleepState *s = X4PRO_SLEEP(opaque);
+     uint64_t v = 0;
+     switch (addr) {
++    case R_SLP_TIMER0:        return s->slp_timer0;
++    case R_SLP_TIMER1:        return s->slp_timer1;
+     case R_STATE0:            return 0;
+     case R_WAKEUP_STATE:      return s->wakeup_state;
+     case R_INT_ENA:           return s->int_ena;
+@@ -157,6 +206,8 @@ static void x4pro_sleep_write(void *opaque, hwaddr addr, uint64_t value, unsigne
+             x4pro_sleep_enter(s);
+         }
+         return;
++    case R_SLP_TIMER0:      s->slp_timer0 = v; return;
++    case R_SLP_TIMER1:      s->slp_timer1 = v & (SLP_TIMER1_ALARM_EN | 0xFFFF); return;
+     case R_WAKEUP_STATE:    s->wakeup_state = v; return;
+     case R_INT_ENA:         s->int_ena = v; return;
+     case R_INT_RAW:         return;
+@@ -195,9 +246,31 @@ static void x4pro_sleep_reset_hold(Object *obj, ResetType type)
+     s->slp_reject_conf = 0;
+     s->dig_pwc = 0;
+     s->ext_wakeup1 = 0;
++    s->slp_timer0 = 0;
++    s->slp_timer1 = 0;
+     s->sleeping = false;
+ }
+ 
++/* "wake-timer" = true: the armed wake timer fires now, as if its time had passed */
++static bool x4pro_sleep_get_wake_timer(Object *obj, Error **errp)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(obj);
++    return s->sleeping && s->deep && s->timer_ns > 0;
++}
++
++static void x4pro_sleep_set_wake_timer(Object *obj, bool value, Error **errp)
++{
++    X4ProSleepState *s = X4PRO_SLEEP(obj);
++    if (!value) {
++        return;
++    }
++    if (!x4pro_sleep_get_wake_timer(obj, errp)) {
++        error_setg(errp, "no deep sleep with an armed wake timer");
++        return;
++    }
++    x4pro_sleep_wake(s, -1);
++}
++
+ static void x4pro_sleep_init(Object *obj)
+ {
+     X4ProSleepState *s = X4PRO_SLEEP(obj);
+@@ -205,12 +278,21 @@ static void x4pro_sleep_init(Object *obj)
+     memory_region_init_io(&s->iomem, obj, &x4pro_sleep_ops, s, TYPE_X4PRO_SLEEP, REGION_SIZE);
+     sysbus_init_mmio(sbd, &s->iomem);
+     qdev_init_gpio_in_named(DEVICE(obj), x4pro_sleep_gpio_in, "gpio-in", 22);
++    s->host_timer = timer_new_ns(QEMU_CLOCK_REALTIME, x4pro_sleep_timer_fire, s);
++    s->timer_ns = -1;
++    object_property_add_bool(obj, "wake-timer", x4pro_sleep_get_wake_timer, x4pro_sleep_set_wake_timer);
+ }
+ 
++static Property x4pro_sleep_properties[] = {
++    DEFINE_PROP_BOOL("host-time", X4ProSleepState, host_time, true),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
+ static void x4pro_sleep_class_init(ObjectClass *klass, void *data)
+ {
+     ResettableClass *rc = RESETTABLE_CLASS(klass);
+     rc->phases.hold = x4pro_sleep_reset_hold;
++    device_class_set_props(DEVICE_CLASS(klass), x4pro_sleep_properties);
+ }
+ 
+ static const TypeInfo x4pro_sleep_info = {
+diff --git a/hw/xtensa/xteink_x4pro.c b/hw/xtensa/xteink_x4pro.c
+index 14b2ffd..97417f7 100644
+--- a/hw/xtensa/xteink_x4pro.c
++++ b/hw/xtensa/xteink_x4pro.c
+@@ -426,9 +426,10 @@ static void x4pro_board_get_state(Object *obj, Visitor *v, const char *name, voi
+         g_string_append_printf(j, "],\"updates\":%" PRIu64 ",\"fades\":%" PRIu64 "},", b->ledc->duty_updates, b->ledc->fades);
+     }
+     if (b->sleep) {
+-        g_string_append_printf(j, "\"sleep\":{\"sleeping\":%s,\"deep\":%s,\"count\":%" PRIu64 ",\"wakes\":%" PRIu64 ",\"light_sleeps\":%" PRIu64 ",\"entered_us\":%" PRId64 ",\"ext1_sel\":\"0x%x\",\"ext1_status\":\"0x%x\",\"wakeup_cause\":\"0x%x\"},",
++        g_string_append_printf(j, "\"sleep\":{\"sleeping\":%s,\"deep\":%s,\"count\":%" PRIu64 ",\"wakes\":%" PRIu64 ",\"light_sleeps\":%" PRIu64 ",\"entered_us\":%" PRId64 ",\"ext1_sel\":\"0x%x\",\"ext1_status\":\"0x%x\",\"wakeup_cause\":\"0x%x\",\"timer_ms\":%" PRId64 ",\"slept_ms\":%" PRId64 "},",
+             b->sleep->sleeping ? "true" : "false", b->sleep->deep ? "true" : "false", b->sleep->sleep_count, b->sleep->wake_count,
+-            b->sleep->light_sleeps, b->sleep->sleep_entered_us, b->sleep->ext_wakeup1, b->sleep->ext_wakeup1_status, b->sleep->wakeup_cause);
++            b->sleep->light_sleeps, b->sleep->sleep_entered_us, b->sleep->ext_wakeup1, b->sleep->ext_wakeup1_status, b->sleep->wakeup_cause,
++            b->sleep->timer_ns < 0 ? (int64_t)-1 : b->sleep->timer_ns / 1000000, b->sleep->slept_ns / 1000000);
+     }
+     if (b->ana) {
+         g_string_append_printf(j, "\"ana_i2c\":{\"reads\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"sar2_starts\":%" PRIu64
+@@ -680,6 +681,7 @@ static void x4pro_machine_init(MachineState *machine)
+         sleep = X4PRO_SLEEP(dev);
+         sleep->rtc = ESP32S3_RTC_CNTL(rtc_obj);
+         sleep->lower = sysbus_mmio_get_region(SYS_BUS_DEVICE(rtc_obj), 0);
++        rtc->slept_ns = &sleep->slept_ns;
+         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_RTCCNTL_BASE, mr, 2);
+diff --git a/include/hw/misc/x4pro_i2c_devs.h b/include/hw/misc/x4pro_i2c_devs.h
+index e98b6b1..d8ba61b 100644
+--- a/include/hw/misc/x4pro_i2c_devs.h
++++ b/include/hw/misc/x4pro_i2c_devs.h
+@@ -61,6 +61,7 @@ struct X4ProPcf8563State {
+     int64_t base_epoch;           /* seconds: wall time corresponding to guest virtual time base_vt */
+     int64_t base_vt_ns;
+     uint32_t base_epoch_prop;     /* "base-epoch": seed at realize; 0 = host time */
++    const int64_t *slept_ns;      /* the sleep model's deep-sleep total: the chip keeps counting */
+     uint64_t reads, writes;
+ };
+ 
+diff --git a/include/hw/misc/x4pro_sleep.h b/include/hw/misc/x4pro_sleep.h
+index 52799fb..e3faf4d 100644
+--- a/include/hw/misc/x4pro_sleep.h
++++ b/include/hw/misc/x4pro_sleep.h
+@@ -7,6 +7,7 @@
+ #pragma once
+ 
+ #include "hw/sysbus.h"
++#include "qemu/timer.h"
+ #include "hw/misc/esp32s3_rtc_cntl.h"
+ 
+ #define TYPE_X4PRO_SLEEP "x4pro.sleep"
+@@ -18,6 +19,8 @@ struct X4ProSleepState {
+     MemoryRegion *lower;          /* the stock rtc_cntl register region */
+     Esp32s3RtcCntlState *rtc;
+ 
++    uint32_t slp_timer0;          /* +0x04: wake alarm, slow-clock ticks 31:0 */
++    uint32_t slp_timer1;          /* +0x08: ticks 47:32, bit 16 MAIN_TIMER_ALARM_EN */
+     uint32_t wakeup_state;        /* +0x3C */
+     uint32_t int_ena, int_raw;    /* +0x40, +0x44 */
+     uint32_t ext_wakeup_conf;     /* +0x64: bit 31 EXT1 level (1 = any high, 0 = any low) */
+@@ -32,4 +35,9 @@ struct X4ProSleepState {
+     uint64_t sleep_count, wake_count, light_sleeps;
+     int64_t sleep_entered_us;
+     uint32_t gpio_levels;         /* pins 0..21 as last reported on "gpio-in" */
++    int64_t timer_ns;             /* the last deep sleep's wake timer, guest ns; -1 none */
++    int64_t entered_host_ns;      /* QEMU_CLOCK_REALTIME at the last deep-sleep entry */
++    int64_t slept_ns;             /* total time spent in deep sleep (the BM8563 counts it) */
++    QEMUTimer *host_timer;
++    bool host_time;               /* "host-time": the timer fires in host time, a button wake adds the pause */
+ };
+-- 
+2.54.0 (Apple Git-157)
+

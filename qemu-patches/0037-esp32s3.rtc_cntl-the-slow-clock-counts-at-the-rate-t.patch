@@ -1,0 +1,44 @@
+From 4da042b4837c87b98310f0443826f02e387ec1fd Mon Sep 17 00:00:00 2001
+From: kycube <kf1178@gmail.com>
+Date: Tue, 10 Nov 2026 18:14:21 -0600
+Subject: [PATCH 37/38] esp32s3.rtc_cntl: the slow clock counts at the rate the
+ TIMG calibration measures
+
+The RTC counter ran the RC slow clock at 150 kHz (the ESP32's figure) while
+Espressif's TIMG model calibrates it at ESP_RC_SLOW_FREQ, 136 kHz. Firmware
+converts a sleep duration to ticks with its calibration, so every timer wake
+came 9% early: XTOS Licorice's Desk off-screen, which sleeps to the next
+minute, woke at 53.5 s and slept again for the rest. The three clocks now use
+the TIMG rates (RC slow, 32K XTAL, RC fast / 256).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/misc/esp32s3_rtc_cntl.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/hw/misc/esp32s3_rtc_cntl.c b/hw/misc/esp32s3_rtc_cntl.c
+index 76076c7..300cc23 100644
+--- a/hw/misc/esp32s3_rtc_cntl.c
++++ b/hw/misc/esp32s3_rtc_cntl.c
+@@ -20,6 +20,7 @@
+ #include "hw/qdev-properties.h"
+ #include "hw/misc/esp32s3_reg.h"
+ #include "hw/misc/esp32s3_rtc_cntl.h"
++#include "hw/timer/esp_timg.h"
+ 
+ static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s);
+ static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
+@@ -164,7 +165,9 @@ static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s)
+ 
+ static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s)
+ {
+-    const uint32_t slowclk_freq[] = {150000, 32768, 8000000/256};
++    /* the rates the TIMG calibration measures (hw/timer/esp_timg.h), so that a
++     * time the firmware converts to ticks with its calibration is that time */
++    const uint32_t slowclk_freq[] = {ESP_RC_SLOW_FREQ, ESP_XTAL32K_FREQ, ESP_RC_FAST_DIV_FREQ};
+     const uint32_t fastclk_freq[] = {s->xtal_apb_freq / 4, 8000000};
+     s->rtc_slowclk_freq = slowclk_freq[s->rtc_slowclk];
+     s->rtc_fastclk_freq = fastclk_freq[s->rtc_fastclk];
+-- 
+2.54.0 (Apple Git-157)
+

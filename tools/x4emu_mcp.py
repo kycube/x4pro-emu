@@ -77,6 +77,12 @@ def emu_reset(name: str = 'dev0') -> str:
     return api.run_text(['reset'], name=name)
 
 @server.tool()
+def emu_wake_timer(name: str = 'dev0') -> str:
+    """Fire a deep sleep's armed wake timer now (XTOS Licorice's Desk off-screen sleeps to the next
+    minute); the clock chip advances by the timer's duration. An error when nothing waits on a timer."""
+    return api.run_text(['wake-timer'], name=name)
+
+@server.tool()
 def emu_status(name: str = 'dev0') -> str:
     """pid, QEMU run state, and whether the sleep model has paused it (deep sleep)."""
     return api.run_text(['status'], name=name)

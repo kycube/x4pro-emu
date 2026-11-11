@@ -56,6 +56,8 @@ def build_parser():
     p.add_argument('--dry-run', action='store_true'); p.add_argument('extra', nargs='*'); p.set_defaults(fn=c.cmd_run)
     sp.add_parser('stop').set_defaults(fn=c.cmd_stop)
     sp.add_parser('reset').set_defaults(fn=c.cmd_reset)
+    sp.add_parser('wake-timer', help='fire a deep sleep\'s armed wake timer now; the clock chip advances by '
+                  'its duration').set_defaults(fn=c.cmd_wake_timer)
     sp.add_parser('status').set_defaults(fn=c.cmd_status)
     sp.add_parser('state').set_defaults(fn=c.cmd_state)
     p = sp.add_parser('log'); p.add_argument('--follow', action='store_true'); p.add_argument('--since', type=int)

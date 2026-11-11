@@ -102,7 +102,8 @@ USB mass-storage traffic (the OTG core is modelled in device mode, USB mode come
 disk, `docs/usb-otg.md`); WiFi and BLE traffic (the blocks a WiFi start touches are answered, the driver finds
 no air and stops itself about 8 s after `wifi:mode : sta`; Licorice's Bluetooth toggle comes up); RMT, I2S,
 APB_SARADC DMA mode; the GPIO matrix and IO_MUX pulls electrically. Deep sleep is a paused VM and a reset with
-cause 5 (DSLEEP); light sleep returns at once; timing is the device's measured BUSY durations, not cycles; the
+cause 5 (DSLEEP), woken by the power button or a wake timer (host time, or `x4emu wake-timer`; the BM8563 counts
+the time slept); light sleep returns at once; timing is the device's measured BUSY durations, not cycles; the
 two cores keep TSO on any host (`docs/smp.md`).
 
 ## The stock firmware: facts that keep you from breaking things
@@ -126,7 +127,7 @@ two cores keep TSO on any host (`docs/smp.md`).
   menu, light panel, Settings, All Files and reader 1:1 with the device by eye (session 5), and 7.6.8 passed a
   pixel-exact Screen Capture session (`docs/parity.md`). Licorice has no screen capture: the owner judged twelve of
   its emulator screens 1:1 with the device by eye (2026-10-13; `tests/golden/licorice-*`; 26102901's on 2026-10-29;
-  26110701's are not judged yet). The device-made
+  26110701's on 2026-11-10). The device-made
   oracles are CrossPoint's: its home-screen screenshot (`tests/golden/device-home-screenshot-3824.bmp`, 0 pixels
   different), its panel command stream (`models/fixtures/`), its boot and wake logs (`docs/device/`).
 

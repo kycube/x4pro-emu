@@ -1,7 +1,7 @@
 From b28e5dc6e44ef4bed1a2a9e5a87ebbfa13972d85 Mon Sep 17 00:00:00 2001
 From: kycube <kf1178@gmail.com>
 Date: Tue, 13 Oct 2026 10:39:29 -0500
-Subject: [PATCH 36/36] esp32s3.usb_otg: the DWC2 OTG core in device mode,
+Subject: [PATCH 36/38] esp32s3.usb_otg: the DWC2 OTG core in device mode,
  USB_WRAP, RTC_CNTL_USB_CONF
 
 Both stock generations' USB mode (XTOS Licorice "USB mode", 7.x "USB

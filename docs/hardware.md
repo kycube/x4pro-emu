@@ -240,6 +240,23 @@ sees reset cause 5 (DSLEEP); the app reads `SLP_WAKEUP_CAUSE` (+0x130, EXT1 = bi
 `EXT_WAKEUP1_STATUS` (+0xE4, RTC IO bit; GPIO3 = RTC IO 3). The emulator's `x4pro.sleep` overlay
 implements exactly these registers and pauses the VM while asleep.
 
+A timer wake is the other source: `esp_sleep_enable_timer_wakeup()` sets `WAKEUP_ENA` bit 3 and writes the
+alarm, in RTC slow-clock ticks, to `SLP_TIMER0` (+0x04, bits 31:0) and `SLP_TIMER1` (+0x08, bits 47:32 and
+bit 16 `MAIN_TIMER_ALARM_EN`). XTOS Licorice 26110701 arms one with its Desk off-screen (Settings → Display →
+Off wallpaper → Desk): it sleeps to the next minute, wakes with cause TIMER (bit 3), repaints the Desk's clock
+and sleeps again, 59 s a cycle. The overlay keeps both registers and works out the alarm's remaining time from
+the RTC counter at the sleep; the timer fires after that much host time, or at once on `x4emu wake-timer`
+(`state.sleep.timer_ms`: the last deep sleep's timer, -1 for none). The firmware converts a duration with
+its slow-clock calibration (`RTC_CNTL_STORE1`, 136 kHz from Espressif's TIMG model for the RC oscillator),
+so the counter must run at the calibrated rate: Espressif's RTC_CNTL model counted 150 kHz, the original
+ESP32's figure, and every timer came 9 % early (a 53.5 s sleep, then a 3.6 s one to make up the minute) until
+the counter took the TIMG rates (`qemu-patches/0037`).
+
+Guest time stands still in a paused VM, but the clock chip does not: the BM8563 model adds the time spent in
+deep sleep (`state.sleep.slept_ms`): a timer's duration for a timer wake, the host time the VM was paused for a
+button wake. Under `run --deterministic` (`x4pro.sleep` property `host-time` off) a timer fires only on
+`wake-timer` and a button wake adds nothing, so the guest's clock still depends on its inputs alone.
+
 ## USB Serial/JTAG console
 
 Register map in `docs/audit.md`. Output flows only while (a) ESP-IDF's connection-monitor tick hook keeps
@@ -295,9 +312,11 @@ The short list is in the README; this is the full one, with what a firmware sees
   `docs/device/photos/`), the default since 2026-09-07; `-global driver=x4pro.epd,property=waveform-gray,value=off`
   restores the old fixed two-plane table (`state.gray_model`). Ghosting and the 150 Hz frame period are not
   modelled; SSD1677's 105-byte LUT keeps the fixed table (`docs/grayscale.md`).
-- **Deep sleep**: a paused VM followed by a system reset with reset cause 5 (DSLEEP), EXT1 wake status =
-  the power button (section "Power and sleep"). RTC-domain retention beyond RTC RAM, power draw and GPIO
-  hold latches are not simulated; the guest's `millis()` keeps counting across the modelled reset.
+- **Deep sleep**: a paused VM followed by a system reset with reset cause 5 (DSLEEP), woken by the power
+  button (EXT1) or a wake timer (section "Power and sleep"). RTC-domain retention beyond RTC RAM, power draw
+  and GPIO hold latches are not simulated; the guest's `millis()` keeps counting across the modelled reset,
+  and the RTC counter restarts at every reset (the chip's keeps counting through a deep sleep); the BM8563
+  counts the time slept.
 - **Light sleep** returns immediately (no time passes). Neither firmware has been seen to light-sleep
   (`state.sleep.light_sleeps`).
 - **Timing**: BUSY durations are the device's measured values (UC8279: PON 40 ms, GC 1326 ms, DU 483 ms)
@@ -335,7 +354,7 @@ One JSON object from the board, read over QMP (`docs/x4emu.md`). The top-level k
 | `usb_otg` | the USB OTG core (`docs/usb-otg.md`) | PHY selected, soft-connect, pull-up, reset/flush/connect counters, `host` (the built-in host's descriptor bytes) |
 | `battery`, `rtc` | CW2017, BM8563 | |
 | `ledc` | LEDC | per channel `duty_permille`, `fading`, `target_permille`; `fades` |
-| `sleep` | RTC_CNTL sleep overlay | `sleeping`, `wakes`, `light_sleeps`, `wakeup_cause`, `ext1_status` |
+| `sleep` | RTC_CNTL sleep overlay | `sleeping`, `wakes`, `light_sleeps`, `wakeup_cause`, `ext1_status`, `timer_ms` (the last deep sleep's wake timer, -1 none), `slept_ms` (deep-sleep time the clock chip counts) |
 | `ana_i2c`, `saradc`, `rf` | analog master, SENS, radio stub | `cal_starts`, `pll_cals`; `tsens_reads`; `rf.hot`, `rf.sticky` |
 | `rtcio` | RTC IO overlay | `pad_writes`, `hold_mask` |
 | `iolog_hot` | the logger overlays | addresses polled past the 32-line log cap, with counts |

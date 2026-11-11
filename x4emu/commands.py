@@ -17,7 +17,7 @@ import time
 
 from .output import out, suspended
 from .paths import idir, qemu, root
-from .qmp import BOARD, INPUT, QMP, connect, pid_alive
+from .qmp import BOARD, INPUT, QMP, SLEEP, connect, pid_alive
 
 PANEL_H = 480                             # the landscape panel is 800x480
 
@@ -195,6 +195,9 @@ def cmd_run(a):
         # pin the RTC (see DETERMINISTIC_RTC_EPOCH) so the guest's wall clock is the same on every
         # run instead of following the host's
         cmd += ['-global', f'driver=x4pro.pcf8563,property=base-epoch,value={DETERMINISTIC_RTC_EPOCH}']
+        # a deep sleep's wake timer fires only on `wake-timer`, and a button wake adds no host time to
+        # the clock chip: the guest's clock depends on nothing but its inputs
+        cmd += ['-global', 'driver=x4pro.sleep,property=host-time,value=false']
     else:
         # the BM8563 holds what the image's firmware keeps there: UTC for 7.x and CrossPoint, local time
         # for XTOS Licorice (nvsedit.rtc_local_offset); the model seeds UTC from the host clock otherwise
@@ -341,6 +344,23 @@ def cmd_reset(a):
     mark_input(q)
     out.line('reset')
     out.set(name=a.name, reset=True)
+
+
+@records('')
+def cmd_wake_timer(a):
+    """A deep sleep with an armed wake timer (XTOS Licorice's Desk off-screen sleeps to the next minute)
+    wakes now, as if the timer's time had passed: the clock chip advances by the timer's duration.
+    Without one asleep, an error. With host time (any run but --deterministic) the timer also fires
+    by itself after its duration of host time."""
+    q = connect(a.name)
+    sl = board(q).get('sleep', {})
+    try:
+        q.qom_set(SLEEP, 'wake-timer', True)
+    except RuntimeError as e:
+        sys.exit(f'{a.name}: {e}')
+    mark_input(q)
+    out.line(f'timer wake after {sl.get("timer_ms")} ms of deep sleep')
+    out.set(name=a.name, timer_ms=sl.get('timer_ms'))
 
 
 def cmd_status(a):
@@ -978,7 +998,7 @@ def cmd_wait_guest_until(a):
 # What a replayed step shows in human mode after `t=… ms <cmd>` (the rest of the arguments are in
 # the journal): the values that identify the input.
 STEP_SHOW = {'tap': ('x', 'y'), 'swipe': ('x1', 'y1', 'x2', 'y2'), 'press': ('button',),
-             'hold': ('button',), 'chord': ('buttons',), 'home': (), 'reset': (),
+             'hold': ('button',), 'chord': ('buttons',), 'home': (), 'reset': (), 'wake-timer': (),
              'battery': ('soc', 'mv', 'charging'), 'console-send': ('text',)}
 
 

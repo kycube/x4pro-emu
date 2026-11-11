@@ -21,7 +21,7 @@ screen, read the console, screenshot the panel, query the whole device as JSON.
   enters its USB disk mode, and installs and runs mini apps ([docs/stock-licorice.md](docs/stock-licorice.md)).
   A raw 16 MB flash dump runs as it comes off the device; so does a fresh build.
 - **Drive it like a device.** `x4emu tap`, `swipe`, `press`, `hold`, `chord`, `home`, `battery`,
-  `light`, `screenshot --diff`, `wait-text`, `wait-refresh`, `state` — every command can print JSON.
+  `light`, `wake-timer`, `screenshot --diff`, `wait-text`, `wait-refresh`, `state` — every command can print JSON.
   Inputs are journaled and replayable against guest time (`record` / `replay`, deterministic mode),
   and `watch` serves a live view of the panel in a browser.
 - **Let an agent drive it.** `.mcp.json` registers an MCP server with the same tools (boot, tap,
@@ -101,7 +101,7 @@ The models are checked against the desk unit, not just against datasheets:
 ![XTOS Licorice 26110701 in the emulator: its Desktop, the side drawer, a book page and the light panel](docs/images/licorice.png)
 
 <sub>Licorice 26110701, the device's build, as the emulator draws it (`tests/golden/licorice-v26110701-*.png`); the
-owner compared the emulator's screens of 261013 and 26102901 with the reader by eye.</sub>
+owner compared the emulator's screens of all three builds with the reader by eye.</sub>
 
 In October 2026 Xteink replaced the 7.x firmware with a rewrite, **XTOS Licorice**. The emulator runs it
 from the device's own dump: the Bookshelf, the side drawer, the Desktop, All files and the reader, the
@@ -114,9 +114,12 @@ collections, StarDict dictionary lookup and the reader's "Back to previous spot"
 (`tests/test_licorice_features.py`),
 and its phone-pairing screen comes up and waits for a phone, as no Bluetooth traffic is modelled. The build of
 2026-11-07, **26110701** (a Desktop with a clock as Home, InkApp always in the drawer, a DRM device key, folders on
-the Bookshelf), also ran with no model change, and every Licorice test runs on it as well. Licorice keeps the RTC chip at
+InkApp folders), also ran with no model change, and every Licorice test runs on it as well. Its own additions work
+too: the Desk off-screen, which wakes from deep sleep once a minute on a timer to repaint its clock (the emulator
+gained that timer wake, and its RTC counter now runs at the rate the firmware calibrates), Start at, Default home,
+the reading stats, Bionic reading and InkApp folders. Licorice keeps the RTC chip at
 local time where 7.x keeps it at UTC; `x4emu run` seeds it each firmware's way, so the emulator's clock
-shows the reader's. What changed, what runs
+shows the reader's, and the chip keeps counting while the emulator sleeps. What changed, what runs
 and what is still open: [docs/stock-licorice.md](docs/stock-licorice.md).
 
 ## Lua apps and a gamebook
@@ -148,7 +151,7 @@ real reader, where it keeps your place between visits. Write your own with
 USB mass-storage traffic (the USB OTG core comes up and waits for a computer, but no computer sees the
 disk), WiFi and Bluetooth traffic (the radio comes up, finds no air and stops), cycle timing (refresh
 times are the device's measured ones; CPU speed is not), the electrical side of the GPIO matrix, RMT and
-I2S. Deep sleep is a paused VM followed by a modelled reset. The details,
+I2S. Deep sleep is a paused VM followed by a modelled reset, woken by the power button or a wake timer. The details,
 with what a firmware sees, are in [docs/hardware.md](docs/hardware.md#what-is-not-emulated-how-it-shows-up-for-a-firmware-developer).
 
 ## Documentation

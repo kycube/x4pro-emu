@@ -8,6 +8,7 @@ from .paths import idir
 
 BOARD = '/machine/x4pro-board'
 INPUT = '/machine/x4pro-input'
+SLEEP = '/machine/x4pro-sleep'
 
 
 class QMP:

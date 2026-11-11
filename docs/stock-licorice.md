@@ -211,7 +211,7 @@ refresh 1.
 
 **In the emulator: it runs as 26102901 does.** No model change: PSR `3B`, `epd_unknown_cmds` 0, only the IO_MUX
 lines in `iolog_hot`, nothing on the console. Every Licorice test runs on it (`stockkit.LICORICE_DUMPS`, goldens
-`tests/golden/licorice-v26110701-*.png`), and so do the passcode, collections, dictionary and "Back to previous
+`tests/golden/licorice-v26110701-*.png`; the owner judged them 1:1 with the reader by eye, 2026-11-10), and so do the passcode, collections, dictionary and "Back to previous
 spot" walks (`tests/test_licorice_features.py`, now on 26102901 and 26110701).
 
 | | 26102901 | 26110701 |
@@ -241,10 +241,42 @@ connected, the emulator runs on battery (63 %, `x4emu battery`) with Wi-Fi off (
 
 General gained Keyboards, Power button, Start at, Default home and SD card rows; Dictionary lookup gained Manage
 dictionaries, Import guide, Double-tap interval and Touch long press. The app API (`g`'s twenty methods, Lua 5.5)
-is unchanged. New strings point at what else arrived, not walked yet: Bionic reading, folders on the Bookshelf
-(New / Rename / Move to folder), InkApp "tools" (recommended tools, "This tool is not supported on this
-device"), a reading-stats upgrade, DRM-licensed books ("Authorization unavailable. Connect and sync, then
-retry."), Show images and Fast smoothing.
+is unchanged.
+
+**The new features, walked** (2026-11-10, a redacted copy on the generic card with the test book; the tests run
+with the clock chip pinned to 2026-11-10 10:00 so dates and the month's calendar repeat; goldens
+`tests/golden/licorice-v26110701-*`):
+
+| Feature | Where | What the emulator does | Test |
+|---|---|---|---|
+| Desk off-screen | Settings → Display → Off wallpaper → **Desk** ("Shows Desk after power-off; updates occasionally"; Default / EPUB cover / Custom / Desk) | a power-off paints "Locked · 63%", the clock, the date, the current book (or "No reading yet") and "This month" (minutes, finished, streak, a calendar of the month), then deep-sleeps with a **wake timer** to the next minute; each timer wake repaints the clock and sleeps 59 s. Before this the emulator ignored the timer (the Desk kept its power-off minute) and its RTC counter ran 9 % fast against the firmware's calibration (`docs/hardware.md`, "Power and sleep") | `test_licorice_desk_off_screen` (`x4emu wake-timer`) |
+| Start at | General → Start at: Home / Continue reading / Last screen | Continue reading: a wake from deep sleep reopens the book at its page | `test_licorice_start_at_and_default_home` |
+| Default home | General → Default home: Desktop / Bookshelf / InkApp / All files | Bookshelf: Back from the reader lands there instead of on the Desktop | the same |
+| Reading stats | Bookshelf → Stats, four pages | the week (Week / Month / Year, a bar per day, "Avg/day"), reading hours by the hour, all-time tiles (total time, days read, books read and finished, streaks, page turns, "Since"), most read | the same (pages 1 and 3) |
+| Reader → More | the reader menu's ⋯ | First-line indent, Latin end align, Text direction, **Bionic reading**, **Show images**, Power saving, **Fast smoothing**, This book only, KOReader progress sync; Bionic reading On sets the first letters of each word in bold | `test_licorice_bionic_reading` |
+| InkApp folders | hold an app on the InkApp page | Move / Move to folder / Uninstall; Move to folder → New folder makes "Folder 1" (a folder icon with the app inside), the next app's Move to folder lists Folder 1; inside, Remove from folder; the folder's own menu Move / Rename / Ungroup | `test_licorice_ink_app_folders` (two packages installed through All files) |
+| Dark mode | Display → Dark mode | the whole UI inverts | — |
+| Layout & status bar | Reading options | Same for all books / Per book · new: last used / Per book · new: defaults | — |
+| A held book | Bookshelf → All books | gained **Clear cache** beside Mark as finished, Add to collection, Delete book | — |
+
+The "Installed" toast of a package install now stays until a tap, which only dismisses it; the second install
+skips the "Install InkApp" pill. InkApp's ◎ is its own Settings (Fonts: Same as reader); its ⌄ sorts (Custom /
+Name / Recently used).
+
+Not walked: the **Desk's widgets**. The firmware knows reading, shelf, clock, weather, quote, to-do, media and
+tools widgets (`reading.week_heat`, `shelf.covers3`, `weather.current`, `quote.daily`, `todo.list`,
+`tools.toolbox` …), keeps the layout in LittleFS `/lfs/desk/config.bin` (nanopb) and takes new ones through
+`/sdcard/.xtdesk/inbox`; the reader has no editor for them (a long press on the Desktop does nothing), so the
+layout comes from the XTEINK phone app over Bluetooth. The device's dump has no `config.bin` (its Desk is the
+default) and the phone link is not modelled. The **Toolbox** ("No tools yet", "Install to Toolbox") was not
+reached either: its entry is a Desk widget, and no package here declares a tool. Network features stay out of
+reach (no Wi-Fi traffic): recommended apps and tools, DRM-licensed books ("Authorization unavailable. Connect
+and sync, then retry."), Cloud, Calibre wireless transfer (a Book save folder and a Calibre folder in the
+strings), KOReader progress sync. A reading-stats upgrade dialog converts old records once; a fresh redacted
+copy has none to convert.
+
+The Ghidra project: `tools/ghidra_stock.py --version v26110701 analyze` (`images/ghidra/stock-v26110701`,
+17,606 functions).
 
 ## What the stock tools make of it
 

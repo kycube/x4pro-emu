@@ -41,8 +41,8 @@ import time
 import pytest
 
 pytest.importorskip('cryptography')
-from stockkit import (FAT_OFFSET, LICORICE_INK_APP_SHOWN, SD_FILES, SKIP_IDLE, WHOLE, booted,  # noqa: F401,E402
-                      golden_check, licorice, settle, state, tap, tool, x4emu)
+from stockkit import (BODY, FAT_OFFSET, LICORICE_INK_APP_SHOWN, SD_FILES, SKIP_IDLE, WHOLE, booted,  # noqa: F401,E402
+                      golden_check, licorice, licorice_build, settle, state, tap, tool, x4emu)
 from conftest import PY, ROOT, TOOLS, emu_log                                  # noqa: E402
 
 import xtapp                                                                    # noqa: E402
@@ -240,3 +240,79 @@ def test_licorice_app_runs_from_the_mini_apps_list(request, tmp_path, licorice_c
                      why=' (OK leaves the app, back on the Mini Apps list)')
         log = emu_log(n)
         assert log.count('rst:0x') == 1, f'the guest reset during the run:\n{log[-1500:]}'
+
+
+def _P(px, py):
+    """A portrait point of Licorice's UI as the landscape panel pixel x4emu takes."""
+    return py, 479 - px
+
+
+def _hold(n, px, py):
+    x4emu(n, 'tap', *_P(px, py), '--ms', 1500, '--quiet', 1, '--wait', 20)
+    settle(n, 2, 60)
+
+
+def _at(n, px, py):
+    tap(n, *_P(px, py))
+    settle(n, 1.5, 60)
+
+
+def test_licorice_ink_app_folders(request, tmp_path, licorice_card):
+    """26110701's InkApp page groups apps in folders: two packages installed through All files (apps/probe
+    and a copy named "Second Probe"), a held icon's menu (Move / Move to folder / Uninstall), Move to
+    folder -> New folder makes "Folder 1", the second app moves into it, the folder opens on both, and
+    the folder's own menu (Move / Rename / Ungroup) ungroups it back to two icons."""
+    lic = licorice_build('v26110701')
+    if not os.path.exists(xtapp.LICORICE_IMAGE):
+        pytest.skip(f'{xtapp.LICORICE_IMAGE} not available (the Licorice device key source)')
+    second = tmp_path / 'second'
+    shutil.copytree(APP, second)
+    manifest = json.loads((second / 'manifest.json').read_text())
+    manifest.update(app_id='second', display_name='Second Probe')
+    (second / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+
+    def prepare(flash, sd):
+        for app in (APP, str(second)):
+            xtapp.install_licorice(str(sd), app, xtapp.LICORICE_IMAGE)
+
+    def grid(name, why):
+        golden_check(_shot(n, tmp_path, name), lic.golden(f'licorice-{name}.png'), cols=BODY, why=why)
+
+    with booted(request, tmp_path, licorice_card, dump=lic.dump, prepare=prepare, icount=SKIP_IDLE) as s:
+        n = s.name
+        x4emu(n, 'wait-refresh', '--total', 1, '--timeout', 90)
+        settle(n, 2, 60)
+        tap(n, *HAMBURGER)
+        tap(n, *lic.drawer('All files'))
+        settle(n, 1.5, 60)
+        for row in (252, 396):              # probe.xtapp, then second.xtapp below the new XTApps folder
+            _at(n, 250, row)
+            before = state(n)['refresh_count']
+            tap(n, *OK_BUTTON)
+            x4emu(n, 'wait-refresh', '--total', before + 1, '--timeout', 60)   # (the second install skips the pill)
+            settle(n, 2, 60)
+            _at(n, 240, 650)                # the "Installed" toast stays until a tap, which only dismisses it
+        listing = subprocess.run(['mdir', '-i', f'{s.sd}@@{FAT_OFFSET}', '-b', '::/XTApps'],
+                                 capture_output=True, text=True).stdout.lower()
+        assert 'probe' in listing and 'second' in listing, f'/XTApps after the installs: {listing!r}'
+        tap(n, *HAMBURGER)
+        tap(n, *lic.drawer('InkApp'))
+        settle(n, 1.5, 60)
+        grid('inkapp-grid', ' (API Probe and Second Probe)')
+        _hold(n, 93, 181)                                      # API Probe
+        grid('inkapp-app-menu', ' (Move / Move to folder / Uninstall / Back)')
+        _at(n, 220, 440)                                       # Move to folder
+        _at(n, 190, 469)                                       # New folder
+        grid('inkapp-folder-new', ' (Folder 1 holding API Probe, Second Probe beside it)')
+        _hold(n, 240, 181)                                     # Second Probe
+        _at(n, 220, 440)                                       # Move to folder
+        _at(n, 170, 426)                                       # Folder 1
+        grid('inkapp-folder-both', ' (Folder 1 alone, two apps in it)')
+        _at(n, 93, 181)                                        # open it
+        grid('inkapp-in-folder', ' (Folder 1: both apps)')
+        x4emu(n, 'home', '--quiet', 1, '--wait', 20)           # Back
+        settle(n, 1.5, 60)
+        _hold(n, 93, 181)                                      # Folder 1
+        grid('inkapp-folder-menu', ' (Move / Rename / Ungroup / Back)')
+        _at(n, 152, 499)                                       # Ungroup
+        grid('inkapp-grid', ' (ungrouped: the two icons again)')

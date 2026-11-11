@@ -111,6 +111,7 @@ rotated on it.
 | `run` | `--flash F` (16 MB, from `tools/mkflash.py`), `--sd IMG` (power-of-two size), `--efuse F`, `--panel ssd1677\|uc8179\|uc8279`, `--fast-epd` (2 ms refreshes instead of the device's 40/1326/483 ms), `--gdb` (start halted on `:1234`), `--boot-hold-power [MS]` (hold the power button from reset, see below), `--deterministic` (guest time follows the instruction count and the RTC starts from a fixed epoch, see below), `--trace-epd F`, `--trace-i2c F`, `--rtc-offset MIN` (minutes east of UTC the RTC chip starts at; default: what the image's firmware keeps there, see below), `--icount N` (QEMU's `-icount` value, e.g. `shift=2,sleep=off`, see below), `--no-usb-host`, `--machine M`, `--debug D`, `--dry-run`, plus any extra QEMU arguments | `{"name", "pid", "status", "console", "boot_hold_power_ms"}` (`null` without the flag; 3000 for the bare flag, the bound of its hold) plus, with the flag, `"boot_hold_held_ms"` (guest ms the button was down) and `"boot_hold_preflight"` (bare flag: whether the preflight line was seen; `null` with an explicit MS); with `--dry-run` `{"name", "dry_run": true, "cmd": [...], "boot_hold_power_ms"}` |
 | `stop` | — | `{"name", "pid", "stopped", "running": false}` (`stopped: false` when it was not running) |
 | `reset` | — | `{"name", "reset": true}` |
+| `wake-timer` | — | `{"name", "timer_ms"}`: a deep sleep's armed wake timer fires now, as if its time had passed (the clock chip advances by `timer_ms`); exit 1 when the guest is not in a deep sleep with a timer. Without `--deterministic` the timer also fires by itself after `timer_ms` of host time (`docs/hardware.md`, "Power and sleep") |
 | `status` | — | `{"name", "pid", "status", "running", "deep_sleep"}`; not running: `{"name", "pid": null, "status": "not running", "running": false, "deep_sleep": false}` |
 | `state` | — | the board's whole state object (uptime, panel, `refresh_count`, `last_mode`, `busy`, GPIO, buttons, touch, `gt911`, battery, `rtc`, `ledc`, `sleep`, `ana_i2c`, `saradc`, `rf`, `iolog_hot`, …) — the same JSON the human mode pretty-prints |
 | `flash-app` | `--app APP.bin`, `--build DIR` (bootloader + partition table + app) | `{"flash", "parts": [{"offset", "size", "path"}], "name", "pid", "status", "console"}` — the instance is stopped, patched in place (NVS/otadata/SD survive) and relaunched with its old command line (a `--boot-hold-power` run holds the button again) |
@@ -171,6 +172,9 @@ Two limits, both deliberate:
   So for a Licorice image `run` seeds `base-epoch` with host time plus that offset
   (`nvsedit.rtc_local_offset`; `run.json` records it as `rtc_offset_s`); with the chip at UTC its clock ran
   five hours ahead of the reader's (`docs/stock-licorice.md`). `--rtc-offset MIN` overrides it.
+  A deep sleep adds its length to the chip: a timer wake its timer's duration, a button wake the host
+  time the VM stood paused. `--deterministic` also passes `-global driver=x4pro.sleep,property=host-time,value=false`:
+  a wake timer then fires only on `x4emu wake-timer`, and a button wake adds nothing.
 - **Idle time is real time.** `-icount 3` leaves QEMU's `sleep=on`: while both cores idle in WAITI
   the virtual clock advances with the host's, so how long the host takes leaks into guest time and
   a minute of idle guest time costs a minute. `--icount shift=3,sleep=off` (explicit `--icount` wins
@@ -209,7 +213,7 @@ Two limits, both deliberate:
 last refresh's start (`state.last_refresh_us`) and the end of the last input. A panel that has
 already been idle that long returns at once (`waited_s` 0; it used to restart its clock at the call
 and wait the full S again, about 2 minutes of a full test run). The last input is the one `x4emu`
-delivered (`press`/`hold`/`chord`/`tap`/`swipe`/`home`, `battery`, `console-send`, `reset`, and the
+delivered (`press`/`hold`/`chord`/`tap`/`swipe`/`home`, `battery`, `console-send`, `reset`, `wake-timer`, and the
 boot itself), noted in `.x4emu/NAME/last_input.json` with the QEMU pid it went to, so a mark from an
 earlier boot is never used. An input that reached the board some other way (a raw `x4emu qmp`
 qom-set, another QMP client) shows as moved input counters (`state.gt911.input_seq`,
@@ -275,7 +279,7 @@ is what time-driven UI needs: an inactivity timeout, a toast, the next battery p
 
 `record` journals the instance's **input** commands so `replay` can perform them again at the same
 guest times. Only inputs are recorded — `press`, `hold`, `chord`, `tap`, `swipe`, `home`, `battery`,
-`console-send`, `reset`; `state`, `screenshot`, `wait-*` and `log` are not, since a replay repeats
+`console-send`, `reset`, `wake-timer`; `state`, `screenshot`, `wait-*` and `log` are not, since a replay repeats
 what was *done* to the firmware, not what was looked at. Recording is invisible in human mode (the
 input commands print exactly what they always printed; `--json` gains `"recorded": true`).
 
@@ -299,7 +303,7 @@ same arguments:
 `--quiet` wait, so a replay that waits for `t_ms` and then runs the command reproduces both waits.
 The `args` keys per command are the ones the CLI takes: `press`/`hold` `button ms wait quiet`,
 `chord` `buttons ms wait quiet`, `tap` `x y ms wait quiet`, `swipe` `x1 y1 x2 y2 ms wait quiet`,
-`home` `ms wait quiet`, `battery` `soc mv charging`, `console-send` `text newline`, `reset` none.
+`home` `ms wait quiet`, `battery` `soc mv charging`, `console-send` `text newline`, `reset` and `wake-timer` none.
 Journals are editable and hand-writable; `t_ms: null` is allowed and means "do not wait".
 
 `replay` runs the steps **in-process**: it calls the very functions the CLI calls, it does not shell

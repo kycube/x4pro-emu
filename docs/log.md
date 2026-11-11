@@ -1651,3 +1651,33 @@ host's UTC, right for 7.x and CrossPoint, five hours wrong for Licorice on the o
 fixed epoch). The redacted 26110701 then showed 06:37 PM four minutes after the photo. The Licorice boot test
 now checks the chip the firmware reads is at UTC-5, and `test_nvsedit.py` pins the offset per dump and with
 DST. 293 tests pass.
+
+## 2026-11-10 — 26110701's own features walked; the Desk off-screen needed a deep-sleep wake timer
+
+The owner judged the remaining 26110701 screens 1:1 by eye. Its new features, walked on a redacted copy with the
+test book: Start at (Continue reading reopens the book after a wake), Default home (Bookshelf: Back from the reader
+lands there), the reading stats (week, hours, all-time tiles, most read), the reader's More (Bionic reading sets
+word stems bold; Show images, Fast smoothing, KOReader progress sync rows), InkApp folders (two packages installed
+through All files: Move to folder → New folder, move the second in, open, Remove from folder, Rename, Ungroup),
+Dark mode, per-book layout, Clear cache on a held book. All ran with no change. The tests pin the clock chip to
+2026-11-10 10:00 (a second `-global … base-epoch`, which wins over x4emu's), so the stats' dates and the Desk's
+month calendar repeat; the week chart's dashed average line moves with the seconds read and is masked.
+
+**The Desk off-screen found two gaps.** Display → Off wallpaper → Desk paints a Desk at power-off and promises it
+"updates occasionally". On a power-off the firmware arms a deep-sleep timer wake (`WAKEUP_ENA` bit 3, the alarm in
+`SLP_TIMER0/1`) to the next minute; the sleep model ignored it, so the Desk kept its power-off time forever. The
+`x4pro.sleep` overlay now keeps the alarm, works out its remaining time from the RTC counter, and fires it after
+that much host time or on the new `x4emu wake-timer` (MCP `emu_wake_timer`), waking with cause TIMER. With it the
+firmware woke at 53.5 s and slept another 3.6 s before each repaint: the guest converts durations with its
+slow-clock calibration (`RTC_CNTL_STORE1` = 136 kHz, Espressif's TIMG model) while Espressif's RTC_CNTL model counted
+150 kHz, the original ESP32's value. The counter now uses the TIMG rates, and the Desk sleeps 59 s a minute as on
+the device. And since a paused VM stops guest time, the BM8563 now adds the time slept (a timer's duration, or the
+host time paused before a button wake; nothing under `--deterministic`, where `host-time` is off and only
+`wake-timer` fires a timer), so a clock read after a long sleep is right. `qemu-patches/0037`, `0038`;
+`state.sleep.timer_ms` / `slept_ms`. 297 tests passed before the patches were committed.
+
+Not walked: the Desk's widgets (weather, quote, to-do, shelf, toolbox…; the layout is nanopb in LittleFS
+`/lfs/desk/config.bin` and arrives from the phone app through `/sdcard/.xtdesk/inbox`; the device has none) and
+the Toolbox (a Desk widget; no package here declares a tool). Ghidra project `images/ghidra/stock-v26110701`
+(17,606 functions). Along the way a Homebrew glib upgrade broke the QEMU build directory; re-running the Makefile's
+configure line fixed it, as CLAUDE.md says.

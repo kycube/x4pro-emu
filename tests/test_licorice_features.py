@@ -3,7 +3,9 @@ collections and StarDict dictionary lookup, each walked from a cold boot of the 
 checked screen by screen against its golden (tests/golden/licorice-<build>-*), on 26102901 and 26110701.
 261013 has none of them; a build skips without its dump. 26110701 opens on its Desktop: the Bookshelf
 (Recent ⌄ / Stats), 26102901's Home, is a row of the drawer there. Phone pairing is not pinned: it waits for a phone over
-BLE, which is not modelled."""
+BLE, which is not modelled. 26110701's own (the Desk off-screen with its once-a-minute timer wake, Start at,
+Default home, reading stats) run with the clock chip pinned to 2026-11-10 10:00, so dates and the month's
+calendar are the same on every run."""
 import os
 import subprocess
 
@@ -20,11 +22,22 @@ PIN, WRONG = '1234', '9999'
 KEYPAD = {'1': (110, 352), '2': (240, 352), '3': (370, 352), '4': (110, 462), '9': (370, 572)}
 
 DESKTOP_HOME = ('v26110701',)        # builds whose Home is the Desktop, with the Bookshelf a drawer row
+# The BM8563 at 2026-11-10 10:00 (Licorice keeps local time in it): the last -global wins over x4emu's own seed
+PINNED_CLOCK = ('-global', 'driver=x4pro.pcf8563,property=base-epoch,value=1794304800')
+DESK_CLOCK = (140, 300)              # the Desk off-screen's clock and date, portrait y 148..290
+SHELF_CARD = (745, 800)              # the Bookshelf's current-book card: "4% · N min", minutes of guest time
+WEEK_AVG = (520, 570)                # the week chart's dashed average line: its height follows the seconds read
 
 
 @pytest.fixture(params=['v26102901', 'v26110701'])
 def lic(request):
     return licorice_build(request.param)
+
+
+@pytest.fixture
+def desk():
+    """26110701 alone: the Desk, Start at and Default home are new in it."""
+    return licorice_build('v26110701')
 
 
 def P(px, py):
@@ -187,3 +200,106 @@ def test_licorice_dictionary_lookup(request, tmp_path, stock_card, lic):
         x4emu(n, 'tap', *P(70, 163), '--ms', 2500, '--quiet', 1, '--wait', 30)
         settle(n, 2, 60)
         check(n, tmp_path, 'dictionary-lookup', READER_COLS, ' ("quick" boxed, its definition in a pop-up)', lic=lic)
+
+
+def asleep(n):
+    return wait_for(lambda: (v := state(n)['sleep'])['sleeping'] and v, 30, 'Licorice to deep-sleep', every=0.2)
+
+
+def band_pixels(png, c0, c1):
+    from PIL import Image
+    return Image.open(png).convert('1').crop((c0, 0, c1, 480)).tobytes()
+
+
+def test_licorice_desk_off_screen(request, tmp_path, stock_card, desk):
+    """Display → Off wallpaper → Desk ("Shows Desk after power-off; updates occasionally"): a power-off
+    paints the Desk (the clock, the date, the current book, the month) and deep-sleeps with a wake timer
+    armed to the next minute. The timer's wake (`x4emu wake-timer` here; host time fires it too) repaints
+    the Desk a minute on and arms the next minute, 59 s (docs/hardware.md, "Deep sleep")."""
+    with booted(request, tmp_path, stock_card, dump=desk.dump, icount=SKIP_IDLE, extra=PINNED_CLOCK) as s:
+        n = s.name
+        boot(n)
+        tap(n, *HAMBURGER)
+        tap(n, *desk.drawer('Settings'))
+        settle(n, 1.5, 60)
+        at(n, 140, 345)                                        # Display
+        at(n, 240, 154)                                        # Off wallpaper
+        at(n, 140, 617)                                        # Desk
+        check(n, tmp_path, 'off-wallpaper-desk', why=' (Desk ticked, "Shows Desk after power-off")', lic=desk)
+        at(n, 240, 750)                                        # outside the picker: it closes
+        x4emu(n, 'hold', 'power', '--ms', 1500)
+        first = asleep(n)
+        assert 0 < first['timer_ms'] <= 60000, first
+        check(n, tmp_path, 'desk-off', WHOLE, ' (the Desk at power-off)', bands=[DESK_CLOCK], lic=desk)
+        shot1 = tmp_path / 'desk-off.png'
+        before = band_pixels(shot1, *DESK_CLOCK)
+        x4emu(n, 'wake-timer', check=False)                   # an error: host time fired it already
+        second = wait_for(lambda: (v := state(n)['sleep'])['wakes'] > first['wakes'] and v['sleeping'] and v,
+                          60, 'the timer wake to repaint and sleep again', every=0.2)
+        assert second['slept_ms'] >= first['timer_ms'], second
+        assert 55000 <= second['timer_ms'] <= 60000, second
+        check(n, tmp_path, 'desk-off', WHOLE, ' (the Desk after the timer wake)', bands=[DESK_CLOCK], lic=desk)
+        assert band_pixels(tmp_path / 'desk-off.png', *DESK_CLOCK) != before, 'the Desk clock did not move on'
+
+
+def test_licorice_start_at_and_default_home(request, tmp_path, stock_card, desk):
+    """General → Start at → Continue reading, Default home → Bookshelf: a wake from deep sleep opens the
+    book at its page, and Back from the reader lands on the Bookshelf instead of the Desktop. Stats then
+    count the reading: the week's chart (Tuesday) and the all-time tiles."""
+    with booted(request, tmp_path, stock_card, dump=desk.dump, icount=SKIP_IDLE, extra=PINNED_CLOCK) as s:
+        n = s.name
+        boot(n)
+        tap(n, *HAMBURGER)
+        tap(n, *desk.drawer('Settings'))
+        settle(n, 1.5, 60)
+        at(n, 140, 250)                                        # General
+        at(n, 240, 540)                                        # Start at
+        at(n, 130, 469)                                        # Continue reading
+        at(n, 240, 686)                                        # Default home
+        at(n, 125, 440)                                        # Bookshelf
+        check(n, tmp_path, 'general-start-home', why=' (Continue reading, Bookshelf)', bands=[DATE_ROW], lic=desk)
+        at(n, 38, 80)                                          # Settings
+        tap(n, *HAMBURGER)
+        tap(n, *desk.drawer('Bookshelf'))
+        settle(n, 1.5, 60)
+        at(n, 80, 80)                                          # Recent ⌄
+        at(n, 355, 145)                                        # All books
+        at(n, 85, 220, quiet=2)                                # the test book: Chapter 1
+        for _ in range(2):
+            x4emu(n, 'press', 'right', '--quiet', 1, '--wait', 20)
+        settle(n, 1.5, 60)
+        x4emu(n, 'hold', 'power', '--ms', 1500)
+        asleep(n)
+        refreshes = state(n)['refresh_count']
+        x4emu(n, 'press', 'power')
+        wait_for(lambda: (v := state(n))['refresh_count'] > refreshes and not v['sleep']['sleeping'], 60,
+                 'Licorice to wake and paint')
+        settle(n, 2, 60)
+        check(n, tmp_path, 'start-continue', READER_COLS, ' (the wake reopens page 3)', lic=desk)
+        x4emu(n, 'home', '--quiet', 1, '--wait', 20)          # Back
+        settle(n, 1.5, 60)
+        check(n, tmp_path, 'default-home-shelf', why=' (Back lands on the Bookshelf)', bands=[SHELF_CARD], lic=desk)
+        at(n, 220, 80)                                         # Stats
+        check(n, tmp_path, 'stats-week', why=' (2026/11/09 - 11/15, Tuesday read)', bands=[WEEK_AVG], lic=desk)
+        for _ in range(2):
+            x4emu(n, 'press', 'right', '--quiet', 1, '--wait', 20)
+        settle(n, 1.5, 60)
+        check(n, tmp_path, 'stats-all-time', why=' (1 book, 2 page turns, since 2026/11/10)', lic=desk)
+
+
+def test_licorice_bionic_reading(request, tmp_path, stock_card, desk):
+    """The reader menu's More (new rows: Bionic reading, Show images, Fast smoothing, This book only,
+    KOReader progress sync); Bionic reading On sets each word's first letters in bold."""
+    with booted(request, tmp_path, stock_card, dump=desk.dump, icount=SKIP_IDLE, extra=PINNED_CLOCK) as s:
+        n = s.name
+        boot(n)
+        bookshelf(n, desk)
+        at(n, 80, 80)                                          # Recent ⌄
+        at(n, 355, 145)                                        # All books
+        at(n, 85, 220, quiet=2)                                # the test book: Chapter 1
+        at(n, 240, 400)                                        # the reader menu
+        at(n, 420, 750)                                        # More
+        check(n, tmp_path, 'reader-more', why=' (Bionic reading Off, Show images On, Fast smoothing Off)', lic=desk)
+        at(n, 440, 391)                                        # Bionic reading: On
+        at(n, 240, 180)                                        # the page: the menu closes
+        check(n, tmp_path, 'bionic-page', READER_COLS, ' (Chapter 1 in bionic type)', lic=desk)
