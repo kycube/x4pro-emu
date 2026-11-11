@@ -146,6 +146,23 @@ real reader, where it keeps your place between visits. Write your own with
 
 ![The eight plates of The Keeper of Gull Rock](docs/images/plates.png)
 
+## How it is tested
+
+`make test` runs the panel models' unit tests, replays the device's recorded panel streams, and then
+runs ~290 pytest cases on up to eight parallel workers in about two minutes. Each end-to-end test boots
+its own emulator, drives it the way a user would (taps, buttons, the Home pad, sleep and wake) and
+compares the panel with a golden in `tests/golden/`. Where the device made the reference (CrossPoint's
+own screenshots, its recorded panel stream), the emulator has to match it. Each behaviour is checked in
+one place: tests that only repeated another test's walk have been folded into it ([docs/log.md](docs/log.md)).
+
+- **CI** (`.github/workflows/ci.yml`) runs `make setup && make build && make test` on Ubuntu 24.04 for
+  every push to main and every pull request. The stock and Licorice tests skip there: they boot your
+  own device dump, which never leaves `images/`.
+- **The weekly upstream watch** (`.github/workflows/upstream.yml`) checks for new CrossPoint releases, a moved
+  Espressif QEMU, PlatformIO and Homebrew drift. It builds everything from scratch on an arm64 Mac and
+  boots CrossPoint to Home there ([docs/upstream.md](docs/upstream.md)).
+- `make test-serial` runs one test at a time; `make test PYTEST_ARGS=…` passes pytest flags.
+
 ## What is not emulated
 
 USB mass-storage traffic (the USB OTG core comes up and waits for a computer, but no computer sees the
