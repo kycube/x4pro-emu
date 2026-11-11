@@ -1,16 +1,6 @@
-"""M5: frontlight PWM observable; power-button hold sleeps (VM paused, sleep screen), press wakes with DSLEEP;
+"""M5: power-button hold sleeps (VM paused, sleep screen), press wakes with DSLEEP;
 the RTC IO pad writes around the sleep land in the stored-value overlay (S1, 3.2.9)."""
-import json
 from conftest import x4emu, emu_log, emu_state, boot_crosspoint, wait_for, wait_log
-
-
-def test_frontlight_channels_attached(images, emu):
-    boot_crosspoint(emu, images)
-    light = json.loads(x4emu(emu, 'light', '-v').stdout)
-    gpios = {c['gpio']: c for c in light['channels']}
-    assert 8 in gpios and 9 in gpios, light
-    assert gpios[8]['freq_hz'] == 25000 and gpios[9]['freq_hz'] == 25000
-    assert light['cool'] == 0 and light['warm'] == 0   # light off at boot
 
 
 def test_deep_sleep_and_wake(images, emu, tmp_path):

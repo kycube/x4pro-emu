@@ -457,9 +457,10 @@ jobs:
       - name: Boot CrossPoint to Home
         id: smoke
         run: |
-          t=tests/test_boot.py::test_boot_to_home_and_press_right
-          .venv/bin/python -m pytest -q -rfE --basetemp="$CI_TMP/smoke" --junitxml="$CI_TMP/junit-smoke.xml" "$t" || \
-            .venv/bin/python -m pytest -q -rfE --basetemp="$CI_TMP/smoke2" --junitxml="$CI_TMP/junit-smoke-2.xml" "$t"
+          # the plain boot check; a drifted device golden is xfail here, not a failed boot
+          t=tests/test_device_screenshot.py::test_home_screen_matches_device_screenshot
+          .venv/bin/python -m pytest -q -rfE --golden-drift "$CI_TMP/smoke-drift.jsonl" --basetemp="$CI_TMP/smoke" --junitxml="$CI_TMP/junit-smoke.xml" "$t" || \
+            .venv/bin/python -m pytest -q -rfE --golden-drift "$CI_TMP/smoke-drift.jsonl" --basetemp="$CI_TMP/smoke2" --junitxml="$CI_TMP/junit-smoke-2.xml" "$t"
 
       - name: Summary
         if: always()

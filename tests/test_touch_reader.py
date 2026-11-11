@@ -1,10 +1,17 @@
-"""M4: touch, I2C devices, battery. Boot, open the test book by tapping, page forward twice."""
+"""M4/M5: the I2C devices, the battery gauge and charger line, the frontlight channels. (Touch and the
+book walk: tests/test_device_screenshot.py, test_replay.py.)"""
 import json
-from conftest import x4emu, emu_log, emu_state, boot_crosspoint, open_test_book, wait_log
+from conftest import x4emu, emu_log, emu_state, boot_crosspoint
 
 
-def test_i2c_devices_and_battery(images, emu):
+def test_i2c_devices_battery_and_frontlight(images, emu):
     boot_crosspoint(emu, images)
+    # the frontlight: both LEDC channels attached at 25 kHz, off at boot
+    light = json.loads(x4emu(emu, 'light', '-v').stdout)
+    gpios = {c['gpio']: c for c in light['channels']}
+    assert 8 in gpios and 9 in gpios, light
+    assert gpios[8]['freq_hz'] == 25000 and gpios[9]['freq_hz'] == 25000
+    assert light['cool'] == 0 and light['warm'] == 0
     log = emu_log(emu)
     assert 'SDK RTC found' in log
     assert 'SDMMC card mounted' in log
@@ -18,20 +25,3 @@ def test_i2c_devices_and_battery(images, emu):
     assert out == {'soc': 42, 'mv': 3700, 'charging': True}
     assert emu_state(emu)['gpio']['chg']['level'] == 1
 
-
-def test_tap_open_book_and_page_forward(images, emu, tmp_path):
-    boot_crosspoint(emu, images)
-    open_test_book(emu, tmp_path)            # two taps: Browse Files on Home, the book's row
-    p1 = tmp_path / 'page1.png'; p2 = tmp_path / 'page2.png'; p3 = tmp_path / 'page3.png'
-    x4emu(emu, 'screenshot', str(p1))
-    x4emu(emu, 'press', 'right', '--wait', 20)
-    x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    r = x4emu(emu, 'screenshot', str(p2), '--diff', str(p1), check=False)
-    assert r.returncode == 1, r.stdout
-    x4emu(emu, 'press', 'right', '--wait', 20)
-    x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    r = x4emu(emu, 'screenshot', str(p3), '--diff', str(p2), check=False)
-    assert r.returncode == 1, r.stdout
-    # Home pad returns to the home screen (its second "Entering activity: Home"; the first is the boot's)
-    x4emu(emu, 'home', '--wait', 20)
-    wait_log(emu, 'Entering activity: Home', count=2)

@@ -4,7 +4,7 @@
 One booted CrossPoint instance (the `emu` fixture) is reused for parts (a)-(d): none of them
 disturb the screen destructively — status/state/screenshot are read-only, the shell's failing `tap`
 line never reaches the emulator (it fails in argparse before any QMP call), and watch's own tap
-uses the same "Browse Files" coordinate `tests/test_touch_reader.py`/`test_replay.py` already use.
+uses the same "Browse Files" coordinate `tests/test_device_screenshot.py`/`test_replay.py` already use.
 """
 import json
 import os

@@ -1681,3 +1681,27 @@ Not walked: the Desk's widgets (weather, quote, to-do, shelf, toolbox…; the la
 the Toolbox (a Desk widget; no package here declares a tool). Ghidra project `images/ghidra/stock-v26110701`
 (17,606 functions). Along the way a Homebrew glib upgrade broke the QEMU build directory; re-running the Makefile's
 configure line fixed it, as CLAUDE.md says.
+
+## 2026-11-10 — The test suite trimmed of duplicates: 300 tests to 292
+
+A review of every test file for tests that boot the same firmware to the same place and assert a subset of
+another's checks. Merged, nothing lost:
+
+- `tests/test_boot.py` (boot CrossPoint, Home, Right changes the screen) is gone: its panel and unknown-command
+  asserts moved into `test_home_screen_matches_device_screenshot`, which boots the same way and then matches the
+  device's own screenshot; Right paging is the reader test's. The upstream watch's macOS smoke step runs that
+  test now, with `--golden-drift`, so a drifted device golden reads as xfail there and only a failed boot fails.
+- `test_tap_open_book_and_page_forward` walked the book that `test_reader_pages_match_device_screenshots` opens
+  the same way; the reader test now pages to page 3 and leaves with the Home pad as well, and asserts that walk
+  before its device comparisons, so a golden drift still reports it.
+- `test_frontlight_channels_attached` booted only to read `x4emu light`: folded into
+  `test_i2c_devices_battery_and_frontlight` (`tests/test_touch_reader.py`).
+- `test_stockdev.py` lost its byte-diff and flash-offset tests: `test_stockpatch.py`'s `developer-menu` case
+  proves the same bytes, the valid footer and the +0x10000 offsets, and already checks the two tools write the
+  same image. Its `--check`, idempotence, refusal and API tests stay (and its helpers, which three files import).
+- `test_licorice_package_installs_through_the_ui` (three versions) was the first half of
+  `test_licorice_app_runs_from_the_mini_apps_list`; its byte-for-byte check of `/XTApps/probe/app.xtapp` moved
+  into the shared install helper, so every install is checked.
+
+Kept on purpose: `test_nvsedit`'s redacted boot (it proves the redacted image, not the boot), the 7.2.4 and
+7.5.4+ Lua-app routes (different firmware paths), the opt-in SMP stress run.

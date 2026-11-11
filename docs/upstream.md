@@ -170,7 +170,8 @@ keep out, and libusb) and python@3.14 for PlatformIO's venv; `make setup`; **a f
 Makefile's own line (nothing of QEMU is cached); the models and their tests; pytest before any firmware
 exists, so only the fast cases run (the CrossPoint and stock ones skip themselves, `tests/test_aes.py`
 runs the emulator through qtest); the pinned CrossPoint built with the Makefile's PlatformIO venv (`.venv-pio`); one boot to
-Home (`tests/test_boot.py::test_boot_to_home_and_press_right`). The summary lists the formula versions
+Home (`tests/test_device_screenshot.py::test_home_screen_matches_device_screenshot`, with `--golden-drift`: a drifted
+device golden is xfail there, a failed boot is not). The summary lists the formula versions
 and every step's outcome; a failed configure appends the tail of `meson-log.txt` (the whole file and
 `config.log` are in the `macos-build-logs` artifact).
 

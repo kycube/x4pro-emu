@@ -110,7 +110,8 @@ def _shot(name, tmp_path, label):
 
 def _install_through_the_ui(s, lic):
     """Bookshelf -> drawer -> All files -> probe.xtapp -> "Install this package?" -> OK, with the
-    dialog and the "Installed" toast against their goldens and the DEK-unwrap cache mark."""
+    dialog and the "Installed" toast against their goldens, the DEK-unwrap cache mark, and the
+    installed copy on the card."""
     x4emu(s.name, 'wait-refresh', '--total', 1, '--timeout', 90)
     settle(s.name, 2, 60)
     tap(s.name, *HAMBURGER); settle(s.name, 1.2, 60)
@@ -128,26 +129,15 @@ def _install_through_the_ui(s, lic):
     # rejected (wrong key/endianness/layout) -- the direct proof the key wrap verified.
     cache = _dek_cache(s.name, lic.tag)
     assert cache == b'DEK1prob', f'DEK-unwrap cache is {cache!r}, not the "DEK1"+app_id success mark'
-
-
-def test_licorice_package_installs_through_the_ui(request, tmp_path, licorice_card, licorice):
-    if not os.path.exists(xtapp.LICORICE_IMAGE):
-        pytest.skip(f'{xtapp.LICORICE_IMAGE} not available (the Licorice device key source)')
-    with booted(request, tmp_path, licorice_card, dump=licorice.dump, prepare=_prepare,
-                icount=SKIP_IDLE) as s:
-        _install_through_the_ui(s, licorice)
-        # and the installer copied the package into /sdcard/XTApps/<app_id>/, verbatim (the code
-        # section stays encrypted at rest: it is decrypted in RAM at every launch)
-        listing = subprocess.run(['mdir', '-i', f'{s.sd}@@{FAT_OFFSET}', '-b', '::/XTApps/probe'],
-                                 capture_output=True, text=True).stdout
-        assert 'app.xtapp' in listing.lower(), f'/XTApps/probe after install: {listing!r}'
-        back = tmp_path / 'installed.xtapp'
-        subprocess.run(['mcopy', '-i', f'{s.sd}@@{FAT_OFFSET}', '-o', '::/XTApps/probe/app.xtapp',
-                        str(back)], check=True)
-        subprocess.run(['mcopy', '-i', f'{s.sd}@@{FAT_OFFSET}', '-o', '::/probe.xtapp',
-                        str(tmp_path / 'source.xtapp')], check=True)
-        assert back.read_bytes() == (tmp_path / 'source.xtapp').read_bytes(), \
-            'the installed app.xtapp is not the package byte for byte'
+    # the installer copied the package into /sdcard/XTApps/<app_id>/, verbatim (the code section
+    # stays encrypted at rest: it is decrypted in RAM at every launch)
+    img = f'{s.sd}@@{FAT_OFFSET}'
+    listing = subprocess.run(['mdir', '-i', img, '-b', '::/XTApps/probe'], capture_output=True, text=True).stdout
+    assert 'app.xtapp' in listing.lower(), f'/XTApps/probe after install: {listing!r}'
+    back, src = s.tmp / 'installed.xtapp', s.tmp / 'source.xtapp'
+    subprocess.run(['mcopy', '-i', img, '-o', '::/XTApps/probe/app.xtapp', str(back)], check=True)
+    subprocess.run(['mcopy', '-i', img, '-o', '::/probe.xtapp', str(src)], check=True)
+    assert back.read_bytes() == src.read_bytes(), 'the installed app.xtapp is not the package byte for byte'
 
 
 def _lua_nav(flash):

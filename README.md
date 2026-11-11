@@ -47,7 +47,7 @@ macOS or Linux; paths must not contain spaces.
 ```bash
 make setup      # Python venv, Espressif QEMU at a pinned commit + qemu-patches/, CrossPoint submodule
 make build      # qemu-system-xtensa, the panel models, CrossPoint's x4pro image
-make test       # model unit tests, fixture replays, ~276 pytest cases on parallel workers (~2 min)
+make test       # model unit tests, fixture replays, ~290 pytest cases on parallel workers (~2 min)
 ```
 
 Packages: git, ninja, meson, pkg-config, glib, pixman, libgcrypt, libslirp, libpng, mtools,

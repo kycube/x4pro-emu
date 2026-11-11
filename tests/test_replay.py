@@ -1,6 +1,6 @@
 """S4 / D3: `x4emu record` an input script, `x4emu replay` it, and land on the same pixels.
 
-The flow is the one `tests/test_touch_reader.py` walks by hand — boot CrossPoint, tap "Browse
+The flow is the start of the one `tests/test_device_screenshot.py` walks by hand — boot CrossPoint, tap "Browse
 Files" on the Home menu, come back with the Home pad — but recorded into a journal and replayed
 onto two freshly booted instances. All three runs use `run --deterministic --icount shift=3,sleep=off`
 (guest time follows the instruction count, so the same instruction stream reaches Home at the same

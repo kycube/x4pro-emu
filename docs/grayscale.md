@@ -92,8 +92,8 @@ Source: `src/activities/reader/EpubReaderActivity.cpp` (`renderGrayscalePass`, t
 4. **Restore**: DTM1 and DTM2 = the recovered base (`plane0 & plane1`), no refresh; the next B/W page
    is a Fast paint with DTM1 = ~frame (`_redriveAfterGray`), i.e. an OTP DU that drives every pixel.
 
-Emulator trace of exactly that (`x4emu run … --fast-epd --trace-epd`, the `test_touch_reader.py`
-flow: Home → Browse Files → the test book; guest seconds, first bytes):
+Emulator trace of exactly that (`x4emu run … --fast-epd --trace-epd`, the book walk of
+`test_device_screenshot.py::test_reader_pages_match_device_screenshots`: Home → Browse Files → the test book; guest seconds, first bytes):
 
 ```
  9.987  0x10 60000   ff…        DTM1 = white seed          (first AA page: OTP GC base)

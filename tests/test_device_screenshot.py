@@ -1,14 +1,18 @@
 """Oracle: the screenshot the real X4 Pro wrote to its card (CrossPoint 1.6.0, home screen,
 100% and charging, docs/device/screenshots/screenshot-3824.bmp) must be reproduced pixel for
-pixel by the emulator once the battery state matches."""
+pixel by the emulator once the battery state matches. The home test is also the plain boot check
+(the upstream watch's smoke test, docs/upstream.md), the reader test the book walk."""
 import os
-from conftest import x4emu, ROOT, BROWSE_FILES, boot_crosspoint, count_pixels, open_test_book
+from conftest import x4emu, ROOT, BROWSE_FILES, boot_crosspoint, count_pixels, emu_state, open_test_book, wait_log
 
 DEVICE_BMP = os.path.join(ROOT, 'tests', 'golden', 'device-home-screenshot-3824.bmp')
 
 
 def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
     boot_crosspoint(emu, images, quiet_s=2)
+    st = emu_state(emu)
+    assert st['panel'] == 'uc8279'                   # the default: the desk unit's panel
+    assert st['epd_unknown_cmds'] == 0, st
     # as booted: default gauge 63%, not charging -> only the status bar differs
     r = x4emu(emu, 'screenshot', str(tmp_path / 'home-63.png'), '--diff', DEVICE_BMP, check=False)
     pct = float(r.stdout.split('%')[0].split()[-1])
@@ -30,8 +34,8 @@ def test_home_screen_matches_device_screenshot(images, emu, tmp_path):
 # BMP is the firmware's 1-bit base frame (every anti-aliased glyph pixel black), so the emulator's
 # page is compared as its base frame too: any ink -> black. The only pixels that then differ are
 # the footer clock digits (the device's time against the emulator's): landscape x 780..792,
-# y 404..461 in the first comparison (307 pixels); that box is masked. The walk to page 1 is
-# test_touch_reader's, which also covers it when a golden here drifts (--golden-drift, conftest.py).
+# y 404..461 in the first comparison (307 pixels); that box is masked. The same test walks the book
+# (Right pages forward, the Home pad leaves it) and asserts that before the device comparisons.
 DEVICE_PAGE1 = os.path.join(ROOT, 'tests', 'golden', 'device-reader-page1-16905.bmp')
 DEVICE_PAGE2 = os.path.join(ROOT, 'tests', 'golden', 'device-reader-page2-47729.bmp')
 CLOCK_BOX = (770, 396, 800, 470)     # landscape box around the portrait footer clock
@@ -54,16 +58,21 @@ def base_frame_diff(emu_png, device_bmp, mask=CLOCK_BOX):
 
 def test_reader_pages_match_device_screenshots(images, emu, tmp_path):
     boot_crosspoint(emu, images)
-    open_test_book(emu, tmp_path)
-    p1 = tmp_path / 'page1.png'
-    x4emu(emu, 'screenshot', str(p1))
-    n1 = base_frame_diff(p1, DEVICE_PAGE1)
+    open_test_book(emu, tmp_path)            # two taps: Browse Files on Home, the book's row
+    pages = [tmp_path / f'page{n}.png' for n in (1, 2, 3)]
+    x4emu(emu, 'screenshot', str(pages[0]))
+    for prev, cur in zip(pages, pages[1:]):  # Right pages forward: every page differs from the last
+        x4emu(emu, 'press', 'right', '--wait', 20)
+        x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
+        r = x4emu(emu, 'screenshot', str(cur), '--diff', str(prev), check=False)
+        assert r.returncode == 1, r.stdout
+    # the Home pad leaves the book (its second "Entering activity: Home"; the first is the boot's)
+    x4emu(emu, 'home', '--wait', 20)
+    wait_log(emu, 'Entering activity: Home', count=2)
+    # the device's own pages, last, so a drifting golden (--golden-drift) still reports the walk above
+    n1 = base_frame_diff(pages[0], DEVICE_PAGE1)
     assert n1 == 0, f'page 1 differs from the device screenshot in {n1} pixels outside the clock'
-    x4emu(emu, 'press', 'right', '--wait', 20)
-    x4emu(emu, 'wait-quiet', '--seconds', 1.5, '--timeout', 60)
-    p2 = tmp_path / 'page2.png'
-    x4emu(emu, 'screenshot', str(p2))
-    n2 = base_frame_diff(p2, DEVICE_PAGE2)
+    n2 = base_frame_diff(pages[1], DEVICE_PAGE2)
     assert n2 == 0, f'page 2 differs from the device screenshot in {n2} pixels outside the clock'
     # the wrong page must not match: the oracle is discriminating
-    assert base_frame_diff(p2, DEVICE_PAGE1) > 10000
+    assert base_frame_diff(pages[1], DEVICE_PAGE1) > 10000
